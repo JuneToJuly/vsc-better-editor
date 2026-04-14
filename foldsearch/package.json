@@ -1,0 +1,29 @@
+{
+  "name": "foldsearch",
+  "displayName": "FoldSearch",
+  "version": "0.0.6",
+  "publisher": "ian.thomas",
+  "engines": { "vscode": "^1.90.0" },
+  "activationEvents": [
+    "onCommand:foldsearch.search",
+    "onCommand:foldsearch.toggle",
+    "onCommand:foldsearch.down",
+    "onCommand:foldsearch.up",
+    "onCommand:foldsearch.accessor",
+    "onCommand:foldsearch.mutator",
+    "onCommand:foldsearch.word"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "foldsearch.search", "title": "FoldSearch: Search" },
+      { "command": "foldsearch.last", "title": "FoldSearch: Last" },
+      { "command": "foldsearch.accessor", "title": "FoldSearch: Accessor" },
+      { "command": "foldsearch.mutator", "title": "FoldSearch: Mutator" },
+      { "command": "foldsearch.toggle", "title": "FoldSearch: Toggle Folds" },
+      { "command": "foldsearch.word", "title": "FoldSearch: Word at Cursor" },
+      { "command": "foldsearch.down", "title": "FoldSearch: Move Down (Visible)" },
+      { "command": "foldsearch.up", "title": "FoldSearch: Move Up (Visible)" }
+    ]
+  }
+}

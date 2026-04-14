@@ -1,0 +1,88 @@
+{
+  "name": "window-search",
+  "displayName": "Window Search",
+  "description": "Context-based multi-line search with navigation and preview",
+  "version": "0.0.1",
+  "publisher": "ian Thomas",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+"enabledApiProposals": ["findTextInFiles"],
+  "activationEvents": [
+    "onCommand:windowSearch.run",
+    "onCommand:windowSearch.increaseWindow",
+    "onCommand:windowSearch.decreaseWindow"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "windowSearch.run",
+        "title": "Window Search: Run"
+      },
+      {
+        "command": "windowSearch.increaseWindow",
+        "title": "Window Search: Increase Window Size"
+      },
+      {
+        "command": "windowSearch.decreaseWindow",
+        "title": "Window Search: Decrease Window Size"
+      },
+      {
+        "command": "windowSearch.setWindowSize",
+        "title": "Window Search: Set Window Size"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "windowSearch.increaseWindow",
+        "key": "ctrl+alt+=",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "windowSearch.decreaseWindow",
+        "key": "ctrl+alt+-",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Window Search",
+      "properties": {
+        "windowSearch.windowSize": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Default window size (number of lines) for context search"
+        },
+        "windowSearch.termHighlightColor": {
+          "type": "string",
+          "default": "rgba(255, 200, 0, 0.6)",
+          "description": "Highlight color for matched terms in the editor"
+        },
+        "windowSearch.windowHighlightColor": {
+          "type": "string",
+          "default": "rgba(255, 255, 0, 0.15)",
+          "description": "Background color for highlighted window block"
+        },
+        "windowSearch.include": {
+          "type": "string",
+          "default": "**/*.{java,kt}",
+          "description": "Glob pattern for files to include in search"
+        },
+        "windowSearch.exclude": {
+          "type": "string",
+          "default": "**/{node_modules,.git,build,out}/**",
+          "description": "Glob pattern for files to exclude from search"
+        },
+        "windowSearch.windowHighlightBorder": {
+          "type": "string",
+          "default": "1px solid rgba(255,255,0,0.4)",
+          "description": "Border style for highlighted window block"
+        }
+      }
+    }
+  }
+}

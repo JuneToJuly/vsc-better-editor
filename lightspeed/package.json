@@ -1,0 +1,16 @@
+{
+  "name": "lightspeed",
+  "displayName": "LightSpeed",
+  "version": "0.0.6",
+  "publisher": "ian.thomas",
+  "engines": { "vscode": "^1.90.0" },
+  "activationEvents": [
+    "onCommand:lightspeed.start"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "lightspeed.start", "title": "LightSpeed: Start" }
+    ]
+  }
+}

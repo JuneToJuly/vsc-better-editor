@@ -1,0 +1,46 @@
+{
+  "name": "copy-copy",
+  "displayName": "Copy Copy",
+  "publisher": "Ian Thomas",
+  "description": "Clipboard history with keyboard-driven UI",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:copycopy.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copycopy.open",
+        "title": "Copy Copy: Open"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "copycopy.open",
+        "key": "ctrl+;",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "copycopy",
+      "properties": {
+        "killRing.maxEntries": {
+          "type": "number",
+          "default": 50
+        },
+        "killRing.pollInterval": {
+          "type": "number",
+          "default": 400
+        }
+      }
+    }
+  }
+}

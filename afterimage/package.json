@@ -1,0 +1,16 @@
+{
+  "name": "recent-code-chunks",
+  "displayName": "Recent Code Chunks",
+  "description": "Jump to recently visited code chunks (5-line context) with search.",
+  "version": "1.0.0",
+  "publisher": "Ian Thomas",
+  "engines": { "vscode": "^1.80.0" },
+  "activationEvents": ["*"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "recentChunks.show", "title": "Show Recent Code Chunks" },      
+      { "command": "recentEdits.show", "title": "Show Recent Edit Locations" }
+    ]
+  }
+}
