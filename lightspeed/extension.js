@@ -63,7 +63,7 @@ function activate(context) {
         // 🔥 SPACE = CONFIRM
         if (value.endsWith(' ') || value.endsWith(';')) {
           inputBox.hide();
-          executeJump(value.trim());
+          executeJump(value.trim().replace(";", ""));
         }
       });
 
