@@ -1,0 +1,138 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "Modern Glass Orokin Light",
+  "type": "light",
+  "semanticHighlighting": true,
+  "colors": {
+    "editor.background": "#f8fafc",
+    "editor.foreground": "#1e293b",
+    "editorLineNumber.foreground": "#94a3b8",
+    "editorLineNumber.activeForeground": "#3b82f6",
+    "editorCursor.foreground": "#06b6d4",
+    "editor.selectionBackground": "#bfdbfe88",
+    "editor.inactiveSelectionBackground": "#dbeafe66",
+    "editor.lineHighlightBackground": "#f1f5f9",
+    "editor.findMatchBackground": "#60a5fa66",
+    "editor.findMatchHighlightBackground": "#06b6d433",
+    "editor.wordHighlightBackground": "#06b6d422",
+    "editor.wordHighlightStrongBackground": "#3b82f633",
+    "editorBracketMatch.border": "#60a5fa",
+    "editorBracketMatch.background": "#dbeafe",
+    "activityBar.background": "#ffffff",
+    "activityBar.foreground": "#334155",
+    "activityBar.inactiveForeground": "#94a3b8",
+    "activityBar.border": "#dbe3ec",
+    "activityBarBadge.background": "#06b6d4",
+    "activityBarBadge.foreground": "#ffffff",
+    "sideBar.background": "#ffffff",
+    "sideBar.foreground": "#334155",
+    "sideBar.border": "#e2e8f0",
+    "sideBarTitle.foreground": "#475569",
+    "sideBarSectionHeader.background": "#f8fafc",
+    "sideBarSectionHeader.foreground": "#64748b",
+    "list.activeSelectionBackground": "#dbeafe",
+    "list.activeSelectionForeground": "#1e3a8a",
+    "list.hoverBackground": "#f1f5f9",
+    "list.highlightForeground": "#06b6d4",
+    "titleBar.activeBackground": "#ffffff",
+    "titleBar.activeForeground": "#1e293b",
+    "titleBar.border": "#e2e8f0",
+    "tab.activeBackground": "#ffffff",
+    "tab.activeForeground": "#1e293b",
+    "tab.inactiveBackground": "#f8fafc",
+    "tab.inactiveForeground": "#94a3b8",
+    "tab.activeBorderTop": "#06b6d4",
+    "tab.border": "#e2e8f0",
+    "statusBar.background": "#3b82f6",
+    "statusBar.foreground": "#ffffff",
+    "statusBar.border": "#2563eb",
+    "panel.background": "#ffffff",
+    "panel.border": "#e2e8f0",
+    "panelTitle.activeForeground": "#334155",
+    "panelTitle.activeBorder": "#3b82f6",
+    "button.background": "#3b82f6",
+    "button.foreground": "#ffffff",
+    "button.hoverBackground": "#2563eb",
+    "input.background": "#ffffff",
+    "input.foreground": "#1e293b",
+    "input.border": "#dbe3ec",
+    "dropdown.background": "#ffffff",
+    "dropdown.foreground": "#1e293b",
+    "dropdown.border": "#dbe3ec",
+    "editorSuggestWidget.background": "#ffffff",
+    "editorSuggestWidget.border": "#dbe3ec",
+    "editorSuggestWidget.selectedBackground": "#f1f5f9",
+    "editorHoverWidget.background": "#ffffff",
+    "editorHoverWidget.border": "#dbe3ec",
+    "terminal.background": "#f8fafc",
+    "terminal.foreground": "#1e293b",
+    "terminalCursor.foreground": "#06b6d4",
+    "badge.background": "#06b6d4",
+    "badge.foreground": "#ffffff",
+    "scrollbarSlider.background": "#cbd5e155",
+    "scrollbarSlider.hoverBackground": "#94a3b888",
+    "scrollbarSlider.activeBackground": "#06b6d488"
+  },
+  "tokenColors": [
+    {
+      "scope": [
+        "comment"
+      ],
+      "settings": {
+        "foreground": "#94a3b8",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage"
+      ],
+      "settings": {
+        "foreground": "#2563eb"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class"
+      ],
+      "settings": {
+        "foreground": "#0284c7"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function"
+      ],
+      "settings": {
+        "foreground": "#06b6d4"
+      }
+    },
+    {
+      "scope": [
+        "string"
+      ],
+      "settings": {
+        "foreground": "#0f766e"
+      }
+    },
+    {
+      "scope": [
+        "constant.numeric"
+      ],
+      "settings": {
+        "foreground": "#d97706"
+      }
+    },
+    {
+      "scope": [
+        "variable"
+      ],
+      "settings": {
+        "foreground": "#1e293b"
+      }
+    }
+  ]
+}

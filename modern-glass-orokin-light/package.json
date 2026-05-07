@@ -1,0 +1,22 @@
+{
+  "name": "modern-glass-orokin-light",
+  "displayName": "Modern Glass Orokin Light",
+  "description": "A soft modern glass-inspired light VS Code theme with blue and cyan accents.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Modern Glass Orokin Light",
+        "uiTheme": "vs",
+        "path": "./themes/modern-glass-orokin-light-color-theme.json"
+      }
+    ]
+  }
+}
