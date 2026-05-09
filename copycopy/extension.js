@@ -104,13 +104,12 @@ function openKillRingWebview(context) {
 
         if (message.command === 'paste') {
 
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
-
             const index = message.index;
             const text = killRing[index];
 
-            // 🔥 promote
+            if (!text) return;
+
+            // promote selected entry to top of kill ring
             if (index !== 0) {
                 killRing.splice(index, 1);
                 killRing.unshift(text);
@@ -118,26 +117,15 @@ function openKillRingWebview(context) {
 
             cycleIndex = 0;
 
-            const position = editor.selection.active;
-            const line = editor.document.lineAt(position.line);
-            const insertPosition = line.range.end;
+            // load into VS Code/system clipboard
+            await vscode.env.clipboard.writeText(text);
+            lastClipboard = text;
 
-            const cleanText = text.replace(/^\n+/, '');
-            const insertText = '\n' + cleanText;
+            vscode.window.setStatusBarMessage(
+                `Yanked ${text.split(/\r?\n/).length} line(s)`,
+                1500
+            );
 
-            await editor.edit(editBuilder => {
-                editBuilder.insert(insertPosition, insertText);
-            });
-
-            // 🔥 compute range of inserted text
-            const start = new vscode.Position(position.line + 1, 0);
-            const end = new vscode.Position(position.line + 1 + cleanText.split('\n').length - 1, cleanText.split('\n').slice(-1)[0].length);
-
-            lastPasteRange = new vscode.Range(start, end);
-            lastPasteEditor = editor;
-
-            editor.selection = new vscode.Selection(start, start);
-            editor.revealRange(lastPasteRange);
             panel.dispose();
         }
         if (message.command === 'close') {
