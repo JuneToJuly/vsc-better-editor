@@ -1,134 +1,4 @@
-async function runRipgrep(terms, windowSize) {
-    return new Promise((resolve, reject) => {
-
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceFolder) return reject('No workspace folder');
-
-        const pattern = terms.map(escapeRegex).join('|');
-
-        const args = [
-            '--json',
-            '--ignore-case',
-            pattern,
-            '.'
-        ];
-
-        const rg = spawn('rg', args, { cwd: workspaceFolder });
-
-        let buffer = '';
-        rg.stdout.on('data', chunk => buffer += chunk.toString());
-
-        let stderrBuffer = '';
-        rg.stderr.on('data', chunk => stderrBuffer += chunk.toString());
-
-        rg.on('error', reject);
-
-        rg.on('close', async () => {
-
-            if (stderrBuffer) {
-                console.warn(stderrBuffer);
-            }
-
-            const fileMap = new Map();
-
-            // 🔥 Collect match lines WITH TERM INFO
-            for (const line of buffer.split('\n')) {
-                if (!line.trim()) continue;
-
-                try {
-                    const obj = JSON.parse(line);
-
-                    if (obj.type === 'match') {
-                        const file = path.resolve(workspaceFolder, obj.data.path.text);
-                        const lineNum = obj.data.line_number - 1;
-
-                        const text = obj.data.lines.text.toLowerCase();
-
-                        if (!fileMap.has(file)) fileMap.set(file, []);
-
-                        for (const term of terms) {
-                            if (text.includes(term)) {
-                                fileMap.get(file).push({
-                                    line: lineNum,
-                                    term
-                                });
-                            }
-                        }
-                    }
-
-                } catch (e) {
-                    // swallow or count errors, don't spam console
-                }
-            }
-
-            const results = [];
-
-            // 🔥 Build windows using TERM-AWARE coverage
-            for (const [file, matches] of fileMap.entries()) {
-
-                const doc = await vscode.workspace.openTextDocument(file);
-                const allLines = doc.getText().split(/\r?\n/);
-
-                // sort matches by line
-                matches.sort((a, b) => a.line - b.line);
-
-                const candidateWindows = [];
-
-                for (const match of matches) {
-
-                    const start = Math.max(0, match.line - Math.floor(windowSize / 2));
-                    const end = Math.min(allLines.length, start + windowSize);
-
-                    const coveredTerms = new Set();
-
-                    // 🔥 check coverage using MATCH POSITIONS (not strings)
-                    for (const m of matches) {
-                        if (m.line >= start && m.line < end) {
-                            coveredTerms.add(m.term);
-                        }
-                    }
-
-                    if (coveredTerms.size !== terms.length) continue;
-
-                    candidateWindows.push({ start, end });
-                }
-
-                // 🔥 Merge overlapping windows
-                candidateWindows.sort((a, b) => a.start - b.start);
-
-                const merged = [];
-
-                for (const win of candidateWindows) {
-                    if (merged.length === 0) {
-                        merged.push({ ...win });
-                        continue;
-                    }
-
-                    const last = merged[merged.length - 1];
-
-                    if (win.start <= last.end) {
-                        last.end = Math.max(last.end, win.end);
-                    } else {
-                        merged.push({ ...win });
-                    }
-                }
-
-                // 🔥 Build final results
-                for (const win of merged) {
-                    const windowLines = allLines.slice(win.start, win.end);
-
-                    results.push({
-                        file,
-                        startLine: win.start,
-                        preview: windowLines
-                    });
-                }
-            }
-
-            resolve(results);
-        });
-    });
-}const vscode = require('vscode');
+const vscode = require('vscode');
 const { spawn } = require('child_process');
 const path = require('path');
 
@@ -151,7 +21,7 @@ function activate(context) {
             backgroundColor: windowColor,
             border: windowBorder
         });
-        // 🔥 Capture original editor group BEFORE modal opens
+        //  Capture original editor group BEFORE modal opens
         const originalColumn = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : vscode.ViewColumn.One;
@@ -689,133 +559,165 @@ function escapeRegex(s) {
 }
 
 async function runRipgrep(terms, windowSize) {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceFolder) throw new Error('No workspace folder');
+
+    let candidateFiles = null;
+    const fileMap = new Map();
+
+    for (const term of terms) {
+        const termMatches = await runRipgrepForTerm(
+            workspaceFolder,
+            term,
+            candidateFiles
+        );
+
+        const matchedFiles = new Set(termMatches.keys());
+
+        if (candidateFiles === null) {
+            candidateFiles = matchedFiles;
+        } else {
+            candidateFiles = new Set(
+                [...candidateFiles].filter(file => matchedFiles.has(file))
+            );
+        }
+
+        for (const [file, lines] of termMatches.entries()) {
+            if (!candidateFiles.has(file)) continue;
+
+            if (!fileMap.has(file)) fileMap.set(file, []);
+
+            for (const line of lines) {
+                fileMap.get(file).push({
+                    line,
+                    term
+                });
+            }
+        }
+
+        if (candidateFiles.size === 0) {
+            return [];
+        }
+    }
+
+    const results = [];
+
+    for (const [file, matches] of fileMap.entries()) {
+        if (!candidateFiles.has(file)) continue;
+
+        const doc = await vscode.workspace.openTextDocument(file);
+        const allLines = doc.getText().split(/\r?\n/);
+
+        matches.sort((a, b) => a.line - b.line);
+
+        const candidateWindows = [];
+
+        for (const match of matches) {
+            const start = Math.max(0, match.line - Math.floor(windowSize / 2));
+            const end = Math.min(allLines.length, start + windowSize);
+
+            const coveredTerms = new Set();
+
+            for (const m of matches) {
+                if (m.line >= start && m.line < end) {
+                    coveredTerms.add(m.term);
+                }
+            }
+
+            if (coveredTerms.size === terms.length) {
+                candidateWindows.push({ start, end });
+            }
+        }
+
+        candidateWindows.sort((a, b) => a.start - b.start);
+
+        const merged = [];
+
+        for (const win of candidateWindows) {
+            if (merged.length === 0) {
+                merged.push({ ...win });
+                continue;
+            }
+
+            const last = merged[merged.length - 1];
+
+            if (win.start <= last.end) {
+                last.end = Math.max(last.end, win.end);
+            } else {
+                merged.push({ ...win });
+            }
+        }
+
+        for (const win of merged) {
+            results.push({
+                file,
+                startLine: win.start,
+                preview: allLines.slice(win.start, win.end)
+            });
+        }
+    }
+
+    return results;
+}
+
+function runRipgrepForTerm(workspaceFolder, term, candidateFiles) {
     return new Promise((resolve, reject) => {
-
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceFolder) return reject('No workspace folder');
-
-        const pattern = terms.map(escapeRegex).join('|');
-
         const args = [
             '--json',
             '--ignore-case',
-            pattern,
-            '.'
+            escapeRegex(term)
         ];
+
+        if (candidateFiles && candidateFiles.size > 0) {
+            for (const file of candidateFiles) {
+                args.push(path.relative(workspaceFolder, file));
+            }
+        } else {
+            args.push('.');
+        }
 
         const rg = spawn('rg', args, { cwd: workspaceFolder });
 
         let buffer = '';
-        rg.stdout.on('data', chunk => buffer += chunk.toString());
-
         let stderrBuffer = '';
-        rg.stderr.on('data', chunk => stderrBuffer += chunk.toString());
 
+        rg.stdout.on('data', chunk => buffer += chunk.toString());
+        rg.stderr.on('data', chunk => stderrBuffer += chunk.toString());
         rg.on('error', reject);
 
-        rg.on('close', async () => {
-
+        rg.on('close', () => {
             if (stderrBuffer) {
                 console.warn(stderrBuffer);
             }
 
-            const fileMap = new Map();
+            const matchesByFile = new Map();
 
-            // 🔥 Collect match lines WITH TERM INFO
             for (const line of buffer.split('\n')) {
                 if (!line.trim()) continue;
 
                 try {
                     const obj = JSON.parse(line);
 
-                    if (obj.type === 'match') {
-                        const file = path.resolve(workspaceFolder, obj.data.path.text);
-                        const lineNum = obj.data.line_number - 1;
+                    if (obj.type !== 'match') continue;
 
-                        const text = obj.data.lines.text.toLowerCase();
+                    const file = path.resolve(
+                        workspaceFolder,
+                        obj.data.path.text
+                    );
 
-                        if (!fileMap.has(file)) fileMap.set(file, []);
+                    const lineNum = obj.data.line_number - 1;
 
-                        for (const term of terms) {
-                            if (text.includes(term)) {
-                                fileMap.get(file).push({
-                                    line: lineNum,
-                                    term
-                                });
-                            }
-                        }
+                    if (!matchesByFile.has(file)) {
+                        matchesByFile.set(file, []);
                     }
 
-                } catch (e) {
-                    // swallow or count errors, don't spam console
+                    matchesByFile.get(file).push(lineNum);
+                } catch {
+                    // ignore malformed rg json lines
                 }
             }
 
-            const results = [];
-
-            // 🔥 Build windows using TERM-AWARE coverage
-            for (const [file, matches] of fileMap.entries()) {
-
-                const doc = await vscode.workspace.openTextDocument(file);
-                const allLines = doc.getText().split(/\r?\n/);
-
-                // sort matches by line
-                matches.sort((a, b) => a.line - b.line);
-
-                const candidateWindows = [];
-
-                for (const match of matches) {
-
-                    const start = Math.max(0, match.line - Math.floor(windowSize / 2));
-                    const end = Math.min(allLines.length, start + windowSize);
-
-                    const coveredTerms = new Set();
-
-                    // 🔥 check coverage using MATCH POSITIONS (not strings)
-                    for (const m of matches) {
-                        if (m.line >= start && m.line < end) {
-                            coveredTerms.add(m.term);
-                        }
-                    }
-
-                    if (coveredTerms.size !== terms.length) continue;
-
-                    candidateWindows.push({ start, end });
-                }
-
-                // 🔥 Merge overlapping windows
-                candidateWindows.sort((a, b) => a.start - b.start);
-
-                const merged = [];
-
-                for (const win of candidateWindows) {
-                    if (merged.length === 0) {
-                        merged.push({ ...win });
-                        continue;
-                    }
-
-                    const last = merged[merged.length - 1];
-
-                    if (win.start <= last.end) {
-                        last.end = Math.max(last.end, win.end);
-                    } else {
-                        merged.push({ ...win });
-                    }
-                }
-
-                // 🔥 Build final results
-                for (const win of merged) {
-                    const windowLines = allLines.slice(win.start, win.end);
-
-                    results.push({
-                        file,
-                        startLine: win.start,
-                        preview: windowLines
-                    });
-                }
-            }
-
-            resolve(results);
+            resolve(matchesByFile);
         });
     });
 }
