@@ -1,6 +1,12 @@
 const vscode = require('vscode');
+
 let pendingRegion = null;
+
 function activate(context) {
+  const EDIT_DEBOUNCE_DELAY = 1000;
+
+  let pendingEditsByDocument = new Map();
+  let editTimersByDocument = new Map();
   const RANGE_RADIUS = 3;
   const MAX_HISTORY = 200;
   const IDLE_DELAY = 500;
@@ -13,13 +19,32 @@ function activate(context) {
   let recentRegions = [];
   let recentEdits = [];
 
+  let documentSnapshots = new Map();
+
   let lastPos = null;
   let lastUri = null;
   let lastMoveTime = 0;
   let recordedSinceStop = false;
 
   // -------------------------------
-  // Track idle cursor positions
+  // Capture initial document snapshots
+  for (const doc of vscode.workspace.textDocuments) {
+    documentSnapshots.set(doc.uri.toString(), doc.getText());
+  }
+
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(doc => {
+      documentSnapshots.set(doc.uri.toString(), doc.getText());
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument(doc => {
+      documentSnapshots.delete(doc.uri.toString());
+    })
+  );
+
+  // -------------------------------
   // Track idle cursor positions with horizontal confirm
   setInterval(() => {
     const editor = vscode.window.activeTextEditor;
@@ -36,27 +61,23 @@ function activate(context) {
 
     if (moved) {
 
-      // 🔥 If we had a pending region, decide what to do
       if (pendingRegion && lastPos) {
-
         const sameFile = uri === pendingRegion.uri;
         const sameLine = pos.line === pendingRegion.line;
         const horizontal = pos.character !== lastPos.character;
 
         if (sameFile && sameLine && horizontal) {
-          // ✅ Confirm intent → record normally
           recordRegion(
             editor.document,
             new vscode.Position(
               pendingRegion.line,
-              pos.character   // 🔥 use CURRENT cursor (after move)
+              pos.character
             ),
             recentRegions,
             false
           );
         }
 
-        // ❌ Any other movement cancels it
         pendingRegion = null;
       }
 
@@ -69,7 +90,6 @@ function activate(context) {
 
     const idle = Date.now() - lastMoveTime;
 
-    // 🔥 Mark candidate ONLY (do not record yet)
     if (idle > IDLE_DELAY && !pendingRegion) {
       pendingRegion = {
         uri,
@@ -79,6 +99,7 @@ function activate(context) {
     }
 
   }, CHECK_INTERVAL);
+
   // -------------------------------
   // Cleanup old entries
   setInterval(() => {
@@ -88,18 +109,100 @@ function activate(context) {
   }, CLEANUP_INTERVAL);
 
   // -------------------------------
-  // Track edits
+  // Track edits with before/after capture
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(event => {
       const doc = event.document;
+      const uri = doc.uri.toString();
+
+      const beforeText = documentSnapshots.get(uri) ?? '';
+
+      if (!pendingEditsByDocument.has(uri)) {
+        pendingEditsByDocument.set(uri, {
+          doc,
+          beforeText,
+          changes: [],
+          firstStartLine: null,
+          lastEndLine: null,
+          firstCharacter: 0
+        });
+      }
+
+      const pending = pendingEditsByDocument.get(uri);
 
       for (const change of event.contentChanges) {
         const startLine = change.range.start.line;
-        const endLine = change.range.end.line;
-        const pos = new vscode.Position(startLine, 0);
 
-        recordRegion(doc, pos, recentEdits, true, startLine, endLine);
+        const changedLineCount = Math.max(
+          1,
+          change.text.split(/\r?\n/).length
+        );
+
+        const endLine = Math.min(
+          doc.lineCount - 1,
+          startLine + changedLineCount - 1
+        );
+
+        pending.changes.push(change);
+
+        if (pending.firstStartLine === null || startLine < pending.firstStartLine) {
+          pending.firstStartLine = startLine;
+          pending.firstCharacter = change.range.start.character;
+        }
+
+        if (pending.lastEndLine === null || endLine > pending.lastEndLine) {
+          pending.lastEndLine = endLine;
+        }
       }
+
+      documentSnapshots.set(uri, doc.getText());
+
+      const existingTimer = editTimersByDocument.get(uri);
+      if (existingTimer) clearTimeout(existingTimer);
+
+      const timer = setTimeout(() => {
+        const pending = pendingEditsByDocument.get(uri);
+        if (!pending) return;
+
+        const currentDoc = pending.doc;
+        const currentText = currentDoc.getText();
+
+        const startLine = pending.firstStartLine ?? 0;
+        const endLine = pending.lastEndLine ?? startLine;
+
+        const before = getChangedLineBlockFromSnapshot(
+          pending.beforeText,
+          startLine,
+          endLine
+        );
+
+        const after = getChangedLineBlockFromSnapshot(
+          currentText,
+          startLine,
+          endLine
+        );
+
+        const pos = new vscode.Position(
+          startLine,
+          pending.firstCharacter ?? 0
+        );
+
+        recordEditRegion(
+          currentDoc,
+          pos,
+          recentEdits,
+          before,
+          after,
+          startLine,
+          endLine
+        );
+
+        pendingEditsByDocument.delete(uri);
+        editTimersByDocument.delete(uri);
+
+      }, EDIT_DEBOUNCE_DELAY);
+
+      editTimersByDocument.set(uri, timer);
     })
   );
 
@@ -116,6 +219,47 @@ function activate(context) {
       showWebview(recentEdits, 'Recent Edit Locations')
     )
   );
+
+  // -------------------------------
+  function getTextFromSnapshot(text, range) {
+    const lines = text.split(/\r?\n/);
+
+    if (range.start.line === range.end.line) {
+      const line = lines[range.start.line] ?? '';
+      return line.slice(range.start.character, range.end.character);
+    }
+
+    const selected = [];
+
+    for (let i = range.start.line; i <= range.end.line; i++) {
+      const line = lines[i] ?? '';
+
+      if (i === range.start.line) {
+        selected.push(line.slice(range.start.character));
+      } else if (i === range.end.line) {
+        selected.push(line.slice(0, range.end.character));
+      } else {
+        selected.push(line);
+      }
+    }
+
+    return selected.join('\n');
+  }
+
+function getChangedLineBlockFromSnapshot(text, startLine, endLine) {
+  const lines = text.split(/\r?\n/);
+
+  const safeStart = Math.max(0, startLine);
+  const safeEnd = Math.min(lines.length - 1, endLine);
+
+  const selected = [];
+
+  for (let i = safeStart; i <= safeEnd; i++) {
+    selected.push(lines[i] ?? '');
+  }
+
+  return selected.join('\n');
+}
 
   // -------------------------------
   function recordRegion(doc, pos, targetList, isEdit = false, startOverride, endOverride) {
@@ -155,12 +299,44 @@ function activate(context) {
   }
 
   // -------------------------------
+  function recordEditRegion(doc, pos, targetList, before, after, startOverride, endOverride) {
+    const uri = doc.uri.toString();
+    const center = pos.line;
+
+    const start = startOverride ?? center;
+    const end = endOverride ?? center;
+
+    const lines = [];
+    for (let i = start; i <= end; i++) {
+      try { lines.push(doc.lineAt(i).text); } catch { break; }
+    }
+
+    targetList.unshift({
+      uri,
+      file: vscode.workspace.asRelativePath(doc.uri),
+      start,
+      end,
+      lines,
+      before,
+      after,
+      character: pos.character,
+      updated: Date.now()
+    });
+
+    targetList.sort((a, b) => b.updated - a.updated);
+    if (targetList.length > MAX_HISTORY) targetList.pop();
+  }
+
+  // -------------------------------
   function mapToWindowResults(list) {
     return list.map(r => ({
       file: r.file,
       fullUri: r.uri,
       startLine: r.start,
-      preview: r.lines
+      preview: r.lines,
+      before: r.before,
+      after: r.after,
+      character: r.character
     }));
   }
 
@@ -242,8 +418,6 @@ function activate(context) {
 
     panel.webview.onDidReceiveMessage(async (message) => {
 
-      // -------------------------
-      // PREVIEW
       if (message.command === 'preview') {
         const uri = vscode.Uri.parse(message.fullUri);
 
@@ -267,16 +441,21 @@ function activate(context) {
         if (lastLine === message.line) return;
         lastLine = message.line;
 
-        const lineStart = new vscode.Position(message.line, 0);
         const targetLine = message.line + Math.floor(message.windowSize / 2);
 
+        const safeTargetLine = Math.min(
+          editor.document.lineCount - 1,
+          Math.max(0, targetLine)
+        );
+
         const start = new vscode.Position(
-          targetLine,
+          safeTargetLine,
           message.character ?? 0
         );
+
         const lineEnd = new vscode.Position(
-          message.line,
-          editor.document.lineAt(message.line).text.length
+          safeTargetLine,
+          editor.document.lineAt(safeTargetLine).text.length
         );
 
         clearHighlights();
@@ -284,8 +463,6 @@ function activate(context) {
         editor.setDecorations(windowHighlight, [
           new vscode.Range(start, lineEnd)
         ]);
-
-        clearHighlights();
 
         editor.selection = new vscode.Selection(start, start);
 
@@ -295,8 +472,6 @@ function activate(context) {
         );
       }
 
-      // -------------------------
-      // OPEN (commit)
       if (message.command === 'open') {
         clearHighlights();
 
@@ -318,13 +493,18 @@ function activate(context) {
           });
 
           const targetLine = message.line + Math.floor(message.windowSize / 2);
+
+          const safeTargetLine = Math.min(
+            editor.document.lineCount - 1,
+            Math.max(0, targetLine)
+          );
+
           const pos = new vscode.Position(
-            targetLine,
+            safeTargetLine,
             message.character ?? 0
           );
 
           editor.selection = new vscode.Selection(pos, pos);
-
 
           editor.revealRange(
             new vscode.Range(pos, pos),
@@ -333,8 +513,6 @@ function activate(context) {
         }, 10);
       }
 
-      // -------------------------
-      // CLOSE (escape)
       if (message.command === 'close') {
         clearHighlights();
         await restoreOriginalLocation();
@@ -362,6 +540,52 @@ function activate(context) {
 
     let selected = 0;
     let mode = 'nav';
+    function scrollIntoViewIfNeeded(el) {
+      if (!el) return;
+
+      const rect = el.getBoundingClientRect();
+
+      if (rect.top < 0 || rect.bottom > window.innerHeight) {
+        el.scrollIntoView({
+          block: "center",
+          behavior: "smooth"
+        });
+      }
+    }
+
+    function formatValue(value) {
+      if (value === undefined || value === null || value.length === 0) {
+        return '[empty]';
+      }
+
+      return value;
+    }
+
+    function renderDiff(div, r) {
+      if (r.before === undefined && r.after === undefined) return;
+
+      const diff = document.createElement('div');
+      diff.style.margin = '6px 0';
+      diff.style.padding = '6px';
+      diff.style.background = '#111';
+      diff.style.border = '1px solid #333';
+      diff.style.borderRadius = '4px';
+
+      const before = document.createElement('div');
+      before.textContent = '- ' + formatValue(r.before);
+      before.style.color = '#f48771';
+      before.style.whiteSpace = 'pre-wrap';
+
+      const after = document.createElement('div');
+      after.textContent = '+ ' + formatValue(r.after);
+      after.style.color = '#89d185';
+      after.style.whiteSpace = 'pre-wrap';
+
+      diff.appendChild(before);
+      diff.appendChild(after);
+
+      div.appendChild(diff);
+    }
 
     function render() {
       const root = document.getElementById('results');
@@ -387,6 +611,8 @@ function activate(context) {
 
         div.appendChild(header);
 
+        renderDiff(div, r);
+
         const targetIndex = Math.floor(r.preview.length / 2);
 
         r.preview.forEach((line, idx) => {
@@ -395,9 +621,10 @@ function activate(context) {
           l.textContent = (r.startLine + idx + 1) + '  ' + line;
           l.style.color = '#d4d4d4';
           l.style.padding = '1px 4px';
+          l.style.whiteSpace = 'pre-wrap';
 
           if (idx === targetIndex) {
-            l.style.background = '#264f78';   // VSCode selection blue
+            l.style.background = '#264f78';
             l.style.color = '#ffffff';
             l.style.borderRadius = '3px';
           }
@@ -408,6 +635,8 @@ function activate(context) {
         div.onclick = () => open(i);
         root.appendChild(div);
       });
+      const selectedEl = document.querySelectorAll('#results > div')[selected];
+      scrollIntoViewIfNeeded(selectedEl);
 
       preview();
     }
@@ -440,7 +669,12 @@ function activate(context) {
       value = value.toLowerCase();
 
       filtered = raw.filter(r => {
-        const text = r.preview.join(' ').toLowerCase();
+        const text = [
+          r.preview.join(' '),
+          r.before ?? '',
+          r.after ?? ''
+        ].join(' ').toLowerCase();
+
         return text.includes(value);
       });
 
@@ -450,7 +684,6 @@ function activate(context) {
 
     document.addEventListener('keydown', (e) => {
 
-      // NAV MODE
       if (mode === 'nav') {
 
         if (e.key === '/') {
@@ -482,7 +715,6 @@ function activate(context) {
         }
       }
 
-      // FILTER MODE
       else if (mode === 'filter') {
 
         if (e.key === ';') {
