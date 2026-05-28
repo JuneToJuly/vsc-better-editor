@@ -1,0 +1,104 @@
+{
+  "name": "code-flow-snaps",
+  "displayName": "Code Flow Snaps",
+  "description": "Manually build ordered code flow diagrams from selected code locations.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:codeFlow.snap",
+    "onCommand:codeFlow.show",
+    "onCommand:codeFlow.clear",
+    "onCommand:codeFlow.createFlow",
+    "onCommand:codeFlow.switchFlow",
+    "onCommand:codeFlow.exportFlow"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeFlow.snap",
+        "title": "Code Flow: Snap Selection"
+      },
+      {
+        "command": "codeFlow.show",
+        "title": "Code Flow: Show Flow"
+      },
+      {
+        "command": "codeFlow.clear",
+        "title": "Code Flow: Clear Flow"
+      },
+      {
+        "command": "codeFlow.createFlow",
+        "title": "Code Flow: Create Flow"
+      },
+      {
+        "command": "codeFlow.switchFlow",
+        "title": "Code Flow: Switch Flow"
+      },
+      {
+        "command": "codeFlow.exportFlow",
+        "title": "Code Flow: Export Current Flow"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codeFlow.snap",
+          "group": "navigation@50"
+        },
+        {
+          "command": "codeFlow.show",
+          "group": "navigation@51"
+        },
+        {
+          "command": "codeFlow.createFlow",
+          "group": "navigation@52"
+        },
+        {
+          "command": "codeFlow.switchFlow",
+          "group": "navigation@53"
+        },
+        {
+          "command": "codeFlow.exportFlow",
+          "group": "navigation@54"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "codeFlow.snap",
+          "group": "navigation@50"
+        },
+        {
+          "command": "codeFlow.show",
+          "group": "navigation@51"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codeFlow.snap"
+        },
+        {
+          "command": "codeFlow.show"
+        },
+        {
+          "command": "codeFlow.clear"
+        },
+        {
+          "command": "codeFlow.createFlow"
+        },
+        {
+          "command": "codeFlow.switchFlow"
+        },
+        {
+          "command": "codeFlow.exportFlow"
+        }
+      ]
+    }
+  }
+}
