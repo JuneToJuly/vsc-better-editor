@@ -1,6 +1,5 @@
 const vscode = require("vscode");
 const path = require("path");
-const fs = require("fs");
 
 function activate(context) {
     context.subscriptions.push(
@@ -27,16 +26,34 @@ async function openTerminalAtActiveFileDirectory() {
     }
 
     const dir = path.dirname(fileUri.fsPath);
-    openTerminal(dir);
+    cdTerminal(dir);
 }
 
-function openTerminal(cwd) {
-    const terminal = vscode.window.createTerminal({
-        name: path.basename(cwd),
-        cwd
-    });
+function cdTerminal(cwd) {
+    let terminal = vscode.window.activeTerminal;
+
+    if (!terminal) {
+        terminal = vscode.window.createTerminal({
+            name: path.basename(cwd),
+            cwd
+        });
+
+        terminal.show();
+        return;
+    }
 
     terminal.show();
+
+    const safePath = quotePathForShell(cwd);
+    terminal.sendText(`cd ${safePath}`);
+}
+
+function quotePathForShell(filePath) {
+    if (process.platform === "win32") {
+        return `"${filePath.replace(/"/g, '\\"')}"`;
+    }
+
+    return `'${filePath.replace(/'/g, `'\\''`)}'`;
 }
 
 function deactivate() {}
