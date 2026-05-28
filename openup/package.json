@@ -1,0 +1,36 @@
+{
+  "name": "open-terminal-at-file",
+  "displayName": "Open Terminal At File",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onCommand:openTerminalAtFile.activeFile",
+    "onCommand:openTerminalAtFile.explorerItem"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "openTerminalAtFile.activeFile",
+        "title": "Open Terminal at Active File Directory"
+      }
+    ],
+    "menus": {
+      "editor/title/context": [
+        {
+          "command": "openTerminalAtFile.activeFile",
+          "group": "navigation@95"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "openTerminalAtFile.activeFile",
+        "key": "ctrl+alt+t",
+        "when": "editorTextFocus"
+      }
+    ]
+  }
+}
