@@ -1,0 +1,84 @@
+{
+  "name": "workspace-exclusion-profiles",
+  "displayName": "Workspace Exclusion Profiles",
+  "description": "Create and switch workspace exclusion profiles for files.exclude and search.exclude.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:exclusionProfiles.createProfile",
+    "onCommand:exclusionProfiles.switchProfile",
+    "onCommand:exclusionProfiles.excludeFolderInCurrentProfile",
+    "onCommand:exclusionProfiles.addFolderToProfile",
+    "onCommand:exclusionProfiles.onlyShowThisFolder",
+    "onCommand:exclusionProfiles.clearActiveProfile",
+    "onCommand:exclusionProfiles.showActiveProfile",
+    "onCommand:exclusionProfiles.deleteProfile",
+    "onCommand:exclusionProfiles.removeExclusionFromCurrentProfile"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "exclusionProfiles.removeExclusionFromCurrentProfile",
+        "title": "Exclusion Profiles: Remove Exclusion from Current Profile"
+      },
+      {
+        "command": "exclusionProfiles.createProfile",
+        "title": "Exclusion Profiles: Create Profile"
+      },
+      {
+        "command": "exclusionProfiles.switchProfile",
+        "title": "Exclusion Profiles: Switch Profile"
+      },
+      {
+        "command": "exclusionProfiles.excludeFolderInCurrentProfile",
+        "title": "Exclude Folder in Current Profile"
+      },
+      {
+        "command": "exclusionProfiles.addFolderToProfile",
+        "title": "Add Folder to Exclusion Profile..."
+      },
+      {
+        "command": "exclusionProfiles.onlyShowThisFolder",
+        "title": "Only Show This Folder"
+      },
+      {
+        "command": "exclusionProfiles.clearActiveProfile",
+        "title": "Exclusion Profiles: Clear Active Profile"
+      },
+      {
+        "command": "exclusionProfiles.showActiveProfile",
+        "title": "Exclusion Profiles: Show Active Profile"
+      },
+      {
+        "command": "exclusionProfiles.deleteProfile",
+        "title": "Exclusion Profiles: Delete Profile"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "exclusionProfiles.excludeFolderInCurrentProfile",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@50"
+        },
+        {
+          "command": "exclusionProfiles.addFolderToProfile",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@51"
+        },
+        {
+          "command": "exclusionProfiles.onlyShowThisFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@52"
+        }
+      ]
+    }
+  }
+}
