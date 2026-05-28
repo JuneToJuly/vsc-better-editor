@@ -52,15 +52,13 @@ function activate(context) {
         // 3. Find files
 
         const includePattern = config.get('include', '**/*.{java,kt}');
-        const excludePattern = config.get('exclude', '**/{node_modules,.git,build,out}/**');
+        const excludePatterns = buildExcludePatterns(config);
 
-        const files = await vscode.workspace.findFiles(
-            includePattern,
-            excludePattern
+        const results = await runRipgrep(
+            terms,
+            windowSize,
+            excludePatterns
         );
-
-        vscode.window.showInformationMessage('Before ripgrep');
-        const results = await runRipgrep(terms, windowSize);
 
         // Group matches by file
         if (results.length === 0) {
@@ -558,7 +556,11 @@ function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function runRipgrep(terms, windowSize) {
+async function runRipgrep(
+    terms,
+    windowSize,
+    excludePatterns = []
+) {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceFolder) throw new Error('No workspace folder');
 
@@ -569,7 +571,8 @@ async function runRipgrep(terms, windowSize) {
         const termMatches = await runRipgrepForTerm(
             workspaceFolder,
             term,
-            candidateFiles
+            candidateFiles,
+            excludePatterns
         );
 
         const matchedFiles = new Set(termMatches.keys());
@@ -660,13 +663,23 @@ async function runRipgrep(terms, windowSize) {
     return results;
 }
 
-function runRipgrepForTerm(workspaceFolder, term, candidateFiles) {
+function runRipgrepForTerm(
+    workspaceFolder,
+    term,
+    candidateFiles,
+    excludePatterns = []
+) {
     return new Promise((resolve, reject) => {
         const args = [
             '--json',
             '--ignore-case',
             escapeRegex(term)
         ];
+
+        for (const pattern of excludePatterns) {
+            args.push('--glob');
+            args.push(`!${pattern}`);
+        }
 
         if (candidateFiles && candidateFiles.size > 0) {
             for (const file of candidateFiles) {
@@ -720,6 +733,38 @@ function runRipgrepForTerm(workspaceFolder, term, candidateFiles) {
             resolve(matchesByFile);
         });
     });
+}
+function buildExcludePatterns(config) {
+    const patterns = [];
+
+    const extensionExclude =
+        config.get('exclude', '**/{node_modules,.git,build,out}/**');
+
+    if (extensionExclude) {
+        patterns.push(extensionExclude);
+    }
+
+    const workspaceConfig = vscode.workspace.getConfiguration();
+
+    const searchExclude =
+        workspaceConfig.get('search.exclude', {});
+
+    const filesExclude =
+        workspaceConfig.get('files.exclude', {});
+
+    for (const [glob, enabled] of Object.entries(searchExclude)) {
+        if (enabled === true) {
+            patterns.push(glob);
+        }
+    }
+
+    for (const [glob, enabled] of Object.entries(filesExclude)) {
+        if (enabled === true) {
+            patterns.push(glob);
+        }
+    }
+
+    return [...new Set(patterns)];
 }
 
 
