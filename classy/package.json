@@ -1,0 +1,23 @@
+{
+  "name": "java-mermaid-class-diagram",
+  "displayName": "Java Mermaid Class Diagram",
+  "description": "Generate a Mermaid class diagram from Java classes in the workspace.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:javaClassDiagram.generate"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "javaClassDiagram.generate",
+        "title": "Class Diagram: Generate Mermaid Diagram"
+      }
+    ]
+  }
+}
