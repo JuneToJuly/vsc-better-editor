@@ -1,0 +1,49 @@
+{
+  "name": "java-value-hider",
+  "displayName": "Java Value Hider",
+  "description": "Fold Java value-creation code to make method behavior easier to read.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:javaValueHider.hideValueCreation",
+    "onCommand:javaValueHider.showAll",
+    "onCommand:javaValueHider.cleanupActionViews"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "javaValueHider.hideValueCreation",
+        "title": "Java Value Hider: Hide Value Creation"
+      },
+      {
+        "command": "javaValueHider.showAll",
+        "title": "Java Value Hider: Show All"
+      },
+      {
+        "command": "javaValueHider.cleanupActionViews",
+        "title": "Java Action View: Delete All Action Files"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "javaValueHider.hideValueCreation",
+          "when": "resourceLangId == java",
+          "group": "navigation@70"
+        },
+        {
+          "command": "javaValueHider.showAll",
+          "when": "resourceLangId == java",
+          "group": "navigation@71"
+        }
+      ]
+    }
+  }
+}
