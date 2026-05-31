@@ -5,6 +5,7 @@ const PREVIEW_RADIUS = 3;
 
 let flowState = {
     activeFlow: "Default",
+    promptEnabled: true,
     flows: {
         Default: []
     }
@@ -16,10 +17,15 @@ function activate(context) {
     if (!flowState.flows) {
         flowState = {
             activeFlow: "Default",
+            promptEnabled: true,
             flows: {
                 Default: []
             }
         };
+    }
+
+    if (flowState.promptEnabled === undefined) {
+        flowState.promptEnabled = true;
     }
 
     context.subscriptions.push(
@@ -45,6 +51,10 @@ function activate(context) {
     context.subscriptions.push(
         vscode.commands.registerCommand("codeFlow.exportFlow", () => exportCurrentFlow(context))
     );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand("codeFlow.togglePrompt", () => togglePrompt(context))
+    );
 }
 
 function getActiveSnaps() {
@@ -59,6 +69,15 @@ function getActiveSnaps() {
 
 async function saveState(context) {
     await context.workspaceState.update(FLOW_STATE_KEY, flowState);
+}
+
+async function togglePrompt(context) {
+    flowState.promptEnabled = !flowState.promptEnabled;
+    await saveState(context);
+
+    vscode.window.showInformationMessage(
+        `Code Flow prompt is now ${flowState.promptEnabled ? "ON" : "OFF"}.`
+    );
 }
 
 async function snapSelection(context) {
@@ -81,6 +100,21 @@ async function snapSelection(context) {
         ? doc.lineAt(startLine).text.trim()
         : doc.getText(selection);
 
+    let prompt = "";
+
+    if (flowState.promptEnabled) {
+        const result = await vscode.window.showInputBox({
+            prompt: "Review note for this snap",
+            placeHolder: "Example: This is where the request is serialized before sending."
+        });
+
+        if (result === undefined) {
+            return;
+        }
+
+        prompt = result;
+    }
+
     const previewStart = Math.max(0, startLine - PREVIEW_RADIUS);
     const previewEnd = Math.min(doc.lineCount - 1, endLine + PREVIEW_RADIUS);
 
@@ -99,6 +133,7 @@ async function snapSelection(context) {
         file: vscode.workspace.asRelativePath(doc.uri),
         fullUri: doc.uri.toString(),
         selectedText,
+        prompt,
         previewLines,
         startLine,
         endLine,
@@ -251,7 +286,7 @@ async function exportCurrentFlow(context) {
     const isJson = uri.fsPath.toLowerCase().endsWith(".json");
 
     const content = isJson
-        ? JSON.stringify({ name: flowName, snaps }, null, 2)
+        ? JSON.stringify({ name: flowName, promptEnabled: flowState.promptEnabled, snaps }, null, 2)
         : buildMarkdownExport(flowName, snaps);
 
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
@@ -271,6 +306,7 @@ function escapeMermaidLabel(value) {
         .replace(/"/g, '\\"')
         .replace(/\r?\n/g, " ");
 }
+
 function buildMarkdownExport(flowName, snaps) {
     return `# ${flowName}
 
@@ -294,7 +330,7 @@ ${node}["${label}"]`;
 ${snaps.map((snap, index) => {
         return `## ${index + 1}. ${snap.file}:${snap.startLine + 1}
 
-\`\`\`
+${snap.prompt ? `**Review Note:** ${snap.prompt}\n\n` : ""}\`\`\`java
 ${snap.selectedText || ""}
 \`\`\`
 `;
@@ -352,6 +388,14 @@ function getFlowHtml(flowName, snaps) {
         opacity: 0.75;
         font-size: 12px;
         margin-bottom: 8px;
+    }
+
+    .prompt {
+        border-left: 3px solid var(--vscode-textLink-foreground);
+        padding: 6px 8px;
+        margin-bottom: 8px;
+        background: var(--vscode-textCodeBlock-background);
+        white-space: pre-wrap;
     }
 
     .selected {
@@ -432,6 +476,8 @@ function renderSnap(snap, index, total) {
     <div class="meta">
         Lines ${snap.startLine + 1}-${snap.endLine + 1}
     </div>
+
+    ${snap.prompt ? `<div class="prompt">${escapeHtml(snap.prompt)}</div>` : ""}
 
     <div class="selected">${escapeHtml(snap.selectedText || "[empty selection]")}</div>
 

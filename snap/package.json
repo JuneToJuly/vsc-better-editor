@@ -16,7 +16,8 @@
     "onCommand:codeFlow.clear",
     "onCommand:codeFlow.createFlow",
     "onCommand:codeFlow.switchFlow",
-    "onCommand:codeFlow.exportFlow"
+    "onCommand:codeFlow.exportFlow",
+    "onCommand:codeFlow.togglePrompt"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -44,7 +45,11 @@
       {
         "command": "codeFlow.exportFlow",
         "title": "Code Flow: Export Current Flow"
-      }
+      },
+{
+  "command": "codeFlow.togglePrompt",
+  "title": "Code Flow: Toggle Snap Prompt"
+}
     ],
     "menus": {
       "editor/context": [
