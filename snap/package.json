@@ -11,6 +11,10 @@
     "Other"
   ],
   "activationEvents": [
+    "onCommand:codeFlow.replay",
+    "onCommand:codeFlow.replayNext",
+    "onCommand:codeFlow.replayPrevious",
+    "onCommand:codeFlow.stopReplay",
     "onCommand:codeFlow.snap",
     "onCommand:codeFlow.show",
     "onCommand:codeFlow.clear",
@@ -22,10 +26,27 @@
   "main": "./extension.js",
   "contributes": {
     "commands": [
+
       {
         "command": "codeFlow.snap",
         "title": "Code Flow: Snap Selection"
       },
+{
+  "command": "codeFlow.replay",
+  "title": "Code Flow: Replay"
+},
+{
+  "command": "codeFlow.replayNext",
+  "title": "Code Flow: Replay Next"
+},
+{
+  "command": "codeFlow.replayPrevious",
+  "title": "Code Flow: Replay Previous"
+},
+{
+  "command": "codeFlow.stopReplay",
+  "title": "Code Flow: Stop Replay"
+},
       {
         "command": "codeFlow.show",
         "title": "Code Flow: Show Flow"

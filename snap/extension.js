@@ -11,6 +11,13 @@ let flowState = {
     }
 };
 
+let replayState = {
+    active: false,
+    index: 0,
+    panel: null,
+    decoration: null
+};
+
 function activate(context) {
     flowState = context.workspaceState.get(FLOW_STATE_KEY, flowState);
 
@@ -27,6 +34,14 @@ function activate(context) {
     if (flowState.promptEnabled === undefined) {
         flowState.promptEnabled = true;
     }
+
+    replayState.decoration = vscode.window.createTextEditorDecorationType({
+        isWholeLine: true,
+        backgroundColor: "rgba(255, 255, 0, 0.16)",
+        border: "1px solid rgba(255, 255, 0, 0.45)"
+    });
+
+    context.subscriptions.push(replayState.decoration);
 
     context.subscriptions.push(
         vscode.commands.registerCommand("codeFlow.snap", () => snapSelection(context))
@@ -54,6 +69,22 @@ function activate(context) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand("codeFlow.togglePrompt", () => togglePrompt(context))
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand("codeFlow.replay", () => startReplay(context))
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand("codeFlow.replayNext", () => replayNext(context))
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand("codeFlow.replayPrevious", () => replayPrevious(context))
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand("codeFlow.stopReplay", () => stopReplay())
     );
 }
 
@@ -216,23 +247,7 @@ async function showFlow(context) {
             const snap = getActiveSnaps().find(s => s.id === message.id);
             if (!snap) return;
 
-            const doc = await vscode.workspace.openTextDocument(
-                vscode.Uri.parse(snap.fullUri)
-            );
-
-            const editor = await vscode.window.showTextDocument(doc, {
-                preview: false,
-                viewColumn: vscode.ViewColumn.One
-            });
-
-            const pos = new vscode.Position(snap.startLine, snap.character);
-
-            editor.selection = new vscode.Selection(pos, pos);
-
-            editor.revealRange(
-                new vscode.Range(pos, pos),
-                vscode.TextEditorRevealType.InCenter
-            );
+            await openSnapInEditor(snap);
         }
 
         if (message.command === "remove") {
@@ -253,6 +268,10 @@ async function showFlow(context) {
 
         if (message.command === "export") {
             await exportCurrentFlow(context);
+        }
+
+        if (message.command === "replay") {
+            await startReplay(context);
         }
     });
 }
@@ -292,6 +311,186 @@ async function exportCurrentFlow(context) {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
 
     vscode.window.showInformationMessage(`Exported "${flowName}".`);
+}
+
+async function startReplay(context) {
+    const snaps = getActiveSnaps();
+
+    if (snaps.length === 0) {
+        vscode.window.showInformationMessage(`Flow "${flowState.activeFlow}" has no snaps yet.`);
+        return;
+    }
+
+    replayState.active = true;
+    replayState.index = 0;
+
+    if (!replayState.panel) {
+        replayState.panel = vscode.window.createWebviewPanel(
+            "codeFlowReplay",
+            `Replay: ${flowState.activeFlow}`,
+            vscode.ViewColumn.Beside,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true
+            }
+        );
+
+        replayState.panel.onDidDispose(() => {
+            replayState.panel = null;
+            clearReplayHighlight();
+            replayState.active = false;
+        });
+
+        replayState.panel.webview.onDidReceiveMessage(async message => {
+            if (message.command === "next") {
+                await replayNext(context);
+            }
+
+            if (message.command === "previous") {
+                await replayPrevious(context);
+            }
+
+            if (message.command === "stop") {
+                stopReplay();
+            }
+
+            if (message.command === "open") {
+                const snap = getActiveSnaps()[replayState.index];
+                if (snap) {
+                    await openSnapInEditor(snap, true);
+                }
+            }
+        });
+    }
+
+    await openReplaySnap(context, replayState.index);
+}
+
+async function replayNext(context) {
+    if (!replayState.active) {
+        await startReplay(context);
+        return;
+    }
+
+    const snaps = getActiveSnaps();
+
+    if (replayState.index >= snaps.length - 1) {
+        vscode.window.showInformationMessage("Already at the last snap.");
+        return;
+    }
+
+    replayState.index += 1;
+    await openReplaySnap(context, replayState.index);
+}
+
+async function replayPrevious(context) {
+    if (!replayState.active) {
+        await startReplay(context);
+        return;
+    }
+
+    if (replayState.index <= 0) {
+        vscode.window.showInformationMessage("Already at the first snap.");
+        return;
+    }
+
+    replayState.index -= 1;
+    await openReplaySnap(context, replayState.index);
+}
+
+async function openReplaySnap(context, index) {
+    const snaps = getActiveSnaps();
+    const snap = snaps[index];
+
+    if (!snap) return;
+
+    await openSnapInEditor(snap, true);
+
+    if (replayState.panel) {
+        replayState.panel.webview.html = getReplayHtml(
+            flowState.activeFlow,
+            snap,
+            index,
+            snaps.length
+        );
+
+        replayState.panel.reveal(vscode.ViewColumn.Beside, true);
+    }
+}
+
+function stopReplay() {
+    replayState.active = false;
+    replayState.index = 0;
+
+    clearReplayHighlight();
+
+    if (replayState.panel) {
+        replayState.panel.dispose();
+        replayState.panel = null;
+    }
+
+    vscode.window.showInformationMessage("Code Flow replay stopped.");
+}
+
+async function openSnapInEditor(snap, highlight = false) {
+    const doc = await vscode.workspace.openTextDocument(
+        vscode.Uri.parse(snap.fullUri)
+    );
+
+    const editor = await vscode.window.showTextDocument(doc, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.One
+    });
+
+    const safeStartLine = Math.min(
+        editor.document.lineCount - 1,
+        Math.max(0, snap.startLine)
+    );
+
+    const safeEndLine = Math.min(
+        editor.document.lineCount - 1,
+        Math.max(safeStartLine, snap.endLine)
+    );
+
+    const safeCharacter = Math.min(
+        editor.document.lineAt(safeStartLine).text.length,
+        Math.max(0, snap.character || 0)
+    );
+
+    const start = new vscode.Position(safeStartLine, safeCharacter);
+    const end = new vscode.Position(
+        safeEndLine,
+        editor.document.lineAt(safeEndLine).text.length
+    );
+
+    editor.selection = new vscode.Selection(start, start);
+
+    editor.revealRange(
+        new vscode.Range(start, end),
+        vscode.TextEditorRevealType.InCenter
+    );
+
+    if (highlight) {
+        clearReplayHighlight();
+
+        const highlightStart = new vscode.Position(safeStartLine, 0);
+        const highlightEnd = new vscode.Position(
+            safeEndLine,
+            editor.document.lineAt(safeEndLine).text.length
+        );
+
+        editor.setDecorations(replayState.decoration, [
+            new vscode.Range(highlightStart, highlightEnd)
+        ]);
+    }
+}
+
+function clearReplayHighlight() {
+    if (!replayState.decoration) return;
+
+    vscode.window.visibleTextEditors.forEach(editor => {
+        editor.setDecorations(replayState.decoration, []);
+    });
 }
 
 function renumberSnaps() {
@@ -435,6 +634,7 @@ function getFlowHtml(flowName, snaps) {
     <h2>Code Flow: ${escapeHtml(flowName)}</h2>
 
     <button onclick="exportFlow()">Export</button>
+    <button onclick="startReplay()">Replay</button>
     <button onclick="clearFlow()">Clear Flow</button>
 
     ${snaps.map((snap, index) => renderSnap(snap, index, snaps.length)).join("")}
@@ -456,6 +656,133 @@ function getFlowHtml(flowName, snaps) {
 
     function exportFlow() {
         vscode.postMessage({ command: "export" });
+    }
+
+    function startReplay() {
+        vscode.postMessage({ command: "replay" });
+    }
+</script>
+</body>
+</html>`;
+}
+
+function getReplayHtml(flowName, snap, index, total) {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {
+        font-family: var(--vscode-font-family);
+        background: var(--vscode-editor-background);
+        color: var(--vscode-editor-foreground);
+        padding: 14px;
+    }
+
+    h2 {
+        margin-top: 0;
+    }
+
+    button {
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border: none;
+        padding: 6px 10px;
+        cursor: pointer;
+        margin-right: 6px;
+        margin-bottom: 10px;
+    }
+
+    button:disabled {
+        opacity: 0.45;
+        cursor: default;
+    }
+
+    .card {
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 6px;
+        padding: 12px;
+        background: var(--vscode-sideBar-background);
+    }
+
+    .step {
+        opacity: 0.75;
+        font-size: 12px;
+        margin-bottom: 8px;
+    }
+
+    .file {
+        color: var(--vscode-textLink-foreground);
+        font-weight: bold;
+        margin-bottom: 8px;
+    }
+
+    .prompt {
+        border-left: 3px solid var(--vscode-textLink-foreground);
+        padding: 8px 10px;
+        margin-bottom: 10px;
+        background: var(--vscode-textCodeBlock-background);
+        white-space: pre-wrap;
+    }
+
+    .selected {
+        background: var(--vscode-editor-selectionBackground);
+        padding: 8px;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        margin-bottom: 10px;
+        font-family: var(--vscode-editor-font-family);
+        font-size: var(--vscode-editor-font-size);
+    }
+
+    .hint {
+        opacity: 0.7;
+        font-size: 12px;
+        margin-top: 10px;
+    }
+</style>
+</head>
+<body>
+    <h2>Replay: ${escapeHtml(flowName)}</h2>
+
+    <div class="card">
+        <div class="step">Step ${index + 1} of ${total}</div>
+
+        <div class="file">
+            ${escapeHtml(snap.file)}:${snap.startLine + 1}
+        </div>
+
+        ${snap.prompt ? `<div class="prompt">${escapeHtml(snap.prompt)}</div>` : ""}
+
+        <div class="selected">${escapeHtml(snap.selectedText || "[empty selection]")}</div>
+
+        <button onclick="previous()" ${index === 0 ? "disabled" : ""}>Previous</button>
+        <button onclick="next()" ${index >= total - 1 ? "disabled" : ""}>Next</button>
+        <button onclick="openCurrent()">Open</button>
+        <button onclick="stop()">Stop</button>
+
+        <div class="hint">
+            Commands also available: Code Flow: Replay Next, Replay Previous, Stop Replay.
+        </div>
+    </div>
+
+<script>
+    const vscode = acquireVsCodeApi();
+
+    function next() {
+        vscode.postMessage({ command: "next" });
+    }
+
+    function previous() {
+        vscode.postMessage({ command: "previous" });
+    }
+
+    function openCurrent() {
+        vscode.postMessage({ command: "open" });
+    }
+
+    function stop() {
+        vscode.postMessage({ command: "stop" });
     }
 </script>
 </body>
@@ -519,7 +846,18 @@ function escapeHtml(value) {
         .replace(/"/g, "&quot;");
 }
 
-function deactivate() {}
+function deactivate() {
+    clearReplayHighlight();
+
+    if (replayState.panel) {
+        replayState.panel.dispose();
+        replayState.panel = null;
+    }
+
+    if (replayState.decoration) {
+        replayState.decoration.dispose();
+    }
+}
 
 module.exports = {
     activate,
