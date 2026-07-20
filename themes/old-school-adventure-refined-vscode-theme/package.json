@@ -1,0 +1,22 @@
+{
+  "name": "old-school-adventure-refined-theme",
+  "displayName": "Old School Adventure Refined",
+  "description": "A refined retro fantasy VS Code theme with stone-gray chrome, parchment text, mossy panels, crimson banner accents, and brighter old-school highlights.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Old School Adventure Refined",
+        "uiTheme": "vs-dark",
+        "path": "./themes/old-school-adventure-refined-color-theme.json"
+      }
+    ]
+  }
+}

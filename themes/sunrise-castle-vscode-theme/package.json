@@ -1,0 +1,22 @@
+{
+  "name": "sunrise-castle-theme",
+  "displayName": "Sunrise Castle",
+  "description": "A warm dawn VS Code theme with lavender sky, peach light, pale gold accents, soft blue shadows, and a bright ivory editor.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunrise Castle",
+        "uiTheme": "vs",
+        "path": "./themes/sunrise-castle-color-theme.json"
+      }
+    ]
+  }
+}

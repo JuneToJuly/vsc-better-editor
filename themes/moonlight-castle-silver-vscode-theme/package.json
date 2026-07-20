@@ -1,0 +1,21 @@
+{
+  "name": "moonlight-castle-silver",
+  "displayName": "Moonlight Castle Silver",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Moonlight Castle Silver",
+        "uiTheme": "vs-dark",
+        "path": "./themes/moonlight-castle-silver-color-theme.json"
+      }
+    ]
+  }
+}

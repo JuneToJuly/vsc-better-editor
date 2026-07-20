@@ -1,0 +1,104 @@
+{
+  "name": "Summer Crossing",
+  "type": "light",
+  "semanticHighlighting": true,
+  "colors": {
+    "editor.background": "#F7F6EF",
+    "editor.foreground": "#2F3A36",
+    "editorLineNumber.foreground": "#B6B88F",
+    "editorLineNumber.activeForeground": "#6F7C62",
+    "editorCursor.foreground": "#D9B34C",
+    "editor.selectionBackground": "#DCE7C9",
+    "editor.lineHighlightBackground": "#FBFAF4",
+    "activityBar.background": "#5E7763",
+    "activityBar.foreground": "#F7F6EF",
+    "sideBar.background": "#EEF1E2",
+    "sideBar.foreground": "#36403B",
+    "titleBar.activeBackground": "#7A8B67",
+    "titleBar.activeForeground": "#FFFFFF",
+    "tab.activeBackground": "#F7F6EF",
+    "tab.activeForeground": "#2F3A36",
+    "tab.activeBorderTop": "#D6B547",
+    "tab.inactiveBackground": "#E3E7D7",
+    "tab.inactiveForeground": "#6D745B",
+    "statusBar.background": "#44575B",
+    "statusBar.foreground": "#F8F8F4",
+    "button.background": "#BFAE55",
+    "button.foreground": "#FFFFFF",
+    "list.activeSelectionBackground": "#DCE7C9",
+    "list.hoverBackground": "#EAF0DD",
+    "focusBorder": "#BFAE55"
+  },
+  "tokenColors": [
+    {
+      "scope": "comment",
+      "settings": {
+        "foreground": "#8E9278",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage"
+      ],
+      "settings": {
+        "foreground": "#6B825F",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function"
+      ],
+      "settings": {
+        "foreground": "#44575B",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class"
+      ],
+      "settings": {
+        "foreground": "#738A73"
+      }
+    },
+    {
+      "scope": "string",
+      "settings": {
+        "foreground": "#6E8B52"
+      }
+    },
+    {
+      "scope": [
+        "constant.numeric",
+        "constant.language"
+      ],
+      "settings": {
+        "foreground": "#C89A2E"
+      }
+    },
+    {
+      "scope": "variable",
+      "settings": {
+        "foreground": "#2F3A36"
+      }
+    },
+    {
+      "scope": "variable.parameter",
+      "settings": {
+        "foreground": "#6C7464",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": "punctuation",
+      "settings": {
+        "foreground": "#7D8373"
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "sunlit-crossing-theme",
+  "displayName": "Sunlit Crossing",
+  "description": "A warm, colorful light VS Code theme inspired by a sunlit countryside railway painting.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunlit Crossing",
+        "uiTheme": "vs",
+        "path": "./themes/sunlit-crossing-color-theme.json"
+      }
+    ]
+  }
+}

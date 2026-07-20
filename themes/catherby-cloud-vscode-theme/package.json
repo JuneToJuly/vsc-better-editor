@@ -1,0 +1,21 @@
+{
+  "name": "catherby-cloud-theme",
+  "displayName": "Catherby Cloud",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Catherby Cloud",
+        "uiTheme": "vs",
+        "path": "./themes/catherby-cloud-color-theme.json"
+      }
+    ]
+  }
+}

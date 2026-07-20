@@ -1,0 +1,22 @@
+{
+  "name": "sunlit-crossing-sky-theme",
+  "displayName": "Sunlit Crossing Sky",
+  "description": "The Sunlit Crossing light theme with a vivid blue-sky title bar and warm countryside colors.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunlit Crossing Sky",
+        "uiTheme": "vs",
+        "path": "./themes/sunlit-crossing-sky-color-theme.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "summer-crossing-theme",
+  "displayName": "Summer Crossing",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Summer Crossing",
+        "uiTheme": "vs",
+        "path": "./themes/summer-crossing-color-theme.json"
+      }
+    ]
+  }
+}

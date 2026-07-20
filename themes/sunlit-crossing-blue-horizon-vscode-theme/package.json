@@ -1,0 +1,22 @@
+{
+  "name": "sunlit-crossing-blue-horizon-theme",
+  "displayName": "Sunlit Crossing: Blue Horizon",
+  "description": "A warm countryside light theme with sky-blue title and status bars, deep forest navigation, and colorful painted syntax.",
+  "version": "1.3.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunlit Crossing: Blue Horizon",
+        "uiTheme": "vs",
+        "path": "./themes/sunlit-crossing-blue-horizon-color-theme.json"
+      }
+    ]
+  }
+}

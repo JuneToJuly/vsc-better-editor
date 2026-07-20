@@ -1,0 +1,22 @@
+{
+  "name": "sunset-castle-glow-theme",
+  "displayName": "Sunset Castle Glow",
+  "description": "A refined dark VS Code theme with lavender twilight, warmer editor surfaces, golden highlights, coral functions, and a brighter blue horizon.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunset Castle Glow",
+        "uiTheme": "vs-dark",
+        "path": "./themes/sunset-castle-glow-color-theme.json"
+      }
+    ]
+  }
+}

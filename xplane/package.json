@@ -1,0 +1,410 @@
+{
+  "name": "x-plane",
+  "displayName": "X-Plane",
+  "description": "A persistent explanation and context layer over source code, with entries anchored to projects, files, and exact selections.",
+  "version": "4.3.0",
+  "publisher": "local-development",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:xPlane.items",
+    "onView:xPlane.details",
+    "onCommand:xPlane.addItem",
+    "onView:xPlane.projectHeatMap"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "xPlane.addItem",
+        "title": "X-Plane: Add Entry",
+        "icon": "$(add)"
+      },
+      {
+        "command": "xPlane.addChildItem",
+        "title": "X-Plane: Add Child Item"
+      },
+      {
+        "command": "xPlane.viewItem",
+        "title": "X-Plane: Show Details"
+      },
+      {
+        "command": "xPlane.openAnchor",
+        "title": "X-Plane: Open in Editor",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "xPlane.openSelected",
+        "title": "X-Plane: Open Selected Item"
+      },
+      {
+        "command": "xPlane.previewSelected",
+        "title": "X-Plane: Preview Selected Location"
+      },
+      {
+        "command": "xPlane.focusExplorer",
+        "title": "X-Plane: Focus Explorer",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "xPlane.focusDetails",
+        "title": "X-Plane: Focus Details",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "xPlane.searchExplorer",
+        "title": "X-Plane: Search Explorer",
+        "icon": "$(search)"
+      },
+      {
+        "command": "xPlane.showAtCursor",
+        "title": "X-Plane: Show Entry at Cursor",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "xPlane.toggleResolved",
+        "title": "X-Plane: Resolve or Reopen",
+        "icon": "$(check)"
+      },
+      {
+        "command": "xPlane.editItem",
+        "title": "X-Plane: Edit Item",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "xPlane.changeType",
+        "title": "X-Plane: Change Type"
+      },
+      {
+        "command": "xPlane.rebindItem",
+        "title": "X-Plane: Change Location"
+      },
+      {
+        "command": "xPlane.deleteItem",
+        "title": "X-Plane: Delete Item",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "xPlane.toggleGutterMarkers",
+        "title": "X-Plane: Toggle Gutter Markers",
+        "icon": "$(symbol-event)"
+      },
+      {
+        "command": "xPlane.toggleAnchorLines",
+        "title": "X-Plane: Toggle Anchor Lines",
+        "icon": "$(dash)"
+      },
+      {
+        "command": "xPlane.toggleDecorations",
+        "title": "X-Plane: Toggle All Code Decorations",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "xPlane.changeFilter",
+        "title": "X-Plane: Change Filter",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "xPlane.refresh",
+        "title": "X-Plane: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xPlane.toggleHeatMap",
+        "title": "X-Plane: Toggle Heat Map",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "xPlane.showProjectHeatMap",
+        "title": "X-Plane: Show Project Map",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "xPlane.linkItem",
+        "title": "X-Plane: Link Entry",
+        "icon": "$(link)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "xPlane",
+          "title": "X-Plane",
+          "icon": "resources/x-plane.svg"
+        }
+      ]
+    },
+    "views": {
+      "xPlane": [
+        {
+          "id": "xPlane.items",
+          "name": "Explorer",
+          "type": "webview"
+        },
+        {
+          "id": "xPlane.details",
+          "name": "Entry",
+          "type": "webview"
+        },
+        {
+          "id": "xPlane.projectHeatMap",
+          "name": "Project Map",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "xPlane.addItem",
+          "group": "navigation@100"
+        },
+        {
+          "command": "xPlane.showAtCursor",
+          "group": "navigation@101"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "xPlane.addItem",
+          "when": "view == xPlane.items",
+          "group": "navigation@1"
+        },
+        {
+          "command": "xPlane.searchExplorer",
+          "when": "view == xPlane.items",
+          "group": "navigation@2"
+        },
+        {
+          "command": "xPlane.changeFilter",
+          "when": "view == xPlane.items",
+          "group": "navigation@3"
+        },
+        {
+          "command": "xPlane.toggleDecorations",
+          "when": "view == xPlane.items",
+          "group": "navigation@4"
+        },
+        {
+          "command": "xPlane.toggleGutterMarkers",
+          "when": "view == xPlane.items",
+          "group": "navigation@5"
+        },
+        {
+          "command": "xPlane.toggleAnchorLines",
+          "when": "view == xPlane.items",
+          "group": "navigation@6"
+        },
+        {
+          "command": "xPlane.refresh",
+          "when": "view == xPlane.items",
+          "group": "navigation@8"
+        },
+        {
+          "command": "xPlane.toggleHeatMap",
+          "when": "view == xPlane.items",
+          "group": "navigation@7"
+        },
+        {
+          "command": "xPlane.showProjectHeatMap",
+          "when": "view == xPlane.items",
+          "group": "navigation@8"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "xPlane.linkItem",
+          "when": "view == xPlane.items",
+          "group": "xPlane@6"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "xPlane.addItem",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "xPlane.focusExplorer",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e"
+      },
+      {
+        "command": "xPlane.showAtCursor",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "xPlane.toggleDecorations",
+        "key": "ctrl+alt+shift+k",
+        "mac": "cmd+alt+shift+k"
+      },
+      {
+        "command": "xPlane.toggleGutterMarkers",
+        "key": "ctrl+alt+shift+g",
+        "mac": "cmd+alt+shift+g"
+      },
+      {
+        "command": "xPlane.toggleAnchorLines",
+        "key": "ctrl+alt+shift+l",
+        "mac": "cmd+alt+shift+l"
+      },
+      {
+        "command": "xPlane.toggleHeatMap",
+        "key": "ctrl+alt+shift+h",
+        "mac": "cmd+alt+shift+h"
+      },
+      {
+        "command": "xPlane.showProjectHeatMap",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h"
+      },
+      {
+        "command": "xPlane.searchExplorer",
+        "key": "ctrl+alt+/",
+        "mac": "cmd+alt+/"
+      },
+      {
+        "command": "xPlane.changeFilter",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f"
+      }
+    ],
+    "configuration": {
+      "title": "X-Plane",
+      "properties": {
+        "xPlane.showAnchorLines": {
+          "type": "boolean",
+          "default": true
+        },
+        "xPlane.showGutterMarkers": {
+          "type": "boolean",
+          "default": true
+        },
+        "xPlane.treeDescription": {
+          "type": "string",
+          "enum": [
+            "typeAndFile",
+            "type",
+            "file",
+            "none"
+          ],
+          "default": "file",
+          "enumDescriptions": [
+            "Show the file name. Type is already shown before the entry text.",
+            "Repeat the entry type as secondary text.",
+            "Show the file name.",
+            "Show no secondary description."
+          ],
+          "description": "Legacy secondary-text mode used only when file grouping is disabled."
+        },
+        "xPlane.colors.documentation": {
+          "type": "string",
+          "default": "#75beff"
+        },
+        "xPlane.colors.comment": {
+          "type": "string",
+          "default": "#b5cea8"
+        },
+        "xPlane.colors.question": {
+          "type": "string",
+          "default": "#c586c0"
+        },
+        "xPlane.colors.decision": {
+          "type": "string",
+          "default": "#dcdcaa"
+        },
+        "xPlane.colors.requirement": {
+          "type": "string",
+          "default": "#4ec9b0"
+        },
+        "xPlane.colors.todo": {
+          "type": "string",
+          "default": "#ce9178"
+        },
+        "xPlane.colors.warning": {
+          "type": "string",
+          "default": "#f48771"
+        },
+        "xPlane.colors.design": {
+          "type": "string",
+          "default": "#569cd6"
+        },
+        "xPlane.colors.example": {
+          "type": "string",
+          "default": "#9cdcfe"
+        },
+        "xPlane.colors.test": {
+          "type": "string",
+          "default": "#c8c8c8"
+        },
+        "xPlane.showHeatMap": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the optional in-file entry-density overlay in the editor overview ruler. The Project Map is available as a separate Entry view."
+        },
+        "xPlane.heatMap.color": {
+          "type": "string",
+          "default": "#ff9d00",
+          "pattern": "^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "description": "Base color used by the entry heat map."
+        },
+        "xPlane.heatMap.useTypeWeights": {
+          "type": "boolean",
+          "default": true,
+          "description": "Weight requirements, decisions, warnings, questions, designs, and TODOs more heavily when calculating entry density."
+        },
+        "xPlane.groupByFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "X-Plane Explorer is always presented as a sectioned list grouped by file."
+        },
+        "xPlane.showHierarchy": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show parent and child entry using the compact X-Plane 3.0 outline design.",
+          "deprecationMessage": "Hierarchy rendering has been removed. Use explicit linked entry relationships instead."
+        },
+        "xPlane.hierarchyIndent": {
+          "type": "number",
+          "default": 52,
+          "minimum": 20,
+          "maximum": 64,
+          "description": "Horizontal indentation in pixels for each child entry level. Any item with a parent is always indented, even when its parent is hidden, missing, or located in another file section.",
+          "deprecationMessage": "This setting is retained for compatibility but is not used by the restored X-Plane 3.0 Explorer design."
+        },
+        "xPlane.hierarchyTabSize": {
+          "type": "number",
+          "default": 4,
+          "minimum": 2,
+          "maximum": 12,
+          "description": "Number of spaces represented by each rendered hierarchy tab.",
+          "deprecationMessage": "This setting is retained for compatibility but is not used by the restored X-Plane 3.0 Explorer design."
+        },
+        "xPlane.hierarchyTextIndent": {
+          "type": "number",
+          "default": 16,
+          "minimum": 8,
+          "maximum": 32,
+          "description": "Horizontal indentation in pixels applied only to the entry text for each child hierarchy level.",
+          "deprecationMessage": "This setting is retained for compatibility but is not used by the restored X-Plane 3.0 Explorer design."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.2.1"
+  },
+  "license": "MIT"
+}

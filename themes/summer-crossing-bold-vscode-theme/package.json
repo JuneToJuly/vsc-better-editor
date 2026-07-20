@@ -1,0 +1,22 @@
+{
+  "name": "summer-crossing-bold-theme",
+  "displayName": "Summer Crossing Bold",
+  "description": "A warm ivory VS Code theme with richer countryside greens, railway gold, and slate-blue syntax.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Summer Crossing Bold",
+        "uiTheme": "vs",
+        "path": "./themes/summer-crossing-bold-color-theme.json"
+      }
+    ]
+  }
+}

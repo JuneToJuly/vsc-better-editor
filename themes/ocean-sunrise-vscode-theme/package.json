@@ -1,0 +1,22 @@
+{
+  "name": "ocean-sunrise-theme",
+  "displayName": "Ocean Sunrise",
+  "description": "A bright light VS Code theme inspired by a blue morning sky, pale clouds, golden sunrise, and calm ocean water.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Ocean Sunrise",
+        "uiTheme": "vs",
+        "path": "./themes/ocean-sunrise-color-theme.json"
+      }
+    ]
+  }
+}

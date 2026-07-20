@@ -1,0 +1,22 @@
+{
+  "name": "moonlight-castle-silver-top-theme",
+  "displayName": "Moonlight Castle: Silver Top",
+  "description": "The original Moonlight Castle palette with a brighter silver-blue title bar and command center.",
+  "version": "1.1.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Moonlight Castle: Silver Top",
+        "uiTheme": "vs-dark",
+        "path": "./themes/moonlight-castle-silver-top-color-theme.json"
+      }
+    ]
+  }
+}

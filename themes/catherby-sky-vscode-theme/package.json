@@ -1,0 +1,22 @@
+{
+  "name": "catherby-sky-theme",
+  "displayName": "Catherby Sky",
+  "description": "A calm blue VS Code theme inspired by bright coastal skies, white clouds, deep ocean shadows, and sunlit station platforms.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Catherby Sky",
+        "uiTheme": "vs-dark",
+        "path": "./themes/catherby-sky-color-theme.json"
+      }
+    ]
+  }
+}

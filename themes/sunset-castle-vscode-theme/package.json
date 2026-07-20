@@ -1,0 +1,22 @@
+{
+  "name": "sunset-castle-theme",
+  "displayName": "Sunset Castle",
+  "description": "A dark VS Code theme inspired by painted sunset clouds, warm castle lights, meadow gold, rose, coral, and twilight blue.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunset Castle",
+        "uiTheme": "vs-dark",
+        "path": "./themes/sunset-castle-color-theme.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "old-school-adventure-ui-theme",
+  "displayName": "Old School Adventure UI",
+  "description": "A retro fantasy VS Code theme inspired by classic MMORPG interfaces: weathered stone, leather trim, mossy greens, parchment text, crimson banners, and bright yellow highlights.",
+  "version": "1.2.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Old School Adventure UI",
+        "uiTheme": "vs-dark",
+        "path": "./themes/old-school-adventure-ui-color-theme.json"
+      }
+    ]
+  }
+}

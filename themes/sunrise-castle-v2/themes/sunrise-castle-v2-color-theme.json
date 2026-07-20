@@ -1,0 +1,147 @@
+{
+  "name": "Sunrise Castle v2",
+  "type": "light",
+  "semanticHighlighting": true,
+  "colors": {
+    "editor.background": "#FFF7EE",
+    "editor.foreground": "#354255",
+    "titleBar.activeBackground": "#D9A7BF",
+    "titleBar.activeForeground": "#493549",
+    "titleBar.inactiveBackground": "#E5C5D4",
+    "commandCenter.background": "#E8C0CF",
+    "activityBar.background": "#7E6A94",
+    "activityBar.foreground": "#FFFDF8",
+    "activityBar.activeBorder": "#F6BE63",
+    "sideBar.background": "#F9EFE8",
+    "sideBar.foreground": "#4B5464",
+    "sideBarSectionHeader.background": "#EEE3EC",
+    "editorGroupHeader.tabsBackground": "#F3E7E8",
+    "tab.activeBackground": "#FFF9F3",
+    "tab.activeBorderTop": "#F2B44E",
+    "tab.activeForeground": "#473F4B",
+    "tab.inactiveBackground": "#F2E6E4",
+    "tab.inactiveForeground": "#8A7983",
+    "statusBar.background": "#9FCBE8",
+    "statusBar.foreground": "#294252",
+    "statusBarItem.hoverBackground": "#B6D9EF",
+    "breadcrumb.background": "#FDF6F0",
+    "breadcrumb.foreground": "#7A87A3",
+    "breadcrumb.activeSelectionForeground": "#5F95C5",
+    "editor.selectionBackground": "#D8ECFA",
+    "editor.lineHighlightBackground": "#FFF2E6",
+    "editor.findMatchBackground": "#FFD88C",
+    "panel.background": "#F8F2F4",
+    "panel.border": "#E7E1EA",
+    "button.background": "#E9AF63",
+    "button.foreground": "#463521",
+    "button.hoverBackground": "#F2BE74",
+    "list.activeSelectionBackground": "#F7D8C7",
+    "list.hoverBackground": "#FAEEE8",
+    "scrollbarSlider.background": "#AFC4D555",
+    "scrollbarSlider.hoverBackground": "#91B6D077",
+    "scrollbarSlider.activeBackground": "#82AACA99",
+    "gitDecoration.modifiedResourceForeground": "#5EA5E3",
+    "gitDecoration.addedResourceForeground": "#5FA870",
+    "gitDecoration.deletedResourceForeground": "#D96476",
+    "gitDecoration.conflictingResourceForeground": "#E4A63E"
+  },
+  "tokenColors": [
+    {
+      "scope": [
+        "comment"
+      ],
+      "settings": {
+        "foreground": "#A08A9D",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage"
+      ],
+      "settings": {
+        "foreground": "#9D537B",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function",
+        "meta.function-call"
+      ],
+      "settings": {
+        "foreground": "#CC704A",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class"
+      ],
+      "settings": {
+        "foreground": "#5D82C5"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.interface"
+      ],
+      "settings": {
+        "foreground": "#58A5BF"
+      }
+    },
+    {
+      "scope": [
+        "string"
+      ],
+      "settings": {
+        "foreground": "#5B9774"
+      }
+    },
+    {
+      "scope": [
+        "constant.numeric"
+      ],
+      "settings": {
+        "foreground": "#D79A2D",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": [
+        "variable"
+      ],
+      "settings": {
+        "foreground": "#354255"
+      }
+    },
+    {
+      "scope": [
+        "variable.parameter"
+      ],
+      "settings": {
+        "foreground": "#7E6D82",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword.operator"
+      ],
+      "settings": {
+        "foreground": "#73859E"
+      }
+    },
+    {
+      "scope": [
+        "punctuation"
+      ],
+      "settings": {
+        "foreground": "#91848B"
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "old-school-adventure-theme",
+  "displayName": "Old School Adventure",
+  "description": "A retro fantasy VS Code theme inspired by early-2000s MMORPG colors: mossy terrain, stone UI, parchment text, bright yellow highlights, and deep red accents.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Old School Adventure",
+        "uiTheme": "vs-dark",
+        "path": "./themes/old-school-adventure-color-theme.json"
+      }
+    ]
+  }
+}

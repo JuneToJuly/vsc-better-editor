@@ -1,0 +1,22 @@
+{
+  "name": "moonlight-castle-theme",
+  "displayName": "Moonlight Castle",
+  "description": "A cool dark VS Code theme inspired by moonlit clouds, silver stone, deep indigo skies, and pale castle windows.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Moonlight Castle",
+        "uiTheme": "vs-dark",
+        "path": "./themes/moonlight-castle-color-theme.json"
+      }
+    ]
+  }
+}

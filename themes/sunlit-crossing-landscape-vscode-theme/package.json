@@ -1,0 +1,22 @@
+{
+  "name": "sunlit-crossing-landscape-theme",
+  "displayName": "Sunlit Crossing Landscape",
+  "description": "A colorful light VS Code theme inspired by blue sky, sunlit fields, railway gold, mist, and forest shadows.",
+  "version": "1.2.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunlit Crossing Landscape",
+        "uiTheme": "vs",
+        "path": "./themes/sunlit-crossing-landscape-color-theme.json"
+      }
+    ]
+  }
+}
