@@ -1,0 +1,128 @@
+{
+  "name": "x-plane-timeline",
+  "displayName": "X-Plane Timeline",
+  "description": "Walk through your development one save at a time using private Git timeline commits.",
+  "version": "0.4.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:xPlaneTimeline"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "xPlane",
+          "title": "X-Plane",
+          "icon": "media/timeline.svg"
+        }
+      ]
+    },
+    "views": {
+      "xPlane": [
+        {
+          "id": "xPlaneTimeline",
+          "name": "Development Timeline"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "xPlaneTimeline.refresh",
+        "title": "X-Plane: Refresh Timeline",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xPlaneTimeline.openDiff",
+        "title": "X-Plane: Open Save Diff"
+      },
+      {
+        "command": "xPlaneTimeline.previousDiff",
+        "title": "Previous Diff",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "xPlaneTimeline.nextDiff",
+        "title": "Next Diff",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "xPlaneTimeline.pause",
+        "title": "X-Plane: Pause Recording"
+      },
+      {
+        "command": "xPlaneTimeline.resume",
+        "title": "X-Plane: Resume Recording"
+      },
+      {
+        "command": "xPlaneTimeline.openCurrent",
+        "title": "X-Plane: Open Current Branch Timeline"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "xPlaneTimeline.refresh",
+          "when": "view == xPlaneTimeline",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "xPlaneTimeline.openDiff",
+          "when": "view == xPlaneTimeline && viewItem == xPlaneSave",
+          "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "xPlaneTimeline.previousDiff",
+          "when": "xPlaneTimeline.replayDiffActive && xPlaneTimeline.canPreviousDiff",
+          "group": "navigation@1"
+        },
+        {
+          "command": "xPlaneTimeline.nextDiff",
+          "when": "xPlaneTimeline.replayDiffActive && xPlaneTimeline.canNextDiff",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "X-Plane Timeline",
+      "properties": {
+        "xPlaneTimeline.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record a private Git timeline commit whenever a file is saved."
+        },
+        "xPlaneTimeline.includeUntracked": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include non-ignored untracked files in each repository snapshot."
+        },
+        "xPlaneTimeline.maxVisibleEntries": {
+          "type": "number",
+          "default": 250,
+          "minimum": 10,
+          "maximum": 5000,
+          "description": "Maximum saves shown in the timeline view."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
+}
