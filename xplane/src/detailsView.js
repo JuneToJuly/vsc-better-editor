@@ -158,6 +158,10 @@ function buildDetailsHtml(
         "incoming"
     );
 
+    const commentsSection = buildCommentsSection(
+        item.comments || []
+    );
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -364,6 +368,129 @@ function buildDetailsHtml(
             white-space: nowrap;
         }
 
+        .comment-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .comment {
+            overflow: visible;
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 6px;
+            background: var(--vscode-editor-background);
+        }
+
+        .comment-header {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 34px;
+            padding: 7px 10px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            border-radius: 6px 6px 0 0;
+            background: var(--vscode-sideBarSectionHeader-background);
+        }
+
+        .comment-identity {
+            display: flex;
+            min-width: 0;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 5px;
+        }
+
+        .comment-author {
+            color: var(--vscode-foreground);
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .comment-event,
+        .comment-time {
+            color: var(--vscode-descriptionForeground);
+            font-size: 10px;
+        }
+
+        .comment-time {
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .comment-menu {
+            position: relative;
+            flex: 0 0 auto;
+        }
+
+        .comment-menu-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 22px;
+            padding: 0;
+            color: var(--vscode-descriptionForeground);
+            background: transparent;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .comment-menu-button:hover,
+        .comment-menu-button:focus {
+            color: var(--vscode-foreground);
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+
+        .comment-menu-popover {
+            position: absolute;
+            top: calc(100% + 4px);
+            right: 0;
+            z-index: 20;
+            min-width: 132px;
+            padding: 4px;
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 4px;
+            background: var(--vscode-menu-background);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .25);
+        }
+
+        .comment-menu-popover[hidden] {
+            display: none;
+        }
+
+        .comment-delete {
+            display: block;
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 3px;
+            color: var(--vscode-menu-foreground);
+            background: transparent;
+            text-align: left;
+            font-size: 11px;
+        }
+
+        .comment-delete:hover,
+        .comment-delete:focus {
+            color: var(--vscode-menu-selectionForeground);
+            background: var(--vscode-menu-selectionBackground);
+        }
+
+        .comment-body {
+            padding: 16px;
+        }
+
+        .comment-text {
+            margin: 0;
+            padding: 0;
+            color: var(--vscode-foreground);
+            font-size: 13px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
         pre {
             margin: 0;
             padding: 10px;
@@ -400,12 +527,14 @@ function buildDetailsHtml(
         <button id="edit" class="primary"><span>✎</span>Edit</button>
         <button id="changeType"><span>⌁</span>Type</button>
         <button id="linkItem"><span>↗</span>Link</button>
+        <button id="addComment"><span>＋</span>Comment</button>
         <button id="toggleResolved"><span>✓</span>${item.status === "resolved" ? "Reopen" : "Resolve"}</button>
         <button id="rebind"><span>⇄</span>Move</button>
         <button id="deleteItem" class="danger"><span>⌫</span>Delete</button>
     </div>
 
     ${sourceSection}
+    ${commentsSection}
     ${outgoingSection}
     ${incomingSection}
 </main>
@@ -421,6 +550,7 @@ for (const command of [
     "toggleResolved",
     "rebind",
     "linkItem",
+    "addComment",
     "deleteItem"
 ]) {
     const element = document.getElementById(command);
@@ -430,6 +560,77 @@ for (const command of [
             vscode.postMessage({ command, itemId });
         });
     }
+}
+
+for (
+    const button of document.querySelectorAll(
+        ".comment-menu-button"
+    )
+) {
+    button.addEventListener("click", event => {
+        event.stopPropagation();
+
+        const menu = button.nextElementSibling;
+        const willOpen = menu.hasAttribute("hidden");
+
+        for (
+            const otherMenu of document.querySelectorAll(
+                ".comment-menu-popover"
+            )
+        ) {
+            otherMenu.setAttribute("hidden", "");
+        }
+
+        for (
+            const otherButton of document.querySelectorAll(
+                ".comment-menu-button"
+            )
+        ) {
+            otherButton.setAttribute(
+                "aria-expanded",
+                "false"
+            );
+        }
+
+        if (willOpen) {
+            menu.removeAttribute("hidden");
+            button.setAttribute("aria-expanded", "true");
+        }
+    });
+}
+
+document.addEventListener("click", () => {
+    for (
+        const menu of document.querySelectorAll(
+            ".comment-menu-popover"
+        )
+    ) {
+        menu.setAttribute("hidden", "");
+    }
+
+    for (
+        const button of document.querySelectorAll(
+            ".comment-menu-button"
+        )
+    ) {
+        button.setAttribute("aria-expanded", "false");
+    }
+});
+
+for (
+    const element of document.querySelectorAll(
+        ".comment-delete"
+    )
+) {
+    element.addEventListener("click", event => {
+        event.stopPropagation();
+
+        vscode.postMessage({
+            command: "deleteComment",
+            itemId,
+            commentId: element.dataset.commentId
+        });
+    });
 }
 
 for (
@@ -448,6 +649,117 @@ for (
 </script>
 </body>
 </html>`;
+}
+
+function buildCommentsSection(comments) {
+    if (!comments.length) {
+        return `
+        <section class="section">
+            <div class="section-title">Discussion</div>
+            <div class="relationship-summary">
+                No comments yet.
+            </div>
+        </section>`;
+    }
+
+    return `
+    <section class="section">
+        <div class="section-title">
+            Discussion · ${comments.length}
+        </div>
+
+        <div class="comment-list">
+            ${comments.map(comment => `
+                <article class="comment">
+                    <header class="comment-header">
+                        <div class="comment-identity">
+                            <span class="comment-author">
+                                ${escapeHtml(comment.author || "Unknown")}
+                            </span>
+
+                            <span class="comment-event">
+                                commented
+                            </span>
+
+                            <span class="comment-time">
+                                ${escapeHtml(formatRelativeDate(comment.createdAt))}
+                            </span>
+                        </div>
+
+                        <div class="comment-menu">
+                            <button
+                                class="comment-menu-button"
+                                type="button"
+                                title="Comment actions"
+                                aria-label="Comment actions"
+                                aria-expanded="false"
+                            >
+                                ⋯
+                            </button>
+
+                            <div class="comment-menu-popover" hidden>
+                                <button
+                                    class="comment-delete"
+                                    data-comment-id="${escapeHtml(comment.id)}"
+                                    type="button"
+                                >
+                                    Delete comment
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div class="comment-body">
+                        <div class="comment-text">
+                            ${escapeHtml(comment.text)}
+                        </div>
+                    </div>
+                </article>
+            `).join("")}
+        </div>
+    </section>`;
+}
+
+function formatRelativeDate(value) {
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    const now = new Date();
+    const seconds = Math.max(
+        0,
+        Math.floor((now.getTime() - date.getTime()) / 1000)
+    );
+
+    if (seconds < 45) {
+        return "Just now";
+    }
+
+    const minutes = Math.floor(seconds / 60);
+
+    if (minutes < 60) {
+        return `${minutes} min ago`;
+    }
+
+    const hours = Math.floor(minutes / 60);
+
+    if (hours < 24) {
+        return `${hours} hr ago`;
+    }
+
+    const days = Math.floor(hours / 24);
+
+    if (days === 1) {
+        return "Yesterday";
+    }
+
+    if (days < 7) {
+        return `${days} days ago`;
+    }
+
+    return date.toLocaleDateString();
 }
 
 function buildRelationshipSection(

@@ -1,5 +1,0 @@
-.git/**
-.github/**
-node_modules/**
-*.vsix
-x-plane-timeline-source.zip

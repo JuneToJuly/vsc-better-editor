@@ -15,7 +15,7 @@ const STORAGE_DIRECTORY = ".x-plane";
 const STORAGE_FILE = "entries.json";
 const LEGACY_STORAGE_DIRECTORY = ".code-knowledge";
 const LEGACY_STORAGE_FILE = "knowledge.json";
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 
 module.exports = {
     ENTRY_TYPES,

@@ -55,19 +55,9 @@ class EntryStorage {
             return [];
         }
 
-        const items = parsed.items.map(item => ({
-            ...item,
-            parentId: item.parentId ?? null,
-            type: ENTRY_TYPES.includes(item.type)
-                ? item.type
-                : "Documentation",
-            status: item.status || "active",
-            links: Array.isArray(item.links)
-                ? [...new Set(item.links.filter(Boolean))]
-                : [],
-            workspaceFolder:
-                item.workspaceFolder || workspaceFolder.name
-        }));
+        const items = parsed.items.map(item =>
+            normalizeItem(item, workspaceFolder.name)
+        );
 
         if (loadedFromLegacy) {
             await this.writeItems(workspaceFolder, items);
@@ -100,7 +90,9 @@ class EntryStorage {
         const bytes = Buffer.from(
             `${JSON.stringify({
                 version: STORAGE_VERSION,
-                items
+                items: items.map(item =>
+                    normalizeItem(item, workspaceFolder.name)
+                )
             }, null, 2)}\n`,
             "utf8"
         );
@@ -113,18 +105,24 @@ class EntryStorage {
 
     static async addItem(workspaceFolder, item) {
         const items = await this.readItems(workspaceFolder);
-        items.push(item);
+        items.push(normalizeItem(item, workspaceFolder.name));
         await this.writeItems(workspaceFolder, items);
     }
 
     static async upsertItem(workspaceFolder, item) {
         const items = await this.readItems(workspaceFolder);
-        const index = items.findIndex(existing => existing.id === item.id);
+        const normalized = normalizeItem(
+            item,
+            workspaceFolder.name
+        );
+        const index = items.findIndex(
+            existing => existing.id === normalized.id
+        );
 
         if (index === -1) {
-            items.push(item);
+            items.push(normalized);
         } else {
-            items[index] = item;
+            items[index] = normalized;
         }
 
         await this.writeItems(workspaceFolder, items);
@@ -138,7 +136,9 @@ class EntryStorage {
             .filter(item => !ids.has(item.id))
             .map(item => ({
                 ...item,
-                links: (item.links || []).filter(linkId => !ids.has(linkId))
+                links: (item.links || []).filter(
+                    linkId => !ids.has(linkId)
+                )
             }));
 
         await this.writeItems(workspaceFolder, remaining);
@@ -156,4 +156,86 @@ class EntryStorage {
     }
 }
 
-module.exports = { EntryStorage };
+function normalizeItem(item, workspaceFolderName) {
+    return {
+        ...item,
+        parentId: item.parentId ?? null,
+        type: ENTRY_TYPES.includes(item.type)
+            ? item.type
+            : "Documentation",
+        status: item.status || "active",
+        links: uniqueStrings(item.links),
+        comments: normalizeComments(item.comments),
+        workspaceFolder:
+            workspaceFolderName ||
+            item.workspaceFolder ||
+            ""
+    };
+}
+
+function normalizeComments(comments) {
+    if (!Array.isArray(comments)) {
+        return [];
+    }
+
+    const byId = new Map();
+
+    for (const comment of comments) {
+        if (
+            !comment ||
+            typeof comment.id !== "string" ||
+            typeof comment.text !== "string"
+        ) {
+            continue;
+        }
+
+        byId.set(comment.id, {
+            id: comment.id,
+            author:
+                typeof comment.author === "string" &&
+                comment.author.trim()
+                    ? comment.author.trim()
+                    : "Unknown",
+            text: comment.text.trim(),
+            createdAt:
+                typeof comment.createdAt === "string"
+                    ? comment.createdAt
+                    : new Date(0).toISOString(),
+            updatedAt:
+                typeof comment.updatedAt === "string"
+                    ? comment.updatedAt
+                    : (
+                        typeof comment.createdAt === "string"
+                            ? comment.createdAt
+                            : new Date(0).toISOString()
+                    )
+        });
+    }
+
+    return [...byId.values()].sort(
+        (left, right) =>
+            new Date(left.createdAt) - new Date(right.createdAt)
+    );
+}
+
+function uniqueStrings(values) {
+    if (!Array.isArray(values)) {
+        return [];
+    }
+
+    return [
+        ...new Set(
+            values.filter(
+                value =>
+                    typeof value === "string" &&
+                    value.length > 0
+            )
+        )
+    ];
+}
+
+module.exports = {
+    EntryStorage,
+    normalizeItem,
+    normalizeComments
+};

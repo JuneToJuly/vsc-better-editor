@@ -10,12 +10,11 @@ class TimelineItem extends vscode.TreeItem {
     this.commit = commit;
     this.repository = repository;
     this.contextValue = 'xPlaneSave';
-    this.baseDescription = new Date(commit.timestamp * 1000).toLocaleTimeString([], {
+    this.description = new Date(commit.timestamp * 1000).toLocaleTimeString([], {
       hour: 'numeric',
       minute: '2-digit',
       second: '2-digit'
     });
-    this.description = this.baseDescription;
 
     const changedDescription = commit.changedFiles.length === 1
       ? commit.changedFiles[0]
@@ -46,8 +45,6 @@ class TimelineProvider {
     this.onDidChangeTreeData = this.changedEmitter.event;
     this.repositoryRoot = undefined;
     this.cachedItems = [];
-    this.activeRepositoryRoot = undefined;
-    this.activeCommitHash = undefined;
   }
 
   setRepositoryRoot(root) {
@@ -87,86 +84,6 @@ class TimelineProvider {
     return undefined;
   }
 
-  updateActiveItemState() {
-    for (const item of this.cachedItems) {
-      const active = item.repository.root === this.activeRepositoryRoot
-        && item.commit.hash === this.activeCommitHash;
-      item.iconPath = new vscode.ThemeIcon(active ? 'play-circle' : 'history');
-      item.description = active
-        ? `${item.baseDescription} · current`
-        : item.baseDescription;
-      item.contextValue = active ? 'xPlaneSaveActive' : 'xPlaneSave';
-    }
-  }
-
-  async activateCommit(repositoryRoot, commitHash) {
-    this.activeRepositoryRoot = repositoryRoot;
-    this.activeCommitHash = commitHash;
-
-    let item = await this.findItem(repositoryRoot, commitHash);
-    if (!item) {
-      return undefined;
-    }
-
-    this.updateActiveItemState();
-    // Refresh the specific live elements so the active marker changes without
-    // replacing the objects that TreeView.reveal must select.
-    for (const cachedItem of this.cachedItems) {
-      this.changedEmitter.fire(cachedItem);
-    }
-    return item;
-  }
-
-  async loadRepository(root) {
-    const repository = new GitRepository(root);
-    const maxEntries = vscode.workspace
-      .getConfiguration('xPlaneTimeline')
-      .get('maxVisibleEntries', 250);
-
-    const commits = await repository.listTimeline(maxEntries);
-    const existingItems = new Map(
-      this.cachedItems
-        .filter(item => item.repository.root === root)
-        .map(item => [item.commit.hash, item])
-    );
-
-    this.repositoryRoot = root;
-    this.cachedItems = commits.map(commit => {
-      const existing = existingItems.get(commit.hash);
-      if (existing) {
-        // TreeView.reveal requires the exact element instance currently owned
-        // by the provider. Preserve object identity when the timeline reloads.
-        existing.commit = commit;
-        existing.repository = repository;
-        return existing;
-      }
-
-      return new TimelineItem(commit, repository);
-    });
-    this.updateActiveItemState();
-    return this.cachedItems;
-  }
-
-  async findItem(repositoryRoot, commitHash) {
-    let item = this.cachedItems.find(candidate =>
-      candidate.repository.root === repositoryRoot
-      && candidate.commit.hash === commitHash
-    );
-
-    if (item) {
-      return item;
-    }
-
-    try {
-      await this.loadRepository(repositoryRoot);
-      this.changedEmitter.fire(undefined);
-      item = this.cachedItems.find(candidate => candidate.commit.hash === commitHash);
-      return item;
-    } catch {
-      return undefined;
-    }
-  }
-
   async getChildren() {
     const root = await this.resolveRepositoryRoot();
     if (!root) {
@@ -176,7 +93,14 @@ class TimelineProvider {
     }
 
     try {
-      return await this.loadRepository(root);
+      const repository = new GitRepository(root);
+      const maxEntries = vscode.workspace
+        .getConfiguration('xPlaneTimeline')
+        .get('maxVisibleEntries', 250);
+
+      const commits = await repository.listTimeline(maxEntries);
+      this.cachedItems = commits.map(commit => new TimelineItem(commit, repository));
+      return this.cachedItems;
     } catch {
       return this.cachedItems;
     }

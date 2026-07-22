@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const crypto = require("crypto");
+const path = require("path");
 const { ENTRY_TYPES } = require("./constants");
 const { createAnchor, resolveAnchorRange } = require("./anchors");
 const {
@@ -103,6 +104,7 @@ class EntryCommands {
             updatedAt: now,
             resolvedAt: null,
             links: [],
+            comments: [],
             workspaceFolder: workspaceFolder.name,
             anchor: createAnchor(scope, editor)
         };
@@ -516,6 +518,206 @@ class EntryCommands {
         });
     }
 
+    async addComment(item) {
+        const author = await getCommentAuthor();
+
+        if (!author) {
+            return;
+        }
+
+        const text = await vscode.window.showInputBox({
+            title: "Add Comment",
+            prompt: `Posting as ${author}`,
+            placeHolder: "Write your comment",
+            validateInput: validateCommentText,
+            ignoreFocusOut: true
+        });
+
+        if (!text) {
+            return;
+        }
+
+        const now = new Date().toISOString();
+
+        item.comments = [
+            ...(item.comments || []),
+            {
+                id: crypto.randomUUID(),
+                author,
+                text: text.trim(),
+                createdAt: now,
+                updatedAt: now
+            }
+        ];
+
+        item.updatedAt = now;
+        await this.save(item);
+    }
+
+    async deleteComment(item, commentId) {
+        const comment = (item.comments || []).find(
+            candidate => candidate.id === commentId
+        );
+
+        if (!comment) {
+            return;
+        }
+
+        const answer = await vscode.window.showWarningMessage(
+            `Delete ${comment.author}'s comment?`,
+            { modal: true },
+            "Delete Comment"
+        );
+
+        if (answer !== "Delete Comment") {
+            return;
+        }
+
+        item.comments = (item.comments || []).filter(
+            candidate => candidate.id !== commentId
+        );
+
+        item.updatedAt = new Date().toISOString();
+        await this.save(item);
+    }
+
+
+    async exportExchange() {
+        const workspaceFolder = await chooseWorkspaceFolder();
+
+        if (!workspaceFolder) {
+            return;
+        }
+
+        const items = await this.storage.readItems(workspaceFolder);
+
+        const defaultUri = vscode.Uri.file(
+            path.join(
+                workspaceFolder.uri.fsPath,
+                `${workspaceFolder.name}.xplane-share.json`
+            )
+        );
+
+        const destination = await vscode.window.showSaveDialog({
+            title: "Export X-Plane Exchange",
+            defaultUri,
+            filters: {
+                "X-Plane Exchange": ["json"]
+            }
+        });
+
+        if (!destination) {
+            return;
+        }
+
+        const payload = {
+            format: "x-plane-exchange",
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            sourceWorkspace: workspaceFolder.name,
+            items
+        };
+
+        await vscode.workspace.fs.writeFile(
+            destination,
+            Buffer.from(
+                `${JSON.stringify(payload, null, 2)}\n`,
+                "utf8"
+            )
+        );
+
+        vscode.window.showInformationMessage(
+            `Exported ${items.length} X-Plane ` +
+            `entr${items.length === 1 ? "y" : "ies"}.`
+        );
+    }
+
+    async importExchange() {
+        const workspaceFolder = await chooseWorkspaceFolder();
+
+        if (!workspaceFolder) {
+            return;
+        }
+
+        const selectedFiles = await vscode.window.showOpenDialog({
+            title: "Import X-Plane Exchange",
+            canSelectMany: false,
+            canSelectFiles: true,
+            canSelectFolders: false,
+            filters: {
+                "X-Plane Exchange": ["json"]
+            }
+        });
+
+        const source = selectedFiles?.[0];
+
+        if (!source) {
+            return;
+        }
+
+        let payload;
+
+        try {
+            const bytes = await vscode.workspace.fs.readFile(source);
+            payload = JSON.parse(
+                Buffer.from(bytes).toString("utf8")
+            );
+        } catch (error) {
+            vscode.window.showErrorMessage(
+                `Unable to import X-Plane exchange: ${error.message}`
+            );
+            return;
+        }
+
+        if (
+            payload?.format !== "x-plane-exchange" ||
+            !Array.isArray(payload.items)
+        ) {
+            vscode.window.showErrorMessage(
+                "This file is not a valid X-Plane exchange."
+            );
+            return;
+        }
+
+        const localItems = await this.storage.readItems(
+            workspaceFolder
+        );
+
+        const result = mergeExchangeItems(
+            localItems,
+            payload.items,
+            workspaceFolder.name
+        );
+
+        await this.storage.writeItems(
+            workspaceFolder,
+            result.items
+        );
+
+        await this.refresh();
+
+        const details = [
+            `${result.addedEntries} new entr` +
+                `${result.addedEntries === 1 ? "y" : "ies"}`,
+            `${result.addedComments} new comment` +
+                `${result.addedComments === 1 ? "" : "s"}`,
+            `${result.addedLinks} new link` +
+                `${result.addedLinks === 1 ? "" : "s"}`
+        ];
+
+        if (result.conflicts > 0) {
+            details.push(
+                `${result.conflicts} local entr` +
+                `${result.conflicts === 1 ? "y" : "ies"} preserved ` +
+                "instead of being overwritten"
+            );
+        }
+
+        vscode.window.showInformationMessage(
+            `X-Plane import complete: ${details.join(", ")}.`
+        );
+    }
+
     async save(item) {
         const workspaceFolder = findWorkspaceFolder(item.workspaceFolder);
 
@@ -656,5 +858,220 @@ function validateEntryText(value) {
 
     return null;
 }
+
+async function getCommentAuthor() {
+    const configuration = vscode.workspace.getConfiguration(
+        "xPlane"
+    );
+
+    const configured = configuration.get("authorName", "");
+
+    if (
+        typeof configured === "string" &&
+        configured.trim()
+    ) {
+        return configured.trim();
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+        "Set the name that will appear beside your shared X-Plane comments.",
+        { modal: true },
+        "Set Comment Name"
+    );
+
+    if (choice !== "Set Comment Name") {
+        return null;
+    }
+
+    const author = await vscode.window.showInputBox({
+        title: "X-Plane Comment Name",
+        prompt:
+            "Enter your name only. Your comment will be entered in the next prompt.",
+        placeHolder: "For example: Alex",
+        validateInput: value =>
+            value && value.trim()
+                ? null
+                : "A name is required.",
+        ignoreFocusOut: true
+    });
+
+    if (!author) {
+        return null;
+    }
+
+    await configuration.update(
+        "authorName",
+        author.trim(),
+        vscode.ConfigurationTarget.Global
+    );
+
+    return author.trim();
+}
+
+function validateCommentText(value) {
+    if (!value || !value.trim()) {
+        return "Comment text is required.";
+    }
+
+    if (value.trim().length > 4000) {
+        return "Comments must be 4,000 characters or fewer.";
+    }
+
+    return null;
+}
+
+function mergeExchangeItems(
+    localItems,
+    importedItems,
+    workspaceFolderName
+) {
+    const items = localItems.map(item => ({
+        ...item,
+        links: [...(item.links || [])],
+        comments: [...(item.comments || [])]
+    }));
+
+    const localById = new Map(
+        items.map(item => [item.id, item])
+    );
+
+    let addedEntries = 0;
+    let addedComments = 0;
+    let addedLinks = 0;
+    let conflicts = 0;
+
+    for (const imported of importedItems) {
+        if (
+            !imported ||
+            typeof imported.id !== "string" ||
+            typeof imported.text !== "string" ||
+            !imported.anchor
+        ) {
+            continue;
+        }
+
+        const existing = localById.get(imported.id);
+
+        if (!existing) {
+            const added = {
+                ...imported,
+                workspaceFolder: workspaceFolderName,
+                links: uniqueStrings(imported.links),
+                comments: mergeComments([], imported.comments)
+                    .comments
+            };
+
+            items.push(added);
+            localById.set(added.id, added);
+            addedEntries += 1;
+            addedComments += added.comments.length;
+            addedLinks += added.links.length;
+            continue;
+        }
+
+        if (coreEntryDiffers(existing, imported)) {
+            conflicts += 1;
+        }
+
+        const mergedComments = mergeComments(
+            existing.comments,
+            imported.comments
+        );
+
+        existing.comments = mergedComments.comments;
+        addedComments += mergedComments.added;
+
+        const beforeLinks = new Set(existing.links || []);
+        existing.links = uniqueStrings([
+            ...(existing.links || []),
+            ...(imported.links || [])
+        ]);
+        addedLinks += existing.links.filter(
+            linkId => !beforeLinks.has(linkId)
+        ).length;
+    }
+
+    return {
+        items,
+        addedEntries,
+        addedComments,
+        addedLinks,
+        conflicts
+    };
+}
+
+function mergeComments(localComments, importedComments) {
+    const comments = [...(localComments || [])];
+    const knownIds = new Set(
+        comments.map(comment => comment.id)
+    );
+    let added = 0;
+
+    for (const comment of importedComments || []) {
+        if (
+            !comment ||
+            typeof comment.id !== "string" ||
+            typeof comment.text !== "string" ||
+            knownIds.has(comment.id)
+        ) {
+            continue;
+        }
+
+        comments.push({
+            id: comment.id,
+            author:
+                typeof comment.author === "string" &&
+                comment.author.trim()
+                    ? comment.author.trim()
+                    : "Unknown",
+            text: comment.text.trim(),
+            createdAt:
+                typeof comment.createdAt === "string"
+                    ? comment.createdAt
+                    : new Date(0).toISOString(),
+            updatedAt:
+                typeof comment.updatedAt === "string"
+                    ? comment.updatedAt
+                    : (
+                        typeof comment.createdAt === "string"
+                            ? comment.createdAt
+                            : new Date(0).toISOString()
+                    )
+        });
+
+        knownIds.add(comment.id);
+        added += 1;
+    }
+
+    comments.sort(
+        (left, right) =>
+            new Date(left.createdAt) - new Date(right.createdAt)
+    );
+
+    return { comments, added };
+}
+
+function coreEntryDiffers(local, imported) {
+    return (
+        local.text !== imported.text ||
+        local.type !== imported.type ||
+        local.status !== imported.status ||
+        JSON.stringify(local.anchor) !==
+            JSON.stringify(imported.anchor)
+    );
+}
+
+function uniqueStrings(values) {
+    return [
+        ...new Set(
+            (values || []).filter(
+                value =>
+                    typeof value === "string" &&
+                    value.length > 0
+            )
+        )
+    ];
+}
+
 
 module.exports = { EntryCommands };
