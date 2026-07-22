@@ -63,9 +63,8 @@ class GitRepository {
 
   async createSnapshot(savedFile, includeUntracked) {
     const timelineRef = await this.timelineRef();
-    const headCommit = (await this.run(['rev-parse', 'HEAD'])).trim();
     const previousTimelineCommit = await this.tryResolve(timelineRef);
-    const parentCommit = previousTimelineCommit || headCommit;
+    const headCommit = await this.tryResolve('HEAD');
 
     const gitDirectory = await this.gitCommonDir();
     const privateIndexDirectory = path.join(gitDirectory, 'x-plane', 'indexes');
@@ -84,13 +83,34 @@ class GitRepository {
     try {
       await rm(privateIndexPath, { force: true });
 
-      // Start the private index from the preceding timeline snapshot. This does
-      // not alter .git/index, HEAD, or the checked-out branch.
-      await this.run(['read-tree', `${parentCommit}^{tree}`], privateIndexEnvironment);
+      // Start the private index from the preceding timeline snapshot or HEAD.
+      // A newly initialized repository has an unborn HEAD, so begin with an
+      // empty private index instead. None of these operations alter .git/index,
+      // HEAD, or the checked-out branch.
+      const existingParent = previousTimelineCommit || headCommit;
+      if (existingParent) {
+        await this.run(['read-tree', `${existingParent}^{tree}`], privateIndexEnvironment);
+      } else {
+        await this.run(['read-tree', '--empty'], privateIndexEnvironment);
+      }
 
       // Overlay the current working tree onto the private index.
       const addMode = includeUntracked ? '-A' : '-u';
-      await this.run(['add', addMode, '--', '.'], privateIndexEnvironment);
+      const nestedRepositoryExclusions = includeUntracked
+        ? await this.untrackedNestedRepositoryPathspecs()
+        : [];
+      await this.run(
+        [
+          '-c',
+          'core.safecrlf=false',
+          'add',
+          addMode,
+          '--',
+          '.',
+          ...nestedRepositoryExclusions
+        ],
+        privateIndexEnvironment
+      );
 
       const treeHash = (await this.run(['write-tree'], privateIndexEnvironment)).trim();
       const branch = await this.currentBranch();
@@ -102,6 +122,20 @@ class GitRepository {
         `X-Plane-File: ${relativeSavedFile}`,
         `X-Plane-Branch: ${branch}`
       ].join('\n');
+
+      let parentCommit = previousTimelineCommit || headCommit;
+      if (!parentCommit) {
+        const emptyTreeHash = (
+          await this.runWithInput(['mktree'], '', privateIndexEnvironment)
+        ).trim();
+        parentCommit = (
+          await this.runWithInput(
+            ['commit-tree', emptyTreeHash],
+            'X-Plane timeline base\n',
+            privateIndexEnvironment
+          )
+        ).trim();
+      }
 
       const commitHash = (
         await this.runWithInput(
@@ -133,6 +167,45 @@ class GitRepository {
     } finally {
       await rm(privateIndexPath, { force: true });
     }
+  }
+
+
+  async untrackedNestedRepositoryPathspecs() {
+    // A multi-root workspace can place one Git repository inside another
+    // repository's working tree. Git tries to stage an untracked nested repo as
+    // a gitlink, and an unborn nested repo makes `git add` fail with
+    // "does not have a commit checked out". X-Plane records each repository
+    // independently, so nested repositories must be excluded from the parent
+    // repository snapshot.
+    const status = await this.run([
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=all'
+    ]);
+
+    const exclusions = [];
+    for (const entry of status.split('\0')) {
+      if (!entry.startsWith('?? ')) {
+        continue;
+      }
+
+      const relativePath = entry.slice(3).replace(/\/$/, '');
+      if (!relativePath) {
+        continue;
+      }
+
+      try {
+        await stat(path.join(this.root, relativePath, '.git'));
+      } catch {
+        continue;
+      }
+
+      exclusions.push(`:(exclude)${relativePath}`);
+      exclusions.push(`:(exclude)${relativePath}/**`);
+    }
+
+    return exclusions;
   }
 
   async listTimeline(limit) {

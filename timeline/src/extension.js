@@ -16,7 +16,27 @@ function activate(context) {
     showCollapseAll: false
   });
   const gitDocumentProvider = new GitDocumentProvider();
-  const replaySession = new ReplaySession();
+  const replaySession = new ReplaySession(async (repository, commit) => {
+    const item = await timelineProvider.activateCommit(repository.root, commit.hash);
+    if (!item) {
+      return;
+    }
+
+    try {
+      // VS Code does not always commit a TreeView selection when reveal() is
+      // invoked from a diff/peek editor with focus:false. Briefly focus the
+      // timeline, select the exact live item, then return focus to the editor.
+      await vscode.commands.executeCommand('xPlaneTimeline.focus');
+      await treeView.reveal(item, {
+        select: true,
+        focus: true,
+        expand: false
+      });
+      await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    } catch {
+      // Keep diff navigation usable even if the view is temporarily unavailable.
+    }
+  });
   const statusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     50

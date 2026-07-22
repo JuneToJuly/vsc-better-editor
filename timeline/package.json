@@ -2,7 +2,7 @@
   "name": "x-plane-timeline",
   "displayName": "X-Plane Timeline",
   "description": "Walk through your development one save at a time using private Git timeline commits.",
-  "version": "0.4.1",
+  "version": "0.4.7",
   "publisher": "local",
   "license": "MIT",
   "engines": {

@@ -84,6 +84,55 @@ class TimelineProvider {
     return undefined;
   }
 
+  async loadRepository(root) {
+    const repository = new GitRepository(root);
+    const maxEntries = vscode.workspace
+      .getConfiguration('xPlaneTimeline')
+      .get('maxVisibleEntries', 250);
+
+    const commits = await repository.listTimeline(maxEntries);
+    const existingItems = new Map(
+      this.cachedItems
+        .filter(item => item.repository.root === root)
+        .map(item => [item.commit.hash, item])
+    );
+
+    this.repositoryRoot = root;
+    this.cachedItems = commits.map(commit => {
+      const existing = existingItems.get(commit.hash);
+      if (existing) {
+        // TreeView.reveal requires the exact element instance currently owned
+        // by the provider. Preserve object identity when the timeline reloads.
+        existing.commit = commit;
+        existing.repository = repository;
+        return existing;
+      }
+
+      return new TimelineItem(commit, repository);
+    });
+    return this.cachedItems;
+  }
+
+  async findItem(repositoryRoot, commitHash) {
+    let item = this.cachedItems.find(candidate =>
+      candidate.repository.root === repositoryRoot
+      && candidate.commit.hash === commitHash
+    );
+
+    if (item) {
+      return item;
+    }
+
+    try {
+      await this.loadRepository(repositoryRoot);
+      this.changedEmitter.fire(undefined);
+      item = this.cachedItems.find(candidate => candidate.commit.hash === commitHash);
+      return item;
+    } catch {
+      return undefined;
+    }
+  }
+
   async getChildren() {
     const root = await this.resolveRepositoryRoot();
     if (!root) {
@@ -93,14 +142,7 @@ class TimelineProvider {
     }
 
     try {
-      const repository = new GitRepository(root);
-      const maxEntries = vscode.workspace
-        .getConfiguration('xPlaneTimeline')
-        .get('maxVisibleEntries', 250);
-
-      const commits = await repository.listTimeline(maxEntries);
-      this.cachedItems = commits.map(commit => new TimelineItem(commit, repository));
-      return this.cachedItems;
+      return await this.loadRepository(root);
     } catch {
       return this.cachedItems;
     }

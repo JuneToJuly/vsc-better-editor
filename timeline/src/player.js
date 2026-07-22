@@ -2,10 +2,11 @@ const vscode = require('vscode');
 const { historicalUri } = require('./timeline');
 
 class ReplaySession {
-  constructor() {
+  constructor(revealCommit) {
     this.repository = undefined;
     this.commits = [];
     this.currentIndex = -1;
+    this.revealCommit = revealCommit;
     this.changedEmitter = new vscode.EventEmitter();
     this.onDidChange = this.changedEmitter.event;
   }
@@ -137,6 +138,10 @@ class ReplaySession {
 
     await this.updateContext(after);
     this.changedEmitter.fire();
+
+    if (this.revealCommit) {
+      await this.revealCommit(this.repository, commit);
+    }
   }
 
   dispose() {

@@ -27,6 +27,10 @@ While an X-Plane diff is active, the editor title provides:
 
 The unavailable action is hidden at the beginning or end of the loaded timeline. There is no replay webview, slider, autoplay, or playback-speed state.
 
+## Newly initialized repositories
+
+X-Plane also records repositories whose current branch does not have its first normal Git commit yet. It creates a private empty baseline commit beneath the X-Plane timeline ref so the first save has a usable diff. This does not create a commit on the checked-out branch or change `HEAD` or `.git/index`.
+
 ## Commands
 
 - `X-Plane: Refresh Timeline`
@@ -40,3 +44,25 @@ The unavailable action is hidden at the beginning or end of the loaded timeline.
 ## Peek and modal diff navigation
 
 When VS Code displays an X-Plane diff in a peek or modal editor, Previous Diff and Next Diff are shown as CodeLens actions at the top of the current-save side. Full editor tabs also retain their editor-title buttons.
+
+
+## Line-ending handling
+
+Timeline snapshots honor Git's configured line-ending conversion, but disable `core.safecrlf` only for the extension's private-index `git add`. This prevents LF/CRLF safety warnings from blocking a save snapshot. The working files and normal Git index are not modified.
+
+## Nested repositories
+
+X-Plane records each Git repository independently. When one repository is located inside another repository's working tree, the parent snapshot excludes that nested repository. This prevents Git from trying to stage the nested repository as a gitlink, including when the nested repository has not made its first commit yet.
+
+## Synchronized timeline selection
+
+When a save diff opens, X-Plane selects the matching save in the Development Timeline tree. Previous Diff and Next Diff keep that selection synchronized, so the sidebar always shows the current replay position.
+
+
+## Version 0.4.6
+
+Timeline navigation now preserves tree-item identity while refreshing, allowing Previous Diff and Next Diff to reliably reveal and select the matching save in the X-Plane sidebar.
+
+## Timeline selection synchronization
+
+The active replay save is selected and marked as `current` in the timeline whenever a diff is opened or Previous Diff / Next Diff is used.
