@@ -1,0 +1,918 @@
+{
+  "name": "ambient-action-audio",
+  "displayName": "Ambient Action Audio",
+  "description": "Selectable ambient sound environments with reliable immediate Vim feedback and controlled voice replacement.",
+  "version": "1.1.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ambientActionAudio.toggle",
+        "title": "Ambient Action Audio: Toggle Sounds"
+      },
+      {
+        "command": "ambientActionAudio.preview",
+        "title": "Ambient Action Audio: Preview Sound Pack"
+      },
+      {
+        "command": "ambientActionAudio.playSuccess",
+        "title": "Ambient Action Audio: Play Success Sound"
+      },
+      {
+        "command": "ambientActionAudio.playFailure",
+        "title": "Ambient Action Audio: Play Failure Sound"
+      },
+      {
+        "command": "ambientActionAudio.vimNormal",
+        "title": "Ambient Action Audio: Vim Normal Mode"
+      },
+      {
+        "command": "ambientActionAudio.vimInsert",
+        "title": "Ambient Action Audio: Vim Insert Mode"
+      },
+      {
+        "command": "ambientActionAudio.vimVisual",
+        "title": "Ambient Action Audio: Vim Visual Mode"
+      },
+      {
+        "command": "ambientActionAudio.vimSearch",
+        "title": "Ambient Action Audio: Vim Search"
+      },
+      {
+        "command": "ambientActionAudio.vimYank",
+        "title": "Ambient Action Audio: Vim Yank"
+      },
+      {
+        "command": "ambientActionAudio.vimPaste",
+        "title": "Ambient Action Audio: Vim Paste"
+      },
+      {
+        "command": "ambientActionAudio.vimDelete",
+        "title": "Ambient Action Audio: Vim Delete"
+      },
+      {
+        "command": "ambientActionAudio.showVimSetup",
+        "title": "Ambient Action Audio: Show VSCodeVim Setup"
+      },
+      {
+        "command": "ambientActionAudio.vimTransition",
+        "title": "Ambient Action Audio: Vim Transition"
+      },
+      {
+        "command": "ambientActionAudio.vimMove",
+        "title": "Ambient Action Audio: Vim Movement"
+      },
+      {
+        "command": "ambientActionAudio.vimPage",
+        "title": "Ambient Action Audio: Vim Page Movement"
+      },
+      {
+        "command": "ambientActionAudio.vimEscape",
+        "title": "Ambient Action Audio: Vim Escape to Normal"
+      },
+      {
+        "command": "ambientActionAudio.installJkEscapeSound",
+        "title": "Ambient Action Audio: Install Sound for JK Escape"
+      },
+      {
+        "command": "ambientActionAudio.installNavigationMappings",
+        "title": "Ambient Action Audio: Install Vim Navigation Sound Mappings"
+      },
+      {
+        "command": "ambientActionAudio.vimPageUpAction",
+        "title": "Ambient Action Audio: Vim Half Page Up"
+      },
+      {
+        "command": "ambientActionAudio.vimPageDownAction",
+        "title": "Ambient Action Audio: Vim Half Page Down"
+      },
+      {
+        "command": "ambientActionAudio.installVimMappings",
+        "title": "Ambient Action Audio: Install All Vim Sound Mappings"
+      },
+      {
+        "command": "ambientActionAudio.vimChangeAction",
+        "title": "Ambient Action Audio: Vim Change"
+      },
+      {
+        "command": "ambientActionAudio.vimDeleteAction",
+        "title": "Ambient Action Audio: Vim Delete"
+      },
+      {
+        "command": "ambientActionAudio.vimYankAction",
+        "title": "Ambient Action Audio: Vim Yank"
+      },
+      {
+        "command": "ambientActionAudio.vimPutAction",
+        "title": "Ambient Action Audio: Vim Put"
+      },
+      {
+        "command": "ambientActionAudio.playVimPageUp",
+        "title": "Ambient Action Audio: Play Vim Page Up Sound"
+      },
+      {
+        "command": "ambientActionAudio.playVimPageDown",
+        "title": "Ambient Action Audio: Play Vim Page Down Sound"
+      },
+      {
+        "command": "ambientActionAudio.playVimChange",
+        "title": "Ambient Action Audio: Play Vim Change Sound"
+      },
+      {
+        "command": "ambientActionAudio.playVimDelete",
+        "title": "Ambient Action Audio: Play Vim Delete Sound"
+      },
+      {
+        "command": "ambientActionAudio.playVimYank",
+        "title": "Ambient Action Audio: Play Vim Yank Sound"
+      },
+      {
+        "command": "ambientActionAudio.playVimPut",
+        "title": "Ambient Action Audio: Play Vim Put Sound"
+      },
+      {
+        "command": "ambientActionAudio.selectEnvironment",
+        "title": "Ambient Action Audio: Select Sound Environment"
+      },
+      {
+        "command": "ambientActionAudio.previewEnvironment",
+        "title": "Ambient Action Audio: Preview Current Environment"
+      }
+    ],
+    "configuration": {
+      "title": "Ambient Action Audio",
+      "properties": {
+        "ambientActionAudio.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable all action sounds."
+        },
+        "ambientActionAudio.volume": {
+          "type": "number",
+          "default": 0.18,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Playback volume. Native WAV playback support varies by operating system; on Windows this setting is approximated when generating tones."
+        },
+        "ambientActionAudio.minimumIntervalMs": {
+          "type": "number",
+          "default": 180,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Minimum delay between repeated instances of the same sound."
+        },
+        "ambientActionAudio.muteWhenWindowInactive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Do not play sounds when the VS Code window is inactive."
+        },
+        "ambientActionAudio.save": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play a sound after saving a file."
+        },
+        "ambientActionAudio.openClose": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play sounds when text documents are opened or closed."
+        },
+        "ambientActionAudio.editorNavigation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Play a quiet sound when switching active editors."
+        },
+        "ambientActionAudio.tasks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play sounds when tasks start and finish."
+        },
+        "ambientActionAudio.debug": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play sounds when debug sessions start and stop."
+        },
+        "ambientActionAudio.vim.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable commands used by VSCodeVim remappings."
+        },
+        "ambientActionAudio.vim.actionCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable commands that can be used in VSCodeVim remappings for yank, paste, delete, and search sounds."
+        },
+        "ambientActionAudio.vim.movement": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play directional cues for h, j, k, and l movement in Normal and Visual modes."
+        },
+        "ambientActionAudio.vim.pageMovement": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play cues for Page Up and Page Down."
+        },
+        "ambientActionAudio.vim.movementMinimumIntervalMs": {
+          "type": "number",
+          "default": 24,
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Minimum interval between repeated Vim navigation sounds. The default is low enough to preserve feedback during rapid movement."
+        },
+        "ambientActionAudio.soundVariation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Choose among subtly varied natural samples so repeated navigation feels organic."
+        },
+        "ambientActionAudio.vim.autoInstallNavigationMappings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically install VSCodeVim remappings for Ctrl+U and Ctrl+D. This avoids keybinding precedence conflicts with VSCodeVim."
+        },
+        "ambientActionAudio.globalMinimumIntervalMs": {
+          "type": "number",
+          "default": 12,
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Tiny duplicate-event guard. New sounds are no longer discarded merely because another sound is playing."
+        },
+        "ambientActionAudio.maxConcurrentSounds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Maximum simultaneous player processes. When full, the oldest sound is stopped so the newest action still receives immediate feedback."
+        },
+        "ambientActionAudio.vim.autoInstallActionMappings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically install VSCodeVim mappings for Ctrl+U, Ctrl+D, c, d, y, and p."
+        },
+        "ambientActionAudio.environment": {
+          "type": "string",
+          "enum": [
+            "voxel",
+            "kingdomHearts",
+            "zen"
+          ],
+          "enumDescriptions": [
+            "Warm wooden tones, soft footsteps, airy page movement, and cave-like ambience.",
+            "Original crystal, glass, choir-like, and magical tones inspired by airy fantasy soundscapes.",
+            "Very restrained wood, breath, water, and singing-bowl-like tones."
+          ],
+          "default": "voxel",
+          "description": "Select the active sound environment."
+        },
+        "ambientActionAudio.vim.actionMinimumIntervalMs": {
+          "type": "number",
+          "default": 18,
+          "minimum": 0,
+          "maximum": 500,
+          "description": "Minimum interval between Vim operator sounds such as change, delete, yank, and put."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "key": "i",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "i"
+          ]
+        }
+      },
+      {
+        "key": "a",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "a"
+          ]
+        }
+      },
+      {
+        "key": "shift+i",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "I"
+          ]
+        }
+      },
+      {
+        "key": "shift+a",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "A"
+          ]
+        }
+      },
+      {
+        "key": "o",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "o"
+          ]
+        }
+      },
+      {
+        "key": "shift+o",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimInsert",
+          "after": [
+            "O"
+          ]
+        }
+      },
+      {
+        "key": "v",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimVisual",
+          "after": [
+            "v"
+          ]
+        }
+      },
+      {
+        "key": "shift+v",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimVisual",
+          "after": [
+            "V"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+v",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimVisual",
+          "after": [
+            "<C-v>"
+          ]
+        }
+      },
+      {
+        "key": "/",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimSearch",
+          "after": [
+            "/"
+          ]
+        }
+      },
+      {
+        "key": "shift+;",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimSearch",
+          "after": [
+            ":"
+          ]
+        }
+      },
+      {
+        "key": "escape",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Insert'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "escape",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Replace'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "escape",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "escape",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "escape",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+[",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Insert'",
+        "args": {
+          "sound": "vimNormal",
+          "after": [
+            "<Esc>"
+          ]
+        }
+      },
+      {
+        "key": "h",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimMoveLeft",
+          "after": [
+            "h"
+          ]
+        }
+      },
+      {
+        "key": "j",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimMoveDown",
+          "after": [
+            "j"
+          ]
+        }
+      },
+      {
+        "key": "k",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimMoveUp",
+          "after": [
+            "k"
+          ]
+        }
+      },
+      {
+        "key": "l",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimMoveRight",
+          "after": [
+            "l"
+          ]
+        }
+      },
+      {
+        "key": "pageup",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<PageUp>"
+          ]
+        }
+      },
+      {
+        "key": "pagedown",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<PageDown>"
+          ]
+        }
+      },
+      {
+        "key": "h",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimMoveLeft",
+          "after": [
+            "h"
+          ]
+        }
+      },
+      {
+        "key": "j",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimMoveDown",
+          "after": [
+            "j"
+          ]
+        }
+      },
+      {
+        "key": "k",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimMoveUp",
+          "after": [
+            "k"
+          ]
+        }
+      },
+      {
+        "key": "l",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimMoveRight",
+          "after": [
+            "l"
+          ]
+        }
+      },
+      {
+        "key": "pageup",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<PageUp>"
+          ]
+        }
+      },
+      {
+        "key": "pagedown",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<PageDown>"
+          ]
+        }
+      },
+      {
+        "key": "h",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimMoveLeft",
+          "after": [
+            "h"
+          ]
+        }
+      },
+      {
+        "key": "j",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimMoveDown",
+          "after": [
+            "j"
+          ]
+        }
+      },
+      {
+        "key": "k",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimMoveUp",
+          "after": [
+            "k"
+          ]
+        }
+      },
+      {
+        "key": "l",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimMoveRight",
+          "after": [
+            "l"
+          ]
+        }
+      },
+      {
+        "key": "pageup",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<PageUp>"
+          ]
+        }
+      },
+      {
+        "key": "pagedown",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<PageDown>"
+          ]
+        }
+      },
+      {
+        "key": "h",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimMoveLeft",
+          "after": [
+            "h"
+          ]
+        }
+      },
+      {
+        "key": "j",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimMoveDown",
+          "after": [
+            "j"
+          ]
+        }
+      },
+      {
+        "key": "k",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimMoveUp",
+          "after": [
+            "k"
+          ]
+        }
+      },
+      {
+        "key": "l",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimMoveRight",
+          "after": [
+            "l"
+          ]
+        }
+      },
+      {
+        "key": "pageup",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<PageUp>"
+          ]
+        }
+      },
+      {
+        "key": "pagedown",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<PageDown>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+u",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<C-u>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+d",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<C-d>"
+          ]
+        }
+      },
+      {
+        "key": "w",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimWordForward",
+          "after": [
+            "w"
+          ]
+        }
+      },
+      {
+        "key": "b",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Normal'",
+        "args": {
+          "sound": "vimWordBackward",
+          "after": [
+            "b"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+u",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<C-u>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+d",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<C-d>"
+          ]
+        }
+      },
+      {
+        "key": "w",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimWordForward",
+          "after": [
+            "w"
+          ]
+        }
+      },
+      {
+        "key": "b",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'Visual'",
+        "args": {
+          "sound": "vimWordBackward",
+          "after": [
+            "b"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+u",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<C-u>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+d",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<C-d>"
+          ]
+        }
+      },
+      {
+        "key": "w",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimWordForward",
+          "after": [
+            "w"
+          ]
+        }
+      },
+      {
+        "key": "b",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualLine'",
+        "args": {
+          "sound": "vimWordBackward",
+          "after": [
+            "b"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+u",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimPageUp",
+          "after": [
+            "<C-u>"
+          ]
+        }
+      },
+      {
+        "key": "ctrl+d",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimPageDown",
+          "after": [
+            "<C-d>"
+          ]
+        }
+      },
+      {
+        "key": "w",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimWordForward",
+          "after": [
+            "w"
+          ]
+        }
+      },
+      {
+        "key": "b",
+        "command": "ambientActionAudio.vimTransition",
+        "when": "editorTextFocus && vim.mode == 'VisualBlock'",
+        "args": {
+          "sound": "vimWordBackward",
+          "after": [
+            "b"
+          ]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  },
+  "license": "MIT"
+}

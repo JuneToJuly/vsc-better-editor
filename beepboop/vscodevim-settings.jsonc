@@ -1,0 +1,29 @@
+{
+  // Copy the arrays you need into your existing settings.json.
+  // Run "Ambient Action Audio: Show VSCodeVim Setup" for the full setup.
+  "vim.insertModeKeyBindingsNonRecursive": [
+    {
+      "before": ["<Esc>"],
+      "commands": [
+        "ambientActionAudio.vimNormal",
+        { "command": "vim.remap", "args": { "after": ["<Esc>"] } }
+      ]
+    }
+  ],
+  "vim.normalModeKeyBindingsNonRecursive": [
+    {
+      "before": ["i"],
+      "commands": [
+        "ambientActionAudio.vimInsert",
+        { "command": "vim.remap", "args": { "after": ["i"] } }
+      ]
+    },
+    {
+      "before": ["v"],
+      "commands": [
+        "ambientActionAudio.vimVisual",
+        { "command": "vim.remap", "args": { "after": ["v"] } }
+      ]
+    }
+  ]
+}

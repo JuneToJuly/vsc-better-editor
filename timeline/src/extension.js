@@ -5,6 +5,7 @@ const {
   TimelineProvider
 } = require('./timeline');
 const { ReplayCodeLensProvider, ReplaySession } = require('./player');
+const { ChangeViewer } = require('./changeViewer');
 
 let recordingPaused = false;
 let snapshotQueue = Promise.resolve();
@@ -16,7 +17,43 @@ function activate(context) {
     showCollapseAll: false
   });
   const gitDocumentProvider = new GitDocumentProvider();
-  const replaySession = new ReplaySession();
+  const replaySession = new ReplaySession(async (repository, commit) => {
+    const item = await timelineProvider.activateCommit(repository.root, commit.hash);
+    if (!item) {
+      return;
+    }
+
+    try {
+      // VS Code does not always commit a TreeView selection when reveal() is
+      // invoked from a diff/peek editor with focus:false. Briefly focus the
+      // timeline, select the exact live item, then return focus to the editor.
+      await vscode.commands.executeCommand('xPlaneTimeline.focus');
+      await treeView.reveal(item, {
+        select: true,
+        focus: true,
+        expand: false
+      });
+      await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    } catch {
+      // Keep diff navigation usable even if the view is temporarily unavailable.
+    }
+  });
+  const changeViewer = new ChangeViewer(context, async (repository, commit) => {
+    const item = await timelineProvider.activateCommit(repository.root, commit.hash);
+    if (!item) {
+      return;
+    }
+
+    try {
+      await treeView.reveal(item, {
+        select: true,
+        focus: false,
+        expand: false
+      });
+    } catch {
+      // The viewer remains usable if the timeline view is hidden.
+    }
+  });
   const statusItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     50
@@ -47,6 +84,7 @@ function activate(context) {
   context.subscriptions.push(
     timelineProvider,
     replaySession,
+    changeViewer,
     treeView,
     statusItem,
     vscode.workspace.registerTextDocumentContentProvider(
@@ -70,6 +108,16 @@ function activate(context) {
     vscode.commands.registerCommand('xPlaneTimeline.resume', () => {
       recordingPaused = false;
       updateStatus();
+    }),
+    vscode.commands.registerCommand('xPlaneTimeline.openViewer', async item => {
+      const target = item || treeView.selection[0] || await timelineProvider.getDefaultItem();
+      if (!target) {
+        await vscode.window.showInformationMessage(
+          'No X-Plane saves are available for the current repository.'
+        );
+        return;
+      }
+      return changeViewer.open(target);
     }),
     vscode.commands.registerCommand('xPlaneTimeline.openDiff', item => {
       return replaySession.open(item);

@@ -1,8 +1,8 @@
 {
   "name": "window-search",
   "displayName": "Window Search",
-  "description": "Context-based multi-line search with navigation and preview",
-  "version": "0.0.1",
+  "description": "Project-wide single-line search and context-based multi-line window search with navigation and preview",
+  "version": "0.0.18",
   "publisher": "ian Thomas",
   "engines": {
     "vscode": "^1.85.0"
@@ -10,11 +10,17 @@
   "categories": [
     "Other"
   ],
-"enabledApiProposals": ["findTextInFiles"],
+  "enabledApiProposals": [
+    "findTextInFiles"
+  ],
   "activationEvents": [
     "onCommand:windowSearch.run",
     "onCommand:windowSearch.increaseWindow",
-    "onCommand:windowSearch.decreaseWindow"
+    "onCommand:windowSearch.decreaseWindow",
+    "onCommand:windowSearch.singleLineSearch",
+    "onCommand:windowSearch.showPreviousWindowSearch",
+    "onCommand:windowSearch.showPreviousLineSearch",
+    "onCommand:windowSearch.searchUnderCursor"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -22,6 +28,14 @@
       {
         "command": "windowSearch.run",
         "title": "Window Search: Run"
+      },
+      {
+        "command": "windowSearch.singleLineSearch",
+        "title": "Window Search: Project Line Search"
+      },
+      {
+        "command": "windowSearch.searchUnderCursor",
+        "title": "Window Search: Project Line Search Under Cursor"
       },
       {
         "command": "windowSearch.increaseWindow",
@@ -34,6 +48,14 @@
       {
         "command": "windowSearch.setWindowSize",
         "title": "Window Search: Set Window Size"
+      },
+      {
+        "command": "windowSearch.showPreviousWindowSearch",
+        "title": "Window Search: Show Previous Window Search"
+      },
+      {
+        "command": "windowSearch.showPreviousLineSearch",
+        "title": "Window Search: Show Previous Project Line Search"
       }
     ],
     "keybindings": [
@@ -56,6 +78,11 @@
           "default": 5,
           "minimum": 1,
           "description": "Default window size (number of lines) for context search"
+        },
+        "windowSearch.previewEditor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the file, move the cursor, and center the editor while selecting search results"
         },
         "windowSearch.termHighlightColor": {
           "type": "string",
