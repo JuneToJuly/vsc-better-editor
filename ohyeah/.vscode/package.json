@@ -1,0 +1,45 @@
+{
+  "name": "file-change-history",
+  "displayName": "Recent Code Locations",
+  "description": "Tracks meaningful cursor locations with grouped and chronological journey views.",
+  "version": "0.0.20",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:fileChangeHistory.showCurrentFileHistory",
+    "onCommand:fileChangeHistory.clearCurrentFileHistory"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "fileChangeHistory.showCurrentFileHistory",
+        "title": "Recent Locations: Show Recent Code Locations"
+      },
+      {
+        "command": "fileChangeHistory.clearCurrentFileHistory",
+        "title": "Recent Locations: Clear Current File History"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "fileChangeHistory.showCurrentFileHistory",
+          "group": "navigation@50"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "fileChangeHistory.showCurrentFileHistory",
+          "group": "navigation@50"
+        }
+      ]
+    }
+  }
+}
