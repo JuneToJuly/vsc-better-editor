@@ -2,7 +2,7 @@
   "name": "workspace-exclusion-profiles",
   "displayName": "Workspace Exclusion Profiles",
   "description": "Create and switch workspace exclusion profiles for files.exclude and search.exclude.",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -19,7 +19,9 @@
     "onCommand:exclusionProfiles.clearActiveProfile",
     "onCommand:exclusionProfiles.showActiveProfile",
     "onCommand:exclusionProfiles.deleteProfile",
-    "onCommand:exclusionProfiles.removeExclusionFromCurrentProfile"
+    "onCommand:exclusionProfiles.removeExclusionFromCurrentProfile",
+    "onCommand:exclusionProfiles.duplicateProfile",
+    "onCommand:exclusionProfiles.createIncludeProfile"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -35,6 +37,14 @@
       {
         "command": "exclusionProfiles.switchProfile",
         "title": "Exclusion Profiles: Switch Profile"
+      },
+      {
+        "command": "exclusionProfiles.duplicateProfile",
+        "title": "Exclusion Profiles: Duplicate Profile"
+      },
+      {
+        "command": "exclusionProfiles.createIncludeProfile",
+        "title": "Exclusion Profiles: Create Include-Only Profile"
       },
       {
         "command": "exclusionProfiles.excludeFolderInCurrentProfile",
@@ -77,6 +87,11 @@
           "command": "exclusionProfiles.onlyShowThisFolder",
           "when": "explorerResourceIsFolder",
           "group": "navigation@52"
+        },
+        {
+          "command": "exclusionProfiles.createIncludeProfile",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@49"
         }
       ]
     }

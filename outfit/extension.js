@@ -17,6 +17,16 @@ function activate(context) {
         ),
 
         vscode.commands.registerCommand(
+            "exclusionProfiles.duplicateProfile",
+            () => duplicateProfile(context)
+        ),
+
+        vscode.commands.registerCommand(
+            "exclusionProfiles.createIncludeProfile",
+            (uri, selectedUris) => createIncludeProfile(context, uri, selectedUris)
+        ),
+
+        vscode.commands.registerCommand(
             "exclusionProfiles.excludeFolderInCurrentProfile",
             (uri) => excludeFolderInCurrentProfile(context, uri)
         ),
@@ -100,6 +110,203 @@ async function switchProfile(context) {
     await applyProfile(context, selected);
 
     vscode.window.showInformationMessage(`Switched to "${selected}".`);
+}
+
+
+async function duplicateProfile(context) {
+    const profiles = getProfiles(context);
+    const names = Object.keys(profiles);
+
+    if (names.length === 0) {
+        vscode.window.showWarningMessage("No profiles exist to duplicate.");
+        return;
+    }
+
+    const activeProfile = getActiveProfile(context);
+    const sourceName = await vscode.window.showQuickPick(names, {
+        placeHolder: "Duplicate which profile?",
+        activeItem: activeProfile
+    });
+
+    if (!sourceName) return;
+
+    const newName = await vscode.window.showInputBox({
+        prompt: `Name for the copy of "${sourceName}"`,
+        value: `${sourceName} Copy`,
+        validateInput: value => {
+            const trimmed = value.trim();
+            if (!trimmed) return "Profile name is required.";
+            if (profiles[trimmed]) return `Profile "${trimmed}" already exists.`;
+            return undefined;
+        }
+    });
+
+    if (!newName) return;
+
+    const trimmedName = newName.trim();
+    profiles[trimmedName] = {
+        exclude: [...(profiles[sourceName].exclude || [])]
+    };
+
+    await saveProfiles(context, profiles);
+    await setActiveProfile(context, trimmedName);
+    await applyProfile(context, trimmedName);
+
+    vscode.window.showInformationMessage(
+        `Duplicated "${sourceName}" as "${trimmedName}".`
+    );
+}
+
+async function createIncludeProfile(context, uri, selectedUris) {
+    const explorerSelection = normalizeExplorerSelection(uri, selectedUris);
+
+    if (explorerSelection.length === 0) {
+        vscode.window.showWarningMessage(
+            "Select one or more folders in the Explorer, then right-click the selection."
+        );
+        return;
+    }
+
+    const selectedFolders = explorerSelection.filter(selectedUri => {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(selectedUri);
+        return workspaceFolder && selectedUri.scheme === "file";
+    });
+
+    if (selectedFolders.length === 0) {
+        vscode.window.showWarningMessage("The Explorer selection contains no workspace folders.");
+        return;
+    }
+
+    const nonFolders = [];
+    for (const selectedUri of selectedFolders) {
+        const stat = await vscode.workspace.fs.stat(selectedUri);
+        if (stat.type !== vscode.FileType.Directory) nonFolders.push(selectedUri);
+    }
+
+    if (nonFolders.length > 0) {
+        vscode.window.showWarningMessage(
+            "Include-only profiles can be created from folder selections only."
+        );
+        return;
+    }
+
+    const profileName = await vscode.window.showInputBox({
+        prompt: "Name for this include-only profile",
+        placeHolder: "Focused folders",
+        validateInput: value => {
+            const trimmed = value.trim();
+            if (!trimmed) return "Profile name is required.";
+            if (getProfiles(context)[trimmed]) return `Profile "${trimmed}" already exists.`;
+            return undefined;
+        }
+    });
+
+    if (!profileName) return;
+
+    const selectedByWorkspace = new Map();
+
+    for (const selectedUri of selectedFolders) {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(selectedUri);
+        if (!workspaceFolder) continue;
+
+        const key = normalizeFsPath(workspaceFolder.uri.fsPath);
+        if (!selectedByWorkspace.has(key)) {
+            selectedByWorkspace.set(key, { workspaceFolder, selectedUris: [] });
+        }
+        selectedByWorkspace.get(key).selectedUris.push(selectedUri);
+    }
+
+    const excludes = [];
+    const workspaceFolders = vscode.workspace.workspaceFolders || [];
+
+    for (const workspaceFolder of workspaceFolders) {
+        const key = normalizeFsPath(workspaceFolder.uri.fsPath);
+        const selection = selectedByWorkspace.get(key);
+
+        if (!selection) {
+            const entries = await vscode.workspace.fs.readDirectory(workspaceFolder.uri);
+            for (const [entryName, entryType] of entries) {
+                if (entryType !== vscode.FileType.Directory) continue;
+                const glob = toWorkspaceRelativeGlob(
+                    vscode.Uri.joinPath(workspaceFolder.uri, entryName)
+                );
+                if (glob) excludes.push(glob);
+            }
+            continue;
+        }
+
+        await collectExcludedFolders(
+            workspaceFolder.uri,
+            selection.selectedUris,
+            excludes
+        );
+    }
+
+    const trimmedName = profileName.trim();
+    const profiles = getProfiles(context);
+    profiles[trimmedName] = {
+        exclude: unique(excludes)
+    };
+
+    await saveProfiles(context, profiles);
+    await setActiveProfile(context, trimmedName);
+    await applyProfile(context, trimmedName);
+
+    vscode.window.showInformationMessage(
+        `Created "${trimmedName}" including ${selectedFolders.length} selected folder${selectedFolders.length === 1 ? "" : "s"}.`
+    );
+}
+
+function normalizeExplorerSelection(uri, selectedUris) {
+    const values = Array.isArray(selectedUris) && selectedUris.length > 0
+        ? selectedUris
+        : uri
+            ? [uri]
+            : [];
+
+    const seen = new Set();
+    return values.filter(value => {
+        if (!value || typeof value.fsPath !== "string") return false;
+        const key = normalizeFsPath(value.fsPath);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+async function collectExcludedFolders(currentUri, selectedUris, excludes) {
+    const entries = await vscode.workspace.fs.readDirectory(currentUri);
+
+    for (const [entryName, entryType] of entries) {
+        if (entryType !== vscode.FileType.Directory) continue;
+
+        const entryUri = vscode.Uri.joinPath(currentUri, entryName);
+        const entryPath = normalizeFsPath(entryUri.fsPath);
+        const isSelected = selectedUris.some(
+            selectedUri => normalizeFsPath(selectedUri.fsPath) === entryPath
+        );
+
+        if (isSelected) {
+            continue;
+        }
+
+        const containsSelection = selectedUris.some(selectedUri =>
+            isPathInside(entryUri.fsPath, selectedUri.fsPath)
+        );
+
+        if (containsSelection) {
+            await collectExcludedFolders(entryUri, selectedUris, excludes);
+            continue;
+        }
+
+        const glob = toWorkspaceRelativeGlob(entryUri);
+        if (glob) excludes.push(glob);
+    }
+}
+
+function isPathInside(parentPath, childPath) {
+    const relative = path.relative(parentPath, childPath);
+    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 async function excludeFolderInCurrentProfile(context, uri) {
@@ -395,6 +602,11 @@ async function removeExclusionFromCurrentProfile(context) {
     vscode.window.showInformationMessage(
         `Removed "${selected}" from "${activeProfile}".`
     );
+}
+
+function normalizeFsPath(fsPath) {
+    const normalized = path.resolve(fsPath);
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function unique(values) {
