@@ -1,0 +1,22 @@
+{
+  "name": "emerald-amethyst-theme",
+  "displayName": "Emerald Amethyst",
+  "description": "A dark VS Code theme built from emerald, jet black, ghost white, amethyst, and charcoal.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Emerald Amethyst",
+        "uiTheme": "vs-dark",
+        "path": "./themes/emerald-amethyst-color-theme.json"
+      }
+    ]
+  }
+}

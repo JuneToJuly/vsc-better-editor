@@ -1,0 +1,22 @@
+{
+  "name": "lime-carnation-soft-glow-theme",
+  "displayName": "Lime Carnation Soft Glow",
+  "description": "A softly blended light VS Code theme with lavender chrome, porcelain editor surfaces, dusty-grape navigation, vivid but controlled syntax, and gentle pink/lime accents.",
+  "version": "1.2.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Lime Carnation Soft Glow",
+        "uiTheme": "vs",
+        "path": "./themes/lime-carnation-soft-glow-color-theme.json"
+      }
+    ]
+  }
+}

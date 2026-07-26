@@ -1,0 +1,22 @@
+{
+  "name": "emerald-amethyst-nocturne-balanced-theme",
+  "displayName": "Emerald Amethyst Nocturne Balanced",
+  "description": "A refinement of Emerald Amethyst Nocturne with neutral explorer and tab text, rebalanced file decorations, and the original dark teal-amethyst atmosphere preserved.",
+  "version": "1.2.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Emerald Amethyst Nocturne Balanced",
+        "uiTheme": "vs-dark",
+        "path": "./themes/emerald-amethyst-nocturne-balanced-color-theme.json"
+      }
+    ]
+  }
+}

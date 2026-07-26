@@ -1,0 +1,22 @@
+{
+  "name": "lime-carnation-light-refined-theme",
+  "displayName": "Lime Carnation Light Refined",
+  "description": "A higher-contrast refinement of Lime Carnation Light with a bolder top bar, cleaner syntax separation, stronger failures, and deeper panel structure.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Lime Carnation Light Refined",
+        "uiTheme": "vs",
+        "path": "./themes/lime-carnation-light-refined-color-theme.json"
+      }
+    ]
+  }
+}

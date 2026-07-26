@@ -1,0 +1,22 @@
+{
+  "name": "bright-ocean-light-theme",
+  "displayName": "Bright Ocean Light",
+  "description": "A vivid light VS Code theme built from Bright Ocean, Yellow Green, Shadow Grey, Porcelain, and Coral Glow.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Bright Ocean Light",
+        "uiTheme": "vs",
+        "path": "./themes/bright-ocean-light-color-theme.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,278 @@
+{
+  "name": "composite-gradle-test-launcher",
+  "displayName": "Composite Gradle Test Launcher",
+  "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
+  "version": "0.1.16",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Debuggers",
+    "Other"
+  ],
+  "keywords": [
+    "gradle",
+    "composite build",
+    "java",
+    "junit",
+    "test",
+    "debug"
+  ],
+  "activationEvents": [
+    "onLanguage:java",
+    "onCommand:compositeGradleTests.runMethod",
+    "onCommand:compositeGradleTests.debugMethod",
+    "onCommand:compositeGradleTests.runClass",
+    "onCommand:compositeGradleTests.debugClass",
+    "onCommand:compositeGradleTests.repeatLast",
+    "onCommand:compositeGradleTests.stop",
+    "onCommand:compositeGradleTests.showResults",
+    "onCommand:compositeGradleTests.showHistory",
+    "onCommand:compositeGradleTests.clearHistory",
+    "onView:compositeGradleTests.resultsView"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "compositeGradleTests.runMethod",
+        "title": "Composite Gradle: Run Test Under Cursor",
+        "icon": "$(run)"
+      },
+      {
+        "command": "compositeGradleTests.debugMethod",
+        "title": "Composite Gradle: Debug Test Under Cursor",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "compositeGradleTests.runClass",
+        "title": "Composite Gradle: Run Test Class",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "compositeGradleTests.debugClass",
+        "title": "Composite Gradle: Debug Test Class",
+        "icon": "$(debug)"
+      },
+      {
+        "command": "compositeGradleTests.repeatLast",
+        "title": "Composite Gradle: Repeat Last Test",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.stop",
+        "title": "Composite Gradle: Stop Current Test",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "compositeGradleTests.copyLastCommand",
+        "title": "Composite Gradle: Copy Last Command",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "compositeGradleTests.showResults",
+        "title": "Composite Gradle: Show Latest Test Result",
+        "icon": "$(output)"
+      },
+      {
+        "command": "compositeGradleTests.showHistory",
+        "title": "Composite Gradle: Show Test History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "compositeGradleTests.clearHistory",
+        "title": "Composite Gradle: Clear Test History",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "compositeGradleTests.runMethod",
+          "when": "editorLangId == java",
+          "group": "testing@1"
+        },
+        {
+          "command": "compositeGradleTests.debugMethod",
+          "when": "editorLangId == java",
+          "group": "testing@2"
+        },
+        {
+          "command": "compositeGradleTests.runClass",
+          "when": "editorLangId == java",
+          "group": "testing@3"
+        },
+        {
+          "command": "compositeGradleTests.debugClass",
+          "when": "editorLangId == java",
+          "group": "testing@4"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "compositeGradleTests.repeatLast",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.stop",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.clearHistory",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "compositeGradleTests.repeatLast",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      }
+    ],
+    "configuration": {
+      "title": "Composite Gradle Test Launcher",
+      "properties": {
+        "compositeGradleTests.compositeRoot": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Directory from which the root composite Gradle build must run. Supports ${workspaceFolder} and ${workspaceFolder:name} in multi-root workspaces."
+        },
+        "compositeGradleTests.gradleExecutable": {
+          "type": "string",
+          "default": "gradle",
+          "description": "Gradle executable to run. Use gradle for an installation on PATH, or provide an absolute/relative executable path."
+        },
+        "compositeGradleTests.root": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Deprecated root composite build directory. Used only when compositeRoot is not configured.",
+          "markdownDeprecationMessage": "Use `compositeGradleTests.compositeRoot` instead."
+        },
+        "compositeGradleTests.gradleWrapper": {
+          "type": "string",
+          "default": "",
+          "description": "Optional wrapper path relative to the composite root. When set, this overrides gradleExecutable."
+        },
+        "compositeGradleTests.projects": {
+          "type": "array",
+          "default": [],
+          "description": "Maps test source roots to Gradle tasks. The longest matching sourceRoot wins.",
+          "items": {
+            "type": "object",
+            "required": [
+              "sourceRoot",
+              "task"
+            ],
+            "properties": {
+              "sourceRoot": {
+                "type": "string",
+                "description": "Path relative to the configured root."
+              },
+              "task": {
+                "type": "string",
+                "description": "Root-build task path, for example :includedBuild:service:test."
+              }
+            }
+          }
+        },
+        "compositeGradleTests.autoDetectTask": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically derive included-build and subproject task paths from the current test file, for example includedBuild:app:test. Explicit project mappings take precedence."
+        },
+        "compositeGradleTests.defaultTask": {
+          "type": "string",
+          "default": "test",
+          "description": "Fallback Gradle task when no project mapping matches."
+        },
+        "compositeGradleTests.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--console=plain"
+          ],
+          "description": "Arguments added to every Gradle invocation."
+        },
+        "compositeGradleTests.debugArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--debug-jvm"
+          ],
+          "description": "Arguments added only for debug invocations. The default makes Gradle listen on port 5005."
+        },
+        "compositeGradleTests.debugPort": {
+          "type": "number",
+          "default": 5005,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port used by the Java debugger. Must match the Gradle test debug configuration."
+        },
+        "compositeGradleTests.testAnnotations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "Test",
+            "ParameterizedTest",
+            "RepeatedTest",
+            "TestFactory",
+            "TestTemplate"
+          ],
+          "description": "Simple annotation names treated as test methods."
+        },
+        "compositeGradleTests.showOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reveal the raw Composite Gradle Tests output channel when a test starts. The focused results panel is always shown."
+        },
+        "compositeGradleTests.enhancedTestLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject a Gradle init script that reports passed, failed, and skipped tests and captures standard output/error for the results panel."
+        },
+        "compositeGradleTests.inlineActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show clickable Run Test / Debug Test and Run Class / Debug Class CodeLens actions. These are independent of VS Code Test Explorer and the Java Test Runner."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "compositeGradleTests",
+          "title": "Gradle Tests",
+          "icon": "resources/gradle-tests.svg"
+        }
+      ]
+    },
+    "views": {
+      "compositeGradleTests": [
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.resultsView",
+          "name": "Test Results"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
+}

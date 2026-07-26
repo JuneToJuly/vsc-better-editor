@@ -1,0 +1,22 @@
+{
+  "name": "lime-carnation-light-theme",
+  "displayName": "Lime Carnation Light",
+  "description": "A bold light VS Code theme built from Lime Cream, Pink Carnation, Mauve Magic, Majorelle Blue, and Dusty Grape.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Lime Carnation Light",
+        "uiTheme": "vs",
+        "path": "./themes/lime-carnation-light-color-theme.json"
+      }
+    ]
+  }
+}

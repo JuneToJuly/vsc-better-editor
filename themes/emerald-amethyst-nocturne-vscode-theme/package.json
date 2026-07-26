@@ -1,0 +1,22 @@
+{
+  "name": "emerald-amethyst-nocturne-theme",
+  "displayName": "Emerald Amethyst Nocturne",
+  "description": "A deeper, more atmospheric Emerald Amethyst variant with near-black green-blue surfaces, emerald semantic accents, muted amethyst chrome, and calmer Java syntax.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Emerald Amethyst Nocturne",
+        "uiTheme": "vs-dark",
+        "path": "./themes/emerald-amethyst-nocturne-color-theme.json"
+      }
+    ]
+  }
+}

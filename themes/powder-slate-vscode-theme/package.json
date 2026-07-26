@@ -1,0 +1,27 @@
+{
+  "name": "powder-slate-theme",
+  "displayName": "Powder Slate",
+  "description": "A paired light and dark VS Code theme built from Powder Petal, Thistle, Medium Slate Blue, Slate Indigo, and Black.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Powder Slate Light",
+        "uiTheme": "vs",
+        "path": "./themes/powder-slate-light-color-theme.json"
+      },
+      {
+        "label": "Powder Slate Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/powder-slate-dark-color-theme.json"
+      }
+    ]
+  }
+}

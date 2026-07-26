@@ -1,0 +1,57 @@
+{
+  "name": "visual-bookmarks",
+  "displayName": "Visual Bookmarks",
+  "description": "Spatial, visual bookmarks for navigating code by position and color.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:visualBookmarks.add",
+    "onCommand:visualBookmarks.remove",
+    "onCommand:visualBookmarks.openMap",
+    "onCommand:visualBookmarks.clearFile"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "visualBookmarks.add",
+        "title": "Visual Bookmarks: Add Bookmark"
+      },
+      {
+        "command": "visualBookmarks.remove",
+        "title": "Visual Bookmarks: Remove Bookmark at Cursor"
+      },
+      {
+        "command": "visualBookmarks.openMap",
+        "title": "Visual Bookmarks: Open Visual Map"
+      },
+      {
+        "command": "visualBookmarks.clearFile",
+        "title": "Visual Bookmarks: Clear Bookmarks in Current File"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "visualBookmarks.add",
+        "key": "ctrl+alt+b",
+        "mac": "cmd+alt+b"
+      },
+      {
+        "command": "visualBookmarks.openMap",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.1"
+  },
+  "license": "MIT"
+}

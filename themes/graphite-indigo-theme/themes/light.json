@@ -1,0 +1,97 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "x",
+  "type": "light",
+  "colors": {
+    "editor.background": "#DFDFDF",
+    "editor.foreground": "#343434",
+    "sideBar.background": "#D7D5E8",
+    "sideBar.foreground": "#343434",
+    "activityBar.background": "#2F3061",
+    "activityBar.foreground": "#DFDFDF",
+    "titleBar.activeBackground": "#F4F4F4",
+    "titleBar.activeForeground": "#343434",
+    "tab.activeBackground": "#FFFFFF",
+    "tab.inactiveBackground": "#F4F4F4",
+    "tab.activeForeground": "#343434",
+    "tab.activeBorderTop": "#0E34A0",
+    "statusBar.background": "#0E34A0",
+    "statusBar.foreground": "#FFFFFF",
+    "editor.selectionBackground": "#5F598055",
+    "editor.lineHighlightBackground": "#5F598022",
+    "editorCursor.foreground": "#0E34A0",
+    "editorLineNumber.activeForeground": "#0E34A0",
+    "editorBracketMatch.border": "#5F5980",
+    "focusBorder": "#0E34A0"
+  },
+  "tokenColors": [
+    {
+      "scope": "comment",
+      "settings": {
+        "foreground": "#8E8E8E",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage.type"
+      ],
+      "settings": {
+        "foreground": "#0E34A0"
+      }
+    },
+    {
+      "scope": "keyword.control",
+      "settings": {
+        "foreground": "#5F5980"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function"
+      ],
+      "settings": {
+        "foreground": "#2F3061"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class"
+      ],
+      "settings": {
+        "foreground": "#5F5980"
+      }
+    },
+    {
+      "scope": "string",
+      "settings": {
+        "foreground": "#A96A2A"
+      }
+    },
+    {
+      "scope": "variable",
+      "settings": {
+        "foreground": "#343434"
+      }
+    },
+    {
+      "scope": "constant.numeric",
+      "settings": {
+        "foreground": "#C07A30"
+      }
+    }
+  ],
+  "semanticTokenColors": {
+    "keyword": "#0E34A0",
+    "function": "#2F3061",
+    "method": "#2F3061",
+    "class": "#5F5980",
+    "type": "#5F5980",
+    "property": "#5F5980",
+    "variable": "#343434",
+    "string": "#A96A2A"
+  }
+}

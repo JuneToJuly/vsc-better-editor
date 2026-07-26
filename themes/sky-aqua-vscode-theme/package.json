@@ -1,0 +1,22 @@
+{
+  "name": "sky-aqua-theme",
+  "displayName": "Sky Aqua",
+  "description": "A bright, airy VS Code theme built from Sky Aqua, Snow, Mint Leaf, and Pearl Aqua.",
+  "version": "1.3.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sky Aqua",
+        "uiTheme": "vs",
+        "path": "./themes/sky-aqua-color-theme.json"
+      }
+    ]
+  }
+}

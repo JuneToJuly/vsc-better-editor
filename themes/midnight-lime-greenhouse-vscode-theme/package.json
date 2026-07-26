@@ -1,0 +1,22 @@
+{
+  "name": "midnight-lime-greenhouse-theme",
+  "displayName": "Midnight Lime Greenhouse",
+  "description": "A calmer Midnight Lime theme with iron-grey surfaces, midnight-violet chrome, lime semantic highlights, amber keywords, and restrained syntax.",
+  "version": "1.2.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Midnight Lime Greenhouse",
+        "uiTheme": "vs-dark",
+        "path": "./themes/midnight-lime-greenhouse-color-theme.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "midnight-lime-theme",
+  "displayName": "Midnight Lime",
+  "description": "A dark VS Code theme built from iron grey, lime cream, silver, white smoke, and midnight violet.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Midnight Lime",
+        "uiTheme": "vs-dark",
+        "path": "./themes/midnight-lime-color-theme.json"
+      }
+    ]
+  }
+}

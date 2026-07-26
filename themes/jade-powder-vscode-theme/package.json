@@ -1,0 +1,27 @@
+{
+  "name": "jade-powder-theme",
+  "displayName": "Jade Powder",
+  "description": "A coordinated light and dark VS Code theme pair built from Bright Snow, Silver, Powder Blue, Slate Grey, and Jade Green.",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Jade Powder Light",
+        "uiTheme": "vs",
+        "path": "./themes/jade-powder-light-color-theme.json"
+      },
+      {
+        "label": "Jade Powder Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/jade-powder-dark-color-theme.json"
+      }
+    ]
+  }
+}
