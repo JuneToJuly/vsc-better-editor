@@ -336,11 +336,13 @@ class ChangeViewer {
     #track {
       height: 100%;
       display: flex;
+      visibility: hidden;
       align-items: stretch;
       gap: var(--gap);
       padding: 18px;
       width: max-content;
     }
+    #track.ready { visibility: visible; }
     .save-card {
       flex: 0 0 var(--card-width);
       height: 100%;
@@ -611,7 +613,7 @@ class ChangeViewer {
         '<div class="patch-wrap"><div class="loading">Loading code change…</div><pre class="patch" hidden></pre></div>',
         '<footer class="card-actions"><button class="open-diff">Open native diff</button></footer>'
       ].join('');
-      card.querySelector('.save-header').addEventListener('click', () => select(commit.index, false));
+      card.querySelector('.save-header').addEventListener('click', () => select(commit.index, true));
       card.querySelector('.open-diff').addEventListener('click', event => {
         event.stopPropagation();
         vscode.postMessage({ type: 'openDiff', index: commit.index });
@@ -659,6 +661,70 @@ class ChangeViewer {
       vscode.postMessage({ type: 'requestPatch', index });
     }
 
+    let programmaticTargetIndex = null;
+    let programmaticAnimationFrame = null;
+    let scrollTimer = null;
+
+    function cancelProgrammaticScroll() {
+      if (programmaticAnimationFrame !== null) {
+        cancelAnimationFrame(programmaticAnimationFrame);
+        programmaticAnimationFrame = null;
+      }
+      programmaticTargetIndex = null;
+    }
+
+    function targetScrollLeft(card) {
+      const cardCenter = card.offsetLeft + card.offsetWidth / 2;
+      const maximum = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      return Math.max(0, Math.min(maximum, cardCenter - viewport.clientWidth / 2));
+    }
+
+    function positionCardImmediately(index) {
+      const card = document.querySelector('.save-card[data-index="' + index + '"]');
+      if (!card) return;
+      cancelProgrammaticScroll();
+      viewport.scrollLeft = targetScrollLeft(card);
+    }
+
+    function animateToCard(index) {
+      const card = document.querySelector('.save-card[data-index="' + index + '"]');
+      if (!card) return;
+
+      cancelProgrammaticScroll();
+      programmaticTargetIndex = index;
+
+      const startLeft = viewport.scrollLeft;
+      const destination = targetScrollLeft(card);
+      const distance = destination - startLeft;
+
+      if (Math.abs(distance) < 1) {
+        viewport.scrollLeft = destination;
+        programmaticTargetIndex = null;
+        return;
+      }
+
+      const duration = Math.min(420, Math.max(180, Math.abs(distance) * 0.32));
+      const startedAt = performance.now();
+      const easeOutCubic = progress => 1 - Math.pow(1 - progress, 3);
+
+      function frame(now) {
+        if (programmaticTargetIndex !== index) return;
+        const progress = Math.min(1, (now - startedAt) / duration);
+        viewport.scrollLeft = startLeft + distance * easeOutCubic(progress);
+
+        if (progress < 1) {
+          programmaticAnimationFrame = requestAnimationFrame(frame);
+          return;
+        }
+
+        viewport.scrollLeft = destination;
+        programmaticAnimationFrame = null;
+        programmaticTargetIndex = null;
+      }
+
+      programmaticAnimationFrame = requestAnimationFrame(frame);
+    }
+
     function setCurrent(index, scroll) {
       if (!Number.isInteger(index) || index < 0 || index >= commits.length) return;
       currentIndex = index;
@@ -672,10 +738,11 @@ class ChangeViewer {
       document.getElementById('previous').disabled = index <= 0;
       document.getElementById('next').disabled = index >= commits.length - 1;
       requestPatch(index);
-      if (scroll) card?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      if (scroll) animateToCard(index);
     }
 
     function select(index, scroll = true) {
+      if (!Number.isInteger(index) || index < 0 || index >= commits.length) return;
       setCurrent(index, scroll);
       vscode.postMessage({ type: 'select', index });
     }
@@ -685,8 +752,15 @@ class ChangeViewer {
     document.getElementById('current').addEventListener('click', () => setCurrent(currentIndex, true));
     document.getElementById('width').addEventListener('change', event => {
       document.documentElement.style.setProperty('--card-width', event.target.value);
-      setCurrent(currentIndex, false);
+      requestAnimationFrame(() => animateToCard(currentIndex));
     });
+
+    function beginManualScroll() {
+      cancelProgrammaticScroll();
+    }
+
+    viewport.addEventListener('wheel', beginManualScroll, { passive: true });
+    viewport.addEventListener('touchstart', beginManualScroll, { passive: true });
 
     viewport.addEventListener('wheel', event => {
       if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
@@ -695,10 +769,10 @@ class ChangeViewer {
       }
     }, { passive: false });
 
-    let scrollTimer;
     viewport.addEventListener('scroll', () => {
       clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => {
+        if (programmaticTargetIndex !== null) return;
         const center = viewport.getBoundingClientRect().left + viewport.clientWidth / 2;
         let closestIndex = currentIndex;
         let closestDistance = Number.POSITIVE_INFINITY;
@@ -719,6 +793,7 @@ class ChangeViewer {
     let scrollStart = 0;
     viewport.addEventListener('pointerdown', event => {
       if (event.button !== 0 || event.target.closest('button, select')) return;
+      beginManualScroll();
       dragging = true;
       dragStart = event.clientX;
       scrollStart = viewport.scrollLeft;
@@ -758,7 +833,10 @@ class ChangeViewer {
     });
 
     setCurrent(currentIndex, false);
-    requestAnimationFrame(() => setCurrent(currentIndex, true));
+    positionCardImmediately(currentIndex);
+    track.classList.add('ready');
+    requestPatch(currentIndex - 1);
+    requestPatch(currentIndex + 1);
     vscode.postMessage({ type: 'ready' });
   </script>
 </body>

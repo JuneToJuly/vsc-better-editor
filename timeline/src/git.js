@@ -112,6 +112,14 @@ class GitRepository {
         privateIndexEnvironment
       );
 
+      // `git add` does not remove files that were already tracked by an older
+      // timeline snapshot when those files later become ignored. Since each
+      // private index begins from the previous timeline tree, explicitly purge
+      // anything tracked in that index that now matches the repository's normal
+      // exclude rules. This keeps future snapshots aligned with .gitignore
+      // without rewriting historical timeline commits.
+      await this.removeIgnoredFilesFromIndex(privateIndexEnvironment);
+
       const treeHash = (await this.run(['write-tree'], privateIndexEnvironment)).trim();
       const branch = await this.currentBranch();
       const relativeSavedFile = this.relative(savedFile);
@@ -167,6 +175,34 @@ class GitRepository {
     } finally {
       await rm(privateIndexPath, { force: true });
     }
+  }
+
+
+  async removeIgnoredFilesFromIndex(privateIndexEnvironment) {
+    const ignoredTrackedFiles = await this.run(
+      ['ls-files', '-ci', '--exclude-standard', '-z'],
+      privateIndexEnvironment
+    );
+
+    if (!ignoredTrackedFiles) {
+      return;
+    }
+
+    // Feed NUL-delimited paths back to Git so spaces, quotes, Unicode, and
+    // platform-specific path characters are handled without shell parsing.
+    await this.runWithInput(
+      [
+        'rm',
+        '-r',
+        '-f',
+        '--cached',
+        '--ignore-unmatch',
+        '--pathspec-from-file=-',
+        '--pathspec-file-nul'
+      ],
+      ignoredTrackedFiles,
+      privateIndexEnvironment
+    );
   }
 
 
