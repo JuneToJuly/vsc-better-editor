@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.1.23",
+  "version": "0.1.20",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -86,6 +86,31 @@
         "command": "compositeGradleTests.clearHistory",
         "title": "Composite Gradle: Clear Test History",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.refresh",
+        "title": "Composite Gradle: Refresh Project Tests",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.run",
+        "title": "Composite Gradle: Run Selected Project Test",
+        "icon": "$(run)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.debug",
+        "title": "Composite Gradle: Debug Selected Project Test",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.open",
+        "title": "Composite Gradle: Open Selected Project Test",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.runFailed",
+        "title": "Composite Gradle: Run Failed Project Tests",
+        "icon": "$(error)"
       }
     ],
     "menus": {
@@ -126,6 +151,33 @@
           "command": "compositeGradleTests.clearHistory",
           "when": "view == compositeGradleTests.resultsView",
           "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.refresh",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.runFailed",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "compositeGradleTests.projectTests.run",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(task|class|method)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.debug",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
+          "group": "inline@2"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.open",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
+          "group": "navigation@1"
         }
       ]
     },
@@ -261,6 +313,10 @@
     },
     "views": {
       "compositeGradleTests": [
+        {
+          "id": "compositeGradleTests.projectTestsView",
+          "name": "Project Tests"
+        },
         {
           "type": "webview",
           "id": "compositeGradleTests.resultsView",

@@ -190,43 +190,10 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - Handles Gradle module-qualified frames such as `app//my.lib.AppTest.testName(AppTest.java:19)`.
 
 
-## 0.1.19
-
-- Increased gutter pass/fail marker visibility.
-- Larger filled pass/fail indicators.
-- Easier to distinguish the last executed test at a glance.
-
 ## 0.1.20
 
-- Compressed the selected-run header with an inline status and duration.
-- Reworked the result toolbar into compact native-style actions.
-- Simplified recent-run rows and removed repeated status text.
-- Removed duplicated class names from per-test results and failure headings.
-- Added a compact vertical failure navigator for class runs.
-- Reduced failure-card spacing and made captured output more terminal-like.
-- Added subtle status-colored emphasis to the selected run.
-- Increased last-run gutter markers to 12px for slightly better visibility.
-
-
-
-## 0.1.21
-
-- Replaced improvised toolbar glyphs with native-looking inline line icons.
-- Reduced selected-history emphasis to preserve test status readability.
-- Improved selected-run alignment and metadata spacing.
-- Made failure navigation more obviously interactive.
-- Simplified failure cards to a neutral frame with a focused red accent.
-- Moved the class result summary above test output.
-
-
-## 0.1.22
-
-- Pinned the class result summary above failure details.
-- Added more breathing room to the selected run, toolbar, history rows, sections, failure cards, and output.
-- Preserved the compact developer-tool layout while improving scanability.
-
-## 0.1.23
-
-- Added a stronger GitHub-style visual boundary between recent runs and the selected result.
-- Gave the selected result area its own editor-backed surface.
-- Added a wide divider band so history and result content read as separate regions.
+- Added a lightweight native Project Tests explorer without using VS Code's Testing API.
+- Discovers annotated Java tests and groups them by Gradle task, class, and method.
+- Shows latest known passed, failed, skipped, running, stale, and not-run states.
+- Run, debug, or open tests directly from the tree.
+- Added Refresh and Run Failed toolbar actions.
