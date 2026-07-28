@@ -19,6 +19,8 @@ let lastUri = null;
 let lineEnteredTime = 0;
 let movedHorizontallyOnLine = false;
 let candidateDocument = null;
+let chunkAnchorLine = null;
+let qualifiedPosition = null;
 let cursorTimer = null;
 let cleanupTimer = null;
 
@@ -40,6 +42,8 @@ async function clearAllHistory() {
   lineEnteredTime = 0;
   movedHorizontallyOnLine = false;
   candidateDocument = null;
+  chunkAnchorLine = null;
+  qualifiedPosition = null;
   vscode.window.showInformationMessage('Cleared all recent code location history.');
   return true;
 }
@@ -67,6 +71,21 @@ function activate(context) {
   );
 }
 
+function finalizeCandidate(now) {
+  if (!candidateDocument || !qualifiedPosition) return;
+  recordLocation(candidateDocument, qualifiedPosition);
+}
+
+function startChunkCandidate(editor, pos, uri, now) {
+  lastPos = new vscode.Position(pos.line, pos.character);
+  lastUri = uri;
+  candidateDocument = editor.document;
+  chunkAnchorLine = pos.line;
+  lineEnteredTime = now;
+  movedHorizontallyOnLine = false;
+  qualifiedPosition = null;
+}
+
 function trackActiveCursorLocation() {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== 'file') return;
@@ -74,16 +93,29 @@ function trackActiveCursorLocation() {
   const pos = editor.selection.active;
   const uri = editor.document.uri.toString();
   const now = Date.now();
-  const changedEditorOrLine = !lastPos || !lastUri || uri !== lastUri || pos.line !== lastPos.line;
+  const changedEditor = !lastUri || uri !== lastUri;
+  const outsideChunk =
+    chunkAnchorLine === null ||
+    pos.line < chunkAnchorLine - RANGE_RADIUS ||
+    pos.line > chunkAnchorLine + RANGE_RADIUS;
 
-  if (changedEditorOrLine) {
-    if (candidateDocument && lastPos && movedHorizontallyOnLine && now - lineEnteredTime >= IDLE_DELAY) {
-      recordLocation(candidateDocument, lastPos);
+  // A visit represents a seven-line chunk. Moving around inside the chunk
+  // updates the eventual return position but does not create another visit.
+  if (!lastPos || changedEditor || outsideChunk) {
+    finalizeCandidate(now);
+    startChunkCandidate(editor, pos, uri, now);
+    return;
+  }
+
+  const changedLine = pos.line !== lastPos.line;
+  if (changedLine) {
+    // Capture the last horizontal position reached on a qualifying line before
+    // moving elsewhere inside the chunk.
+    if (movedHorizontallyOnLine && now - lineEnteredTime >= IDLE_DELAY) {
+      qualifiedPosition = new vscode.Position(lastPos.line, lastPos.character);
     }
 
     lastPos = new vscode.Position(pos.line, pos.character);
-    lastUri = uri;
-    candidateDocument = editor.document;
     lineEnteredTime = now;
     movedHorizontallyOnLine = false;
     return;
@@ -92,6 +124,12 @@ function trackActiveCursorLocation() {
   if (pos.character !== lastPos.character) {
     movedHorizontallyOnLine = true;
     lastPos = new vscode.Position(pos.line, pos.character);
+  }
+
+  // Once the current line has qualified, keep its most recent horizontal
+  // position so opening the visit returns to the exact place last used.
+  if (movedHorizontallyOnLine && now - lineEnteredTime >= IDLE_DELAY) {
+    qualifiedPosition = new vscode.Position(lastPos.line, lastPos.character);
   }
 }
 
@@ -241,7 +279,7 @@ async function showWebview(list, title) {
 }
 
 function getHtml(list, trail, title, activeUri) {
-  const groups = groupByEditor(list);
+  const groups = groupByEditor(list, visitTrail);
   const serialized = JSON.stringify(groups).replace(/</g, '\\u003c');
   const serializedTrail = JSON.stringify(trail).replace(/</g, '\\u003c');
   const serializedLocations = JSON.stringify(list).replace(/</g, '\\u003c');
@@ -274,6 +312,7 @@ function getHtml(list, trail, title, activeUri) {
   .group { border-bottom: 1px solid var(--vscode-panel-border); }
   .group-header { position: sticky; top: 43px; z-index: 10; display: grid; grid-template-columns: 18px minmax(0, 1fr) 34px auto; gap: 10px; align-items: center; min-height: 66px; padding: 8px 14px; background: var(--vscode-sideBar-background); cursor: pointer; }
   .group-header:hover { background: var(--vscode-list-hoverBackground); }
+  .group-header.selected { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 28%, transparent); outline: 1px solid color-mix(in srgb, var(--vscode-focusBorder) 45%, transparent); outline-offset: -1px; }
   .chevron { color: var(--vscode-descriptionForeground); }
   .file-name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-meta { margin-top: 2px; font-size: 11px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -289,19 +328,21 @@ function getHtml(list, trail, title, activeUri) {
 
   .locations { padding: 3px 0 7px; }
   .group.collapsed .locations { display: none; }
-  .location { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 9px; padding: 7px 14px 7px 18px; cursor: pointer; border-left: 2px solid transparent; }
+  .location { position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 9px; padding: 7px 38px 7px 18px; cursor: pointer; border-left: 2px solid transparent; }
+  .row-collapse { position: absolute; top: 7px; right: 10px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; }
+  .row-collapse:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
   .location:hover, .journey-row:hover { background: var(--vscode-list-hoverBackground); }
   .location.selected, .journey-row.selected { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 28%, transparent); color: var(--vscode-editor-foreground); border-left-color: var(--vscode-focusBorder); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--vscode-focusBorder) 18%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--vscode-focusBorder) 18%, transparent); }
-  .location.selected .code-preview-line:not(.target), .journey-row.selected .code-preview-line:not(.target) { opacity: .42; }
+  .location.selected .code-preview-line:not(.target), .journey-row.selected .code-preview-line:not(.target) { opacity: .26; }
   .location.selected .sequence-dot, .journey-row.selected .sequence-dot { box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 45%, transparent); }
   .line { font-family: var(--vscode-editor-font-family); color: var(--vscode-textLink-foreground); font-size: 11px; padding-top: 1px; }
   .preview { min-width: 0; }
   .code-context { min-width: 0; font-family: var(--vscode-editor-font-family); font-size: 11px; line-height: 1.45; }
-  .code-preview-line { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 9px; min-width: 0; opacity: .34; }
+  .code-preview-line { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 9px; min-width: 0; opacity: .22; }
   .code-preview-line + .code-preview-line { margin-top: 1px; }
-  .code-preview-line.target { opacity: 1; font-weight: 650; }
+  .code-preview-line.target { opacity: 1; }
   .code-preview-line.target .code-line-number { color: var(--vscode-textLink-foreground); }
-  .code-preview-line.target .code-line-text { border-left: 2px solid var(--vscode-focusBorder); padding-left: 8px; }
+  .code-preview-line.target .code-line-text { border-left: 0; padding-left: 0; }
   .cursor-block { display: inline-block; min-width: 0.62em; height: 1.15em; line-height: 1.15em; margin-bottom: -0.18em; border-radius: 1px; background: var(--vscode-editorCursor-foreground, var(--vscode-focusBorder)); color: var(--vscode-editor-background); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-editorCursor-foreground, var(--vscode-focusBorder)) 75%, transparent); text-align: center; vertical-align: baseline; }
   .code-line-number { color: var(--vscode-editorLineNumber-foreground); text-align: right; user-select: none; }
   .code-line-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; tab-size: 4; }
@@ -317,8 +358,8 @@ function getHtml(list, trail, title, activeUri) {
   .time { color: var(--vscode-descriptionForeground); font-size: 10px; white-space: nowrap; }
 
   .journey { padding: 8px 0 16px; }
-  .journey-row { position: relative; display: grid; grid-template-columns: 92px minmax(145px, 0.55fr) minmax(0, 2fr) auto; gap: 10px; align-items: center; min-height: 58px; padding: 8px 14px 8px 10px; cursor: pointer; border-left: 2px solid transparent; }
-  .journey-gutter { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 7px; align-items: center; min-width: 0; }
+  .journey-row { position: relative; display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 72px; padding: 10px 14px 10px 8px; cursor: pointer; border-left: 2px solid transparent; border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 72%, transparent); }
+  .journey-gutter { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 6px; align-items: center; min-width: 0; }
   .sequence-dot { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 750; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); border: 2px solid var(--vscode-editor-background); }
   .journey-row.latest .sequence-dot { outline: 2px solid var(--vscode-focusBorder); }
   .gutter-state { min-width: 0; }
@@ -326,14 +367,19 @@ function getHtml(list, trail, title, activeUri) {
   .gutter-label { display: block; margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 8px; font-weight: 700; letter-spacing: .035em; line-height: 1.1; text-transform: uppercase; white-space: normal; }
   .transition-file-switch .gutter-icon, .transition-file-switch .gutter-label { color: var(--vscode-focusBorder); }
   .transition-same-file .gutter-icon, .transition-same-line .gutter-icon { color: var(--vscode-textLink-foreground); }
-  .journey-file { min-width: 0; }
-  .journey-file-name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .journey-file-meta { margin-top: 3px; color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .journey-code { min-width: 0; }
-  .journey-code .code-context { margin-top: 4px; font-size: 11px; }
-  .journey-code .code-preview-line { opacity: .3; }
-  .journey-code .code-preview-line.target { opacity: 1; font-size: 12px; }
-  .journey-line { color: var(--vscode-textLink-foreground); font-family: var(--vscode-editor-font-family); font-size: 11px; }
+  .journey-main { min-width: 0; }
+  .journey-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .journey-file-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .journey-location { color: var(--vscode-textLink-foreground); font-family: var(--vscode-editor-font-family); font-size: 10px; white-space: nowrap; }
+  .journey-file-meta { margin-top: 2px; color: var(--vscode-descriptionForeground); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .journey-target { position: relative; margin-top: 7px; min-width: 0; font-family: var(--vscode-editor-font-family); font-size: 13px; line-height: 1.55; }
+  .journey-target::before { content: none; }
+  .journey-target-number { position: absolute; right: calc(100% + 8px); top: 0; width: 30px; color: var(--vscode-textLink-foreground); text-align: right; font-size: 11px; user-select: none; }
+  .journey-target-code { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; font-weight: 400; tab-size: 4; }
+  .journey-context { margin-top: 7px; }
+  .journey-row.expanded { align-items: start; }
+  .journey-row.expanded .journey-main { padding-bottom: 3px; }
+  .journey-row:not(.selected) .journey-file-meta { opacity: .72; }
   .journey-time { text-align: right; }
   .elapsed { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 9px; }
   .empty { padding: 30px; color: var(--vscode-descriptionForeground); text-align: center; }
@@ -348,7 +394,7 @@ function getHtml(list, trail, title, activeUri) {
       <button id="journey-button" class="view-button active" type="button">Journey</button>
     </div>
     <button id="clear-all-button" class="clear-button" type="button" title="Clear all recent locations">Clear All</button>
-    <div class="hint">/ search · j older · k newer · v toggle · Enter open · Esc close</div>
+    <div class="hint">/ search · j/k navigate · Shift+J/K files · m expand chunk · v toggle · Enter open · Esc close</div>
   </div>
   <div id="results" tabindex="0"></div>
 <script>
@@ -361,6 +407,7 @@ function getHtml(list, trail, title, activeUri) {
   let selected = 0;
   let flat = [];
   let query = '';
+  const expandedJourneyVisits = new Set();
 
   function matchesLocation(location) {
     if (!query) return true;
@@ -381,8 +428,11 @@ function getHtml(list, trail, title, activeUri) {
     flat = [];
     if (mode === 'grouped') {
       groups.forEach((group, groupIndex) => {
+        const visibleLocations = group.locations.filter(matchesLocation);
+        if (!visibleLocations.length) return;
+        flat.push({ type: 'group', groupIndex, group });
         if (!group.collapsed) {
-          group.locations.filter(matchesLocation).forEach((location, locationIndex) => flat.push({ groupIndex, locationIndex, location }));
+          visibleLocations.forEach((location, locationIndex) => flat.push({ type: 'location', groupIndex, locationIndex, location }));
         }
       });
     } else {
@@ -394,12 +444,39 @@ function getHtml(list, trail, title, activeUri) {
     selected = Math.max(0, Math.min(selected, Math.max(0, flat.length - 1)));
   }
 
+  function focusResults() {
+    const applyFocus = () => {
+      const root = document.getElementById('results');
+      if (!root) return;
+      try {
+        root.focus({ preventScroll: true });
+      } catch {
+        root.focus();
+      }
+    };
+
+    // Focus once immediately and again after the browser has completed the
+    // DOM replacement/layout. VS Code webviews can otherwise leave focus on
+    // a button that was removed during render.
+    applyFocus();
+    queueMicrotask(applyFocus);
+    requestAnimationFrame(() => {
+      applyFocus();
+      setTimeout(applyFocus, 0);
+    });
+  }
+
+  function renderAndRefocus() {
+    render();
+    focusResults();
+  }
+
   function render() {
     rebuildFlat();
     const root = document.getElementById('results');
     root.innerHTML = '';
     document.getElementById('summary').textContent = mode === 'grouped'
-      ? new Set(flat.map(item => item.location.uri)).size + ' editors · ' + flat.length + ' locations'
+      ? groups.filter(group => group.locations.some(matchesLocation)).length + ' editors · ' + flat.filter(item => item.type === 'location').length + ' locations'
       : flat.length + ' accepted visits · newest first';
 
     if (mode === 'grouped') renderGrouped(root);
@@ -415,14 +492,27 @@ function getHtml(list, trail, title, activeUri) {
       const section = document.createElement('section');
       section.className = 'group' + (group.collapsed ? ' collapsed' : '');
 
+      const headerFlatIndex = flatIndex++;
       const header = document.createElement('div');
-      header.className = 'group-header';
+      header.className = 'group-header' + (headerFlatIndex === selected ? ' selected' : '');
+      header.dataset.flatIndex = String(headerFlatIndex);
       header.innerHTML = '<div class="chevron">' + (group.collapsed ? '▸' : '▾') + '</div>' +
         '<div><div class="file-name">' + escapeHtmlClient(group.fileName) + (group.uri === ${JSON.stringify(activeUri)} ? '<span class="active-badge">ACTIVE EDITOR</span>' : '') + '</div>' +
         '<div class="file-meta">' + escapeHtmlClient(group.directory) + '</div></div>' +
         renderFileMinimap({ ...group, locations: visibleLocations }) +
         '<div class="badge">' + visibleLocations.length + '</div>';
-      header.onclick = () => { group.collapsed = !group.collapsed; render(); };
+      header.onpointerdown = event => event.preventDefault();
+      header.onpointermove = event => {
+        if (event.movementX === 0 && event.movementY === 0) return;
+        selected = headerFlatIndex;
+        updateSelectionClasses();
+      };
+      header.onclick = event => {
+        event.preventDefault();
+        selected = headerFlatIndex;
+        group.collapsed = !group.collapsed;
+        render();
+      };
       header.querySelectorAll('.file-minimap-dot').forEach(dot => {
         dot.onclick = event => {
           event.stopPropagation();
@@ -441,7 +531,20 @@ function getHtml(list, trail, title, activeUri) {
         row.className = 'location' + (currentFlatIndex === selected ? ' selected' : '');
         row.innerHTML = '<div class="line">' + (location.line + 1) + '</div>' +
           '<div class="preview">' + renderCodeContext(location, location.line, location.character) + '</div>' +
-          '<div class="time">' + timeAgo(location.timestamp) + (location.visitCount > 1 ? ' · ' + location.visitCount + '×' : '') + '</div>';
+          '<div class="time">' + timeAgo(location.timestamp) + (location.visitCount > 1 ? ' · ' + location.visitCount + '×' : '') + '</div>' +
+          '<button class="row-collapse" title="Collapse file section">▴</button>';
+        const collapseButton = row.querySelector('.row-collapse');
+        collapseButton.onpointerdown = event => {
+          event.preventDefault();
+          event.stopPropagation();
+        };
+        collapseButton.onclick = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          selected = headerFlatIndex;
+          group.collapsed = true;
+          render();
+        };
         bindRow(row, currentFlatIndex, location, null);
         locationContainer.appendChild(row);
       });
@@ -500,15 +603,20 @@ function getHtml(list, trail, title, activeUri) {
       const transitionType = getTransitionTypeFromCurrent(currentVisit, visit, index);
       const elapsed = newerVisit ? formatElapsed(newerVisit.timestamp - visit.timestamp) + ' before newer visit' : 'current accepted location';
       const row = document.createElement('div');
-      row.className = 'journey-row transition-' + transitionType + (index === selected ? ' selected' : '') + (index === 0 ? ' latest' : '');
+      const visitKey = String(visit.sequence);
+      const expanded = expandedJourneyVisits.has(visitKey);
+      row.className = 'journey-row transition-' + transitionType + (index === selected ? ' selected' : '') + (index === 0 ? ' latest' : '') + (expanded ? ' expanded' : '');
       const gutter = getGutterInfo(transitionType, transition);
+      const preview = expanded
+        ? '<div class="journey-context">' + renderCodeContext(location, visit.line, visit.character) + '</div>'
+        : renderJourneyTargetLine(location, visit.line, visit.character);
       row.innerHTML =
         '<div class="journey-gutter"><span class="sequence-dot">' + visit.sequence + '</span>' +
         '<span class="gutter-state"><span class="gutter-icon">' + gutter.icon + '</span><span class="gutter-label">' + escapeHtmlClient(gutter.label) + '</span></span></div>' +
-        '<div class="journey-file"><div class="journey-file-name">' + escapeHtmlClient(location.fileName) + '</div>' +
-        '<div class="journey-file-meta">' + escapeHtmlClient(location.directory) + '</div></div>' +
-        '<div class="journey-code"><div class="journey-line">Line ' + (visit.line + 1) + ', column ' + (visit.character + 1) + '</div>' +
-        renderCodeContext(location, visit.line, visit.character) + '</div>' +
+        '<div class="journey-main"><div class="journey-heading"><span class="journey-file-name">' + escapeHtmlClient(location.fileName) + '</span>' +
+        '<span class="journey-location">line ' + (visit.line + 1) + ' · col ' + (visit.character + 1) + '</span></div>' +
+        '<div class="journey-file-meta">' + escapeHtmlClient(location.directory) + '</div>' +
+        preview + '</div>' +
         '<div class="journey-time"><div class="time">' + timeAgo(visit.timestamp) + '</div><div class="elapsed">' + elapsed + '</div></div>';
       bindRow(row, index, location, visit);
       journey.appendChild(row);
@@ -533,10 +641,18 @@ function getHtml(list, trail, title, activeUri) {
     return currentVisit.uri === visit.uri ? 'same file' : 'switched file';
   }
 
+  function updateSelectionClasses() {
+    document.querySelectorAll('[data-flat-index]').forEach(node => {
+      node.classList.toggle('selected', Number(node.dataset.flatIndex) === selected);
+    });
+  }
+
   function bindRow(row, index, location, visit) {
-    row.onmouseenter = () => {
+    row.dataset.flatIndex = String(index);
+    row.onpointermove = event => {
+      if (event.movementX === 0 && event.movementY === 0) return;
       selected = index;
-      document.querySelectorAll('.location, .journey-row').forEach((node, nodeIndex) => node.classList.toggle('selected', nodeIndex === selected));
+      updateSelectionClasses();
     };
     row.onclick = () => openLocation(location, visit);
   }
@@ -552,9 +668,34 @@ function getHtml(list, trail, title, activeUri) {
 
   function move(delta) {
     rebuildFlat();
+    if (!flat.length) return;
     selected = Math.max(0, Math.min(selected + delta, flat.length - 1));
-    render();
-    document.querySelectorAll('.location, .journey-row')[selected]?.scrollIntoView({ block: 'nearest' });
+    updateSelectionClasses();
+    document.querySelector('[data-flat-index="' + selected + '"]')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function moveFileGroup(delta) {
+    if (mode !== 'grouped') return;
+    rebuildFlat();
+    if (!flat.length) return;
+
+    const headerIndexes = flat
+      .map((item, index) => item.type === 'group' ? index : -1)
+      .filter(index => index >= 0);
+    if (!headerIndexes.length) return;
+
+    const currentItem = flat[selected];
+    const currentGroupIndex = currentItem?.groupIndex;
+    let currentHeaderPosition = headerIndexes.findIndex(index => flat[index].groupIndex === currentGroupIndex);
+
+    if (currentHeaderPosition < 0) {
+      currentHeaderPosition = delta > 0 ? -1 : headerIndexes.length;
+    }
+
+    const nextHeaderPosition = Math.max(0, Math.min(currentHeaderPosition + delta, headerIndexes.length - 1));
+    selected = headerIndexes[nextHeaderPosition];
+    updateSelectionClasses();
+    document.querySelector('[data-flat-index="' + selected + '"]')?.scrollIntoView({ block: 'nearest' });
   }
 
   function formatElapsed(milliseconds) {
@@ -573,6 +714,23 @@ function getHtml(list, trail, title, activeUri) {
     if (minutes < 60) return minutes + 'm';
     const hours = Math.floor(minutes / 60);
     return hours < 24 ? hours + 'h' : Math.floor(hours / 24) + 'd';
+  }
+
+
+  function renderJourneyTargetLine(location, targetLine, targetCharacter) {
+    const lines = Array.isArray(location.previewLines) ? location.previewLines : [];
+    const index = targetLine - location.startLine;
+    const text = index >= 0 && index < lines.length ? String(lines[index] || '') : '';
+    const safeCharacter = Math.max(0, Math.min(Number(targetCharacter) || 0, text.length));
+    const beforeCursor = text.slice(0, safeCharacter);
+    const cursorCharacter = safeCharacter < text.length ? text[safeCharacter] : ' ';
+    const afterCursor = safeCharacter < text.length ? text.slice(safeCharacter + 1) : '';
+    const renderedCursorCharacter = /\s/.test(cursorCharacter) ? '&nbsp;' : escapeHtmlClient(cursorCharacter);
+    const code = highlightCode(beforeCursor, location.fileName) +
+      '<span class="cursor-block" title="Last cursor position: column ' + (safeCharacter + 1) + '">' + renderedCursorCharacter + '</span>' +
+      highlightCode(afterCursor, location.fileName);
+    return '<div class="journey-target"><span class="journey-target-number">' + (targetLine + 1) + '</span>' +
+      '<span class="journey-target-code">' + code + '</span></div>';
   }
 
   function renderCodeContext(location, targetLine, targetCharacter) {
@@ -702,8 +860,13 @@ function getHtml(list, trail, title, activeUri) {
   document.addEventListener('keydown', event => {
     if (event.target === searchInput) return;
     if (event.key === '/') { event.preventDefault(); openSearch(); return; }
-    if (event.key === 'j' || event.key === 'ArrowDown') { event.preventDefault(); move(1); }
-    if (event.key === 'k' || event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
+    if (mode === 'grouped' && event.shiftKey && (event.key === 'J' || event.key === 'K')) {
+      event.preventDefault();
+      moveFileGroup(event.key === 'J' ? 1 : -1);
+      return;
+    }
+    if (!event.shiftKey && (event.key === 'j' || event.key === 'ArrowDown')) { event.preventDefault(); move(1); return; }
+    if (!event.shiftKey && (event.key === 'k' || event.key === 'ArrowUp')) { event.preventDefault(); move(-1); return; }
     if (event.key === 'v' || event.key === 'V' || event.key === 'Tab') {
       event.preventDefault();
       setMode(mode === 'grouped' ? 'journey' : 'grouped');
@@ -711,10 +874,35 @@ function getHtml(list, trail, title, activeUri) {
     }
     if (event.key === '1' || event.key === 'g' || event.key === 'G') { event.preventDefault(); setMode('grouped'); return; }
     if (event.key === '2' || event.key === 'J') { event.preventDefault(); setMode('journey'); return; }
+    if (event.key === 'm' || event.key === 'M') {
+      event.preventDefault();
+      const item = flat[selected];
+      if (!item) return;
+      if (mode === 'journey' && item.visit) {
+        const visitKey = String(item.visit.sequence);
+        if (expandedJourneyVisits.has(visitKey)) expandedJourneyVisits.delete(visitKey);
+        else expandedJourneyVisits.add(visitKey);
+        render();
+        document.querySelector('[data-flat-index="' + selected + '"]')?.scrollIntoView({ block: 'nearest' });
+      } else if (mode === 'grouped') {
+        const group = groups[item.groupIndex];
+        if (group) {
+          group.collapsed = !group.collapsed;
+          render();
+        }
+      }
+      return;
+    }
     if (event.key === 'Enter') {
       event.preventDefault();
       const item = flat[selected];
-      if (item) openLocation(item.location, item.visit || null);
+      if (!item) return;
+      if (mode === 'grouped' && item.type === 'group') {
+        item.group.collapsed = !item.group.collapsed;
+        render();
+      } else if (item.location) {
+        openLocation(item.location, item.visit || null);
+      }
     }
     if (event.key === 'Escape' || event.key === ';') { event.preventDefault(); vscode.postMessage({ command: 'close' }); }
   });
@@ -724,25 +912,35 @@ function getHtml(list, trail, title, activeUri) {
 </body>
 </html>`;
 }
-function groupByEditor(list) {
+function groupByEditor(list, trail) {
+  const latestVisitByLocation = new Map();
+  for (const visit of trail || []) {
+    const previous = latestVisitByLocation.get(visit.locationId) || 0;
+    latestVisitByLocation.set(visit.locationId, Math.max(previous, visit.timestamp || 0));
+  }
+
   const groups = new Map();
   for (const location of list) {
+    const effectiveTimestamp = Math.max(location.timestamp || 0, latestVisitByLocation.get(location.id) || 0);
     if (!groups.has(location.uri)) {
       groups.set(location.uri, {
         uri: location.uri,
         fileName: location.fileName || path.basename(location.file),
         directory: location.directory && location.directory !== '.' ? location.directory : location.relativeFile,
-        latest: location.timestamp,
+        latest: effectiveTimestamp,
         collapsed: false,
         locations: []
       });
     }
     const group = groups.get(location.uri);
-    group.latest = Math.max(group.latest, location.timestamp);
-    group.locations.push(location);
+    group.latest = Math.max(group.latest, effectiveTimestamp);
+    group.locations.push({ ...location, effectiveTimestamp });
   }
   return [...groups.values()]
-    .map(group => ({ ...group, locations: group.locations.sort((a, b) => b.timestamp - a.timestamp) }))
+    .map(group => ({
+      ...group,
+      locations: group.locations.sort((a, b) => b.effectiveTimestamp - a.effectiveTimestamp)
+    }))
     .sort((a, b) => b.latest - a.latest);
 }
 

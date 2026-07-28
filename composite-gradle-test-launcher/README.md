@@ -169,7 +169,7 @@ Version 0.1.6 adds a dedicated **Gradle Tests** Activity Bar view. It remains av
 
 Version 0.1.11 does not register a VS Code TestController and does not use Test Explorer or the Java Test Runner. It uses ordinary editor gutter decorations. Hover the class or method icon to run or debug through the configured root composite Gradle build.
 
-## 0.1.16 UI changes
+## 0.1.17 UI changes
 
 - Recent runs are anchored at the top of the Gradle Tests view.
 - Selecting a run displays its result and output below the history.
@@ -178,13 +178,55 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - Result actions now match the original scope: method runs rerun/debug the method; class runs rerun/debug the class.
 
 
-## 0.1.16
+## 0.1.17
 
 - Removed editor gutter markers so old pass/fail state cannot become misleading.
 - Class runs now preserve every failed test rather than only the first failure.
 - Failures are grouped by test case, each with its own assertion summary, source location, user frames, and collapsible framework frames.
 
-## 0.1.16
+## 0.1.17
 
 - Fixed individual-test failure locations by matching the concrete test class and Java source file before framework/package fallbacks.
 - Handles Gradle module-qualified frames such as `app//my.lib.AppTest.testName(AppTest.java:19)`.
+
+
+## 0.1.19
+
+- Increased gutter pass/fail marker visibility.
+- Larger filled pass/fail indicators.
+- Easier to distinguish the last executed test at a glance.
+
+## 0.1.20
+
+- Compressed the selected-run header with an inline status and duration.
+- Reworked the result toolbar into compact native-style actions.
+- Simplified recent-run rows and removed repeated status text.
+- Removed duplicated class names from per-test results and failure headings.
+- Added a compact vertical failure navigator for class runs.
+- Reduced failure-card spacing and made captured output more terminal-like.
+- Added subtle status-colored emphasis to the selected run.
+- Increased last-run gutter markers to 12px for slightly better visibility.
+
+
+
+## 0.1.21
+
+- Replaced improvised toolbar glyphs with native-looking inline line icons.
+- Reduced selected-history emphasis to preserve test status readability.
+- Improved selected-run alignment and metadata spacing.
+- Made failure navigation more obviously interactive.
+- Simplified failure cards to a neutral frame with a focused red accent.
+- Moved the class result summary above test output.
+
+
+## 0.1.22
+
+- Pinned the class result summary above failure details.
+- Added more breathing room to the selected run, toolbar, history rows, sections, failure cards, and output.
+- Preserved the compact developer-tool layout while improving scanability.
+
+## 0.1.23
+
+- Added a stronger GitHub-style visual boundary between recent runs and the selected result.
+- Gave the selected result area its own editor-backed surface.
+- Added a wide divider band so history and result content read as separate regions.

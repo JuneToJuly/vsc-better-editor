@@ -13,6 +13,9 @@ let extensionContext;
 let resultsViewProvider;
 let testHistory = [];
 let codeLensProviderInstance;
+let lastPassedDecoration;
+let lastFailedDecoration;
+const invalidatedSourcePaths = new Set();
 const latestResults = new Map();
 
 async function activate(context) {
@@ -47,15 +50,31 @@ async function activate(context) {
     { language: 'java', scheme: 'file' },
     codeLensProviderInstance
   ));
+  lastPassedDecoration = vscode.window.createTextEditorDecorationType({
+    gutterIconPath: vscode.Uri.joinPath(context.extensionUri, 'resources', 'last-passed.svg'),
+    gutterIconSize: '12px'
+  });
+  lastFailedDecoration = vscode.window.createTextEditorDecorationType({
+    gutterIconPath: vscode.Uri.joinPath(context.extensionUri, 'resources', 'last-failed.svg'),
+    gutterIconSize: '12px'
+  });
+  context.subscriptions.push(lastPassedDecoration, lastFailedDecoration);
+
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => {
     codeLensProviderInstance.refresh();
+    refreshLastRunDecorations();
   }));
   context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
     if (event.textEditor.document.languageId === 'java') codeLensProviderInstance.refresh();
   }));
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
-    if (event.document.languageId === 'java') codeLensProviderInstance.refresh();
+    if (event.document.languageId === 'java') {
+      invalidatedSourcePaths.add(normalizePath(event.document.uri.fsPath));
+      codeLensProviderInstance.refresh();
+      refreshLastRunDecorations();
+    }
   }));
+  refreshLastRunDecorations();
 }
 
 function register(context, command, handler) {
@@ -150,7 +169,9 @@ function createInvocation(documentUri, target, debug) {
     sourcePath: documentUri.fsPath,
     scope: target.scope || (target.filter === target.classFilter ? 'class' : 'method'),
     classFilter: target.classFilter || target.filter,
-    classDisplayName: target.classDisplayName || target.displayName
+    classDisplayName: target.classDisplayName || target.displayName,
+    targetLine: target.range?.start?.line,
+    targetCharacter: target.range?.start?.character
   };
 }
 
@@ -221,11 +242,10 @@ function resolveAutomaticCompositeTask(filePath, compositeRoot, defaultTask) {
   const projectDirectory = findProjectDirectoryFromSourcePath(absoluteFile);
   if (!projectDirectory) return undefined;
 
-  const includedBuildRoot = findIncludedBuildRoot(projectDirectory, absoluteRoot);
-  if (!includedBuildRoot) return undefined;
+  const includedBuild = findIncludedBuild(projectDirectory, absoluteRoot);
+  if (!includedBuild) return undefined;
 
-  const buildName = readGradleBuildName(includedBuildRoot) || path.basename(includedBuildRoot);
-  const relativeProject = path.relative(includedBuildRoot, projectDirectory);
+  const relativeProject = path.relative(includedBuild.root, projectDirectory);
   if (relativeProject.startsWith('..') || path.isAbsolute(relativeProject)) return undefined;
 
   const sourceSet = findSourceSetName(absoluteFile, projectDirectory);
@@ -234,7 +254,7 @@ function resolveAutomaticCompositeTask(filePath, compositeRoot, defaultTask) {
     ? []
     : relativeProject.split(path.sep).filter(Boolean);
 
-  return [buildName, ...projectParts, taskName].join(':');
+  return [includedBuild.name, ...projectParts, taskName].filter(Boolean).join(':');
 }
 
 function findProjectDirectoryFromSourcePath(filePath) {
@@ -255,17 +275,57 @@ function findSourceSetName(filePath, projectDirectory) {
   return srcIndex >= 0 && relative[srcIndex + 1] ? relative[srcIndex + 1] : undefined;
 }
 
-function findIncludedBuildRoot(startDirectory, compositeRoot) {
-  let current = path.resolve(startDirectory);
+function findIncludedBuild(startDirectory, compositeRoot) {
+  const project = path.resolve(startDirectory);
   const root = path.resolve(compositeRoot);
 
+  // The root settings file is the authority for a composite build. Matching an
+  // includeBuild path avoids mistaking a nested subproject/settings file for
+  // the included build root (for example lib/myrootproject/mysubproject).
+  const configured = readIncludedBuilds(root)
+    .filter(item => isPathInside(normalizePath(project), normalizePath(item.root)))
+    .sort((a, b) => b.root.length - a.root.length)[0];
+  if (configured) return configured;
+
+  // Fallback for settings files that construct includeBuild paths dynamically:
+  // choose the outermost settings-bearing ancestor below the composite root.
+  const candidates = [];
+  let current = project;
   while (isPathInside(normalizePath(current), normalizePath(root)) && current !== root) {
-    if (hasGradleSettings(current)) return current;
+    if (hasGradleSettings(current)) candidates.push(current);
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return undefined;
+  const includedRoot = candidates[candidates.length - 1];
+  if (!includedRoot) return undefined;
+  return {
+    root: includedRoot,
+    name: readGradleBuildName(includedRoot) || path.basename(includedRoot)
+  };
+}
+
+function readIncludedBuilds(compositeRoot) {
+  const settingsFile = ['settings.gradle', 'settings.gradle.kts']
+    .map(name => path.join(compositeRoot, name))
+    .find(candidate => fs.existsSync(candidate));
+  if (!settingsFile) return [];
+  let text;
+  try { text = fs.readFileSync(settingsFile, 'utf8'); } catch (_) { return []; }
+
+  const results = [];
+  const pattern = /includeBuild\s*(?:\(\s*)?["']([^"']+)["']\s*\)?\s*(?:\{([\s\S]*?)\})?/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const includedRoot = path.resolve(compositeRoot, match[1]);
+    const body = match[2] || '';
+    const alias = body.match(/name\s*=\s*["']([^"']+)["']/)?.[1];
+    results.push({
+      root: includedRoot,
+      name: alias || readGradleBuildName(includedRoot) || path.basename(includedRoot)
+    });
+  }
+  return results;
 }
 
 function hasGradleSettings(directory) {
@@ -568,13 +628,21 @@ function cleanFailureOutput(value) {
 
 async function recordResult(result) {
   testHistory = [result, ...testHistory.filter(item => item.id !== result.id)].slice(0, 30);
+  if (result.sourcePath) invalidatedSourcePaths.delete(normalizePath(result.sourcePath));
   if (extensionContext) await extensionContext.workspaceState.update('testHistory', testHistory);
+  refreshLastRunDecorations();
 }
 
 async function clearHistory() {
   testHistory = [];
   latestResults.clear();
+  invalidatedSourcePaths.clear();
   if (extensionContext) await extensionContext.workspaceState.update('testHistory', []);
+  const editor = vscode.window.activeTextEditor;
+  if (editor && lastPassedDecoration && lastFailedDecoration) {
+    editor.setDecorations(lastPassedDecoration, []);
+    editor.setDecorations(lastFailedDecoration, []);
+  }
   showResultsView();
 }
 
@@ -655,26 +723,36 @@ class CompositeGradleResultsViewProvider {
       } else if (message.command === 'copy') {
         await vscode.env.clipboard.writeText(selected.command || formatCommand(selected.invocation.executable, selected.invocation.args));
         vscode.window.setStatusBarMessage('Composite Gradle command copied.', 2500);
-      } else if ((message.command === 'openSource' || message.command === 'openLocation') && selected.sourcePath) {
-        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(selected.sourcePath));
-        const editor = await vscode.window.showTextDocument(document, { preview: false });
-        let position;
-        if (message.command === 'openLocation' && Number.isInteger(message.line)) {
-          position = new vscode.Position(Math.max(0, Math.min(message.line - 1, document.lineCount - 1)), 0);
-        } else {
-          const scope = selected.invocation?.scope === 'method' ? 'method' : 'class';
-          const target = await resolveTestTarget(document, new vscode.Position(0, 0), scope).catch(() => undefined);
-          position = target?.range?.start || new vscode.Position(0, 0);
+      } else if (message.command === 'openSource' || message.command === 'openLocation') {
+        let sourcePath = selected.sourcePath;
+        if (message.command === 'openLocation') {
+          sourcePath = await resolveFailureSourcePath(selected, message.file, message.className) || sourcePath;
         }
+        if (!sourcePath) throw new Error('The source file for this result could not be located.');
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+        const editor = await vscode.window.showTextDocument(document, { preview: false });
+        let line = 0;
+        let character = 0;
+        if (message.command === 'openLocation' && Number.isInteger(message.line)) {
+          line = message.line - 1;
+        } else if (Number.isInteger(selected.invocation?.targetLine)) {
+          line = selected.invocation.targetLine;
+          character = selected.invocation.targetCharacter || 0;
+        } else {
+          const target = await findTargetByFilter(document, selected.filter, selected.invocation?.scope);
+          line = target?.range?.start?.line || 0;
+          character = target?.range?.start?.character || 0;
+        }
+        const position = new vscode.Position(Math.max(0, Math.min(line, document.lineCount - 1)), Math.max(0, character));
         editor.selection = new vscode.Selection(position, position);
-        const range = new vscode.Range(position, position);
+        const range = document.lineAt(position.line).range;
         editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
         const highlight = vscode.window.createTextEditorDecorationType({
           isWholeLine: true,
           backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground')
         });
         editor.setDecorations(highlight, [range]);
-        setTimeout(() => highlight.dispose(), 900);
+        setTimeout(() => highlight.dispose(), 1000);
       }
     } catch (error) {
       vscode.window.showErrorMessage(`Composite Gradle Tests: ${error.message || error}`);
@@ -685,6 +763,40 @@ class CompositeGradleResultsViewProvider {
     if (!this.view) return;
     this.view.webview.html = renderResultsHtml(this.current || testHistory[0], testHistory);
   }
+}
+
+
+async function findTargetByFilter(document, filter, scope) {
+  const parsed = await parseJavaDocument(document);
+  const methodName = scope === 'method' ? String(filter || '').split('.').pop() : '';
+  if (methodName) {
+    const method = parsed.methods.find(item => item.isTest && item.name === methodName);
+    if (method) return method;
+  }
+  const className = String(filter || '').split('.').pop().replace(/\$.*$/, '');
+  return parsed.classes.find(item => item.name === className) || parsed.classes[0];
+}
+
+async function resolveFailureSourcePath(result, fileName, className) {
+  const current = result.sourcePath;
+  if (current && (!fileName || path.basename(current) === fileName)) return current;
+  if (!fileName) return current;
+
+  const candidates = await vscode.workspace.findFiles(`**/${fileName}`, '**/{build,.gradle,node_modules,out}/**', 100);
+  if (!candidates.length) return current;
+  const classPath = String(className || '').replace(/\$.*$/, '').replace(/\./g, '/');
+  const packageSuffix = classPath ? `${classPath}.java` : '';
+  const taskParts = String(result.task || '').split(':').filter(Boolean);
+  const score = uri => {
+    const normalized = normalizePath(uri.fsPath);
+    let value = 0;
+    if (packageSuffix && normalized.endsWith(packageSuffix)) value += 1000;
+    for (const part of taskParts) if (normalized.includes(`/${part}/`)) value += 20;
+    if (result.cwd && isPathInside(normalized, normalizePath(result.cwd))) value += 10;
+    return value;
+  };
+  candidates.sort((a, b) => score(b) - score(a));
+  return candidates[0].fsPath;
 }
 
 
@@ -727,54 +839,61 @@ function renderResultsHtml(current, history) {
   const rows = history.map((item, index) => `
     <button class="history-row ${current && current.id === item.id ? 'selected' : ''}" data-command="select" data-id="${escapeHtml(item.id)}" data-index="${index}">
       <span class="history-status status ${escapeHtml(item.status)}">${statusGlyph(item.status)}</span>
-      <span class="history-copy"><strong>${escapeHtml(item.displayName)}</strong><small>${escapeHtml(item.status)}</small></span>
+      <strong class="history-name">${escapeHtml(item.displayName)}</strong>
       <span class="history-time">${formatDuration(item.durationMs)}</span>
     </button>`).join('');
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';"><style>
-    :root{--radius:4px}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:0;margin:0;background:var(--vscode-sideBar-background);line-height:1.4}button{font:inherit}
-    .history{flex:0 0 auto;max-height:34vh;display:flex;flex-direction:column;background:color-mix(in srgb,var(--vscode-sideBar-background) 90%,var(--vscode-editor-background));border-bottom:1px solid var(--vscode-panel-border)}
-    .header{padding:8px 10px 6px;display:flex;justify-content:space-between;align-items:center}.header h3,.detail-label{font-size:10px;font-weight:700;margin:0;text-transform:uppercase;letter-spacing:.1em;color:var(--vscode-descriptionForeground)}.header button{border:0;border-radius:3px;padding:2px 6px;cursor:pointer;background:transparent;color:var(--vscode-descriptionForeground);font-size:10px}.header button:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}
-    .history-list{overflow:auto;min-height:0}.history-row{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);border-left:2px solid transparent;background:transparent;color:inherit;text-align:left;padding:6px 9px;display:grid;grid-template-columns:17px minmax(0,1fr) auto;gap:7px;align-items:center;cursor:pointer}.history-row:hover{background:var(--vscode-list-hoverBackground)}.history-row.selected{border-left-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.history-status{font-size:14px}.history-copy{min-width:0;display:flex;flex-direction:column}.history-copy strong{font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-copy small{font-size:9px;color:var(--vscode-descriptionForeground);text-transform:capitalize}.history-time{color:var(--vscode-descriptionForeground);font-size:9px;font-variant-numeric:tabular-nums}.history-row.selected .history-time,.history-row.selected .history-copy small{color:inherit;opacity:.78}.empty-history{padding:10px;color:var(--vscode-descriptionForeground);font-size:11px}
-    .detail-wrap{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;background:var(--vscode-sideBar-background)}.detail-label{flex:0 0 auto;padding:9px 10px 7px;border-top:5px solid color-mix(in srgb,var(--vscode-focusBorder) 45%,var(--vscode-panel-border));border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-sideBar-background) 82%,var(--vscode-editor-background))}.detail{min-height:0;overflow:auto;padding:10px 10px 22px}.hero{display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;align-items:start}.hero .big{font-size:20px;line-height:1}.hero h1{font-size:14px;font-weight:650;line-height:1.25;margin:0;word-break:break-word}.subtitle{margin-top:3px;color:var(--vscode-descriptionForeground);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.subtitle code{font-family:var(--vscode-editor-font-family);font-size:10px}
-    .actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px;margin:9px 0 0;padding:4px 0;border-top:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border)}.actions button{border:0;border-radius:3px;padding:3px 6px;cursor:pointer;background:transparent;color:var(--vscode-foreground);font-size:11px}.actions button:hover{background:var(--vscode-toolbar-hoverBackground)}.actions .primary{color:var(--vscode-textLink-foreground);font-weight:600}.actions .separator{width:1px;height:14px;background:var(--vscode-panel-border);margin:0 2px}.actions .raw{margin-left:auto;color:var(--vscode-descriptionForeground)}
+    :root{--radius:3px}*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{display:flex;flex-direction:column;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);color:var(--vscode-foreground);padding:0;margin:0;background:var(--vscode-sideBar-background);line-height:1.35}button{font:inherit}
+    .history{flex:0 0 auto;max-height:28vh;display:flex;flex-direction:column;background:color-mix(in srgb,var(--vscode-sideBar-background) 92%,var(--vscode-editor-background));border-bottom:1px solid var(--vscode-panel-border)}
+    .header{padding:8px 10px 6px;display:flex;justify-content:space-between;align-items:center}.header h3{font-size:10px;font-weight:700;margin:0;text-transform:uppercase;letter-spacing:.09em;color:var(--vscode-descriptionForeground)}.header button{border:0;border-radius:3px;padding:2px 5px;cursor:pointer;background:transparent;color:var(--vscode-descriptionForeground);font-size:10px}.header button:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}
+    .history-list{overflow:auto;min-height:0}.history-row{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);border-left:2px solid transparent;background:transparent;color:inherit;text-align:left;padding:7px 10px;display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:7px;align-items:center;cursor:pointer}.history-row:hover{background:var(--vscode-list-hoverBackground)}.history-row.selected{border-left-color:var(--vscode-focusBorder);background:color-mix(in srgb,var(--vscode-list-activeSelectionBackground) 34%,transparent);color:var(--vscode-foreground)}.history-status{font-size:13px;line-height:1}.history-name{min-width:0;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-time{color:var(--vscode-descriptionForeground);font-size:9px;font-variant-numeric:tabular-nums}.history-row.selected .history-time{color:inherit;opacity:.78}.empty-history{padding:8px 9px;color:var(--vscode-descriptionForeground);font-size:11px}
+    .detail-wrap{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;background:var(--vscode-editor-background);border-top:7px solid color-mix(in srgb,var(--vscode-panel-border) 72%,var(--vscode-sideBar-background));box-shadow:inset 0 1px 0 color-mix(in srgb,var(--vscode-contrastBorder) 45%,transparent)}.detail{min-height:0;overflow:auto;padding:14px 10px 30px;scroll-behavior:smooth;background:var(--vscode-editor-background)}.hero{border-left:3px solid var(--vscode-focusBorder);padding:7px 2px 7px 9px}.hero.passed{border-left-color:var(--vscode-testing-iconPassed)}.hero.failed{border-left-color:var(--vscode-testing-iconFailed)}.hero.skipped{border-left-color:var(--vscode-testing-iconSkipped)}.hero.running{border-left-color:var(--vscode-progressBar-background)}.hero.stopped{border-left-color:var(--vscode-descriptionForeground)}.hero-main{display:grid;grid-template-columns:16px minmax(0,1fr);gap:8px;align-items:center}.hero-title{display:flex;align-items:baseline;min-width:0;gap:9px}.hero-title h1{flex:0 1 auto}.hero-state{flex:0 0 auto}.hero .big{font-size:15px;line-height:1}.hero h1{font-size:13px;font-weight:650;line-height:1.3;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hero-state{font-size:10px;color:var(--vscode-descriptionForeground);white-space:nowrap;font-variant-numeric:tabular-nums}.hero-state strong{font-weight:600;text-transform:capitalize}.hero-task{margin-top:5px;margin-left:24px;color:var(--vscode-descriptionForeground);font-family:var(--vscode-editor-font-family);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .actions{display:flex;align-items:center;flex-wrap:wrap;gap:3px;margin:8px 0 0;padding:5px 0 7px;border-bottom:1px solid var(--vscode-panel-border)}.actions button{border:0;border-radius:3px;padding:4px 6px;cursor:pointer;background:transparent;color:var(--vscode-foreground);font-size:10px}.actions button:hover{background:var(--vscode-toolbar-hoverBackground)}.actions .primary{font-weight:600}.actions .icon{display:inline-flex;width:13px;height:13px;margin-right:2px;align-items:center;justify-content:center;color:var(--vscode-descriptionForeground);vertical-align:-2px}.actions .icon svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.actions .raw{margin-left:auto;color:var(--vscode-descriptionForeground)}
     .status.passed{color:var(--vscode-testing-iconPassed)}.status.failed{color:var(--vscode-testing-iconFailed)}.status.skipped{color:var(--vscode-testing-iconSkipped)}.status.running{color:var(--vscode-progressBar-background)}.status.stopped{color:var(--vscode-descriptionForeground)}
-    .section{margin-top:14px}.section-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section h3{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--vscode-descriptionForeground);margin:0}.console{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.55;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);border-radius:var(--radius);padding:9px 10px;margin:0;max-height:260px;overflow:auto}.failure-groups{display:flex;flex-direction:column;gap:12px}.failure-group{min-width:0}.failure-test{display:flex;align-items:center;gap:7px;margin:0 0 5px 2px;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600}.failure-test-mark{color:var(--vscode-testing-iconFailed);font-size:13px}.failure-card{border:1px solid color-mix(in srgb,var(--vscode-testing-iconFailed) 60%,var(--vscode-panel-border));border-left:3px solid var(--vscode-testing-iconFailed);border-radius:var(--radius);background:color-mix(in srgb,var(--vscode-testing-iconFailed) 5%,var(--vscode-textCodeBlock-background));overflow:hidden}.failure-head{padding:9px 10px;border-bottom:1px solid var(--vscode-panel-border)}.failure-type{font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:700}.failure-message{font-size:11px;margin-top:3px;color:var(--vscode-descriptionForeground)}.comparison{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.comparison>div{padding:8px 10px;min-width:0}.comparison>div+div{border-left:1px solid var(--vscode-panel-border)}.comparison label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin-bottom:3px}.comparison code{font-family:var(--vscode-editor-font-family);font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.location{display:block;width:100%;border:0;background:transparent;text-align:left;color:var(--vscode-textLink-foreground);cursor:pointer;padding:7px 10px;font-family:var(--vscode-editor-font-family);font-size:11px}.location:hover{background:var(--vscode-toolbar-hoverBackground)}.frames{margin:0;padding:8px 10px;white-space:pre;overflow:auto;font-family:var(--vscode-editor-font-family);font-size:10px;line-height:1.55}.framework-toggle{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer;text-align:left;padding:6px 10px;font-size:10px}.framework-toggle:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}.framework-frames{display:none;border-top:1px solid var(--vscode-panel-border)}.framework-frames.open{display:block}
-    .event-list{display:flex;flex-direction:column;gap:2px}.event{display:grid;grid-template-columns:14px minmax(0,1fr);gap:6px;padding:5px 6px;border-radius:3px;font-family:var(--vscode-editor-font-family);font-size:11px}.event:hover{background:var(--vscode-list-hoverBackground)}.event .event-name{overflow-wrap:anywhere}.event.passed .event-mark{color:var(--vscode-testing-iconPassed)}.event.failed .event-mark{color:var(--vscode-testing-iconFailed)}.event.skipped .event-mark{color:var(--vscode-testing-iconSkipped)}
-    .empty-output{padding:8px 10px;border:1px dashed var(--vscode-panel-border);border-radius:var(--radius);color:var(--vscode-descriptionForeground);font-size:11px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
-  </style></head><body><section class="history"><div class="header"><h3>Recent runs</h3><button data-command="clear">Clear</button></div><div class="history-list">${rows || '<div class="empty-history">No recent runs.</div>'}</div></section><section class="detail-wrap"><div class="detail-label">Selected run</div><main class="detail">${detail}</main></section>
-  <script nonce="${nonce}">const vscode=acquireVsCodeApi();let selectedIndex=Math.max(0,[...document.querySelectorAll('.history-row')].findIndex(x=>x.classList.contains('selected')));function selectIndex(next){const rows=[...document.querySelectorAll('.history-row')];if(!rows.length)return;selectedIndex=Math.max(0,Math.min(next,rows.length-1));rows[selectedIndex].click();rows[selectedIndex].scrollIntoView({block:'nearest'});}document.addEventListener('click',event=>{const button=event.target.closest('button[data-command]');if(!button)return;if(button.dataset.command==='toggleFramework'){const target=document.getElementById(button.dataset.target);if(target){target.classList.toggle('open');button.textContent=target.classList.contains('open')?'Hide framework frames':button.dataset.label;}return;}const message={command:button.dataset.command,id:button.dataset.id};if(button.dataset.line)message.line=Number(button.dataset.line);vscode.postMessage(message);});document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA'].includes(event.target.tagName))return;const key=event.key.toLowerCase();if(key==='j'||event.key==='ArrowDown'){event.preventDefault();selectIndex(selectedIndex+1);}else if(key==='k'||event.key==='ArrowUp'){event.preventDefault();selectIndex(selectedIndex-1);}else if(key==='enter'||key==='o'){event.preventDefault();document.querySelector('[data-command="openSource"]')?.click();}else if(key==='r'){event.preventDefault();document.querySelector('[data-command="rerun"]')?.click();}else if(key==='d'){event.preventDefault();document.querySelector('[data-command="debug"]')?.click();}else if(key==='f'){event.preventDefault();document.querySelector('.failure-card')?.scrollIntoView({behavior:'smooth',block:'start'});}});document.body.tabIndex=0;document.body.focus();</script></body></html>`;
+    .section{margin-top:16px}.failure-section{margin-top:16px}.section-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}.section h3{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin:0}.console{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--vscode-editor-font-family);font-size:10px;line-height:1.42;background:color-mix(in srgb,var(--vscode-editor-background) 88%,black);border:0;border-radius:0;padding:9px 10px;margin:0;max-height:260px;overflow:auto}
+    .failure-nav{display:flex;flex-direction:column;gap:0;margin:0 0 10px;border-top:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border)}.failure-nav button{width:100%;border:0;border-left:2px solid transparent;background:transparent;color:var(--vscode-foreground);padding:6px 5px 6px 4px;text-align:left;cursor:pointer;font-family:var(--vscode-editor-font-family);font-size:10px;display:grid;grid-template-columns:13px minmax(0,1fr) 12px;gap:4px;align-items:center;white-space:nowrap}.failure-nav .failure-nav-name{overflow:hidden;text-overflow:ellipsis}.failure-nav .jump-mark{color:var(--vscode-descriptionForeground);opacity:0;transition:none}.failure-nav button+button{border-top:1px solid color-mix(in srgb,var(--vscode-panel-border) 65%,transparent)}.failure-nav button .failure-nav-status{color:var(--vscode-testing-iconFailed)}.failure-nav button:hover{border-left-color:var(--vscode-testing-iconFailed);background:var(--vscode-list-hoverBackground)}.failure-nav button:hover .jump-mark,.failure-nav button:focus .jump-mark{opacity:1}.failure-groups{display:flex;flex-direction:column;gap:14px}.failure-group{min-width:0}.failure-test{display:flex;align-items:center;gap:6px;margin:0 0 6px 1px;font-family:var(--vscode-editor-font-family);font-size:10px;font-weight:600}.failure-test-mark{color:var(--vscode-testing-iconFailed);font-size:12px}.failure-card{scroll-margin-top:8px;border:1px solid var(--vscode-panel-border);border-left:3px solid var(--vscode-testing-iconFailed);border-radius:var(--radius);background:var(--vscode-editor-background);overflow:hidden}.failure-head{padding:8px 9px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-testing-iconFailed) 6%,transparent)}.failure-type{font-family:var(--vscode-editor-font-family);font-size:10px;font-weight:700}.failure-message{font-size:10px;margin-top:3px;color:var(--vscode-descriptionForeground)}.comparison{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.comparison>div{padding:7px 9px;min-width:0}.comparison>div+div{border-left:1px solid var(--vscode-panel-border)}.comparison label{display:block;font-size:8px;text-transform:uppercase;letter-spacing:.07em;color:var(--vscode-descriptionForeground);margin-bottom:1px}.comparison code{font-family:var(--vscode-editor-font-family);font-size:10px;white-space:pre-wrap;overflow-wrap:anywhere}.location{display:block;width:100%;border:0;background:transparent;text-align:left;color:var(--vscode-textLink-foreground);cursor:pointer;padding:7px 9px;font-family:var(--vscode-editor-font-family);font-size:10px}.location:hover{background:var(--vscode-toolbar-hoverBackground)}.frames{margin:0;padding:7px 9px;white-space:pre;overflow:auto;font-family:var(--vscode-editor-font-family);font-size:9px;line-height:1.42}.framework-toggle{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer;text-align:left;padding:6px 9px;font-size:9px}.framework-toggle:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}.framework-frames{display:none;border-top:1px solid var(--vscode-panel-border)}.framework-frames.open{display:block}
+    .event-list{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--vscode-panel-border)}.event{width:100%;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 65%,transparent);text-align:left;background:transparent;color:inherit;display:grid;grid-template-columns:13px minmax(0,1fr) auto;gap:6px;padding:6px 4px;font-family:var(--vscode-editor-font-family);font-size:10px}.event:hover{background:var(--vscode-list-hoverBackground)}.event .event-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-open{font-family:var(--vscode-font-family);font-size:9px;color:var(--vscode-textLink-foreground);opacity:0}.event.failed:hover .event-open,.event.failed:focus .event-open{opacity:1}.event.failed{cursor:pointer}.event.passed .event-mark{color:var(--vscode-testing-iconPassed)}.event.failed .event-mark{color:var(--vscode-testing-iconFailed)}.event.skipped .event-mark{color:var(--vscode-testing-iconSkipped)}
+    .empty-output{padding:6px 7px;border-left:2px solid var(--vscode-panel-border);background:var(--vscode-textCodeBlock-background);color:var(--vscode-descriptionForeground);font-size:10px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
+  </style></head><body><section class="history"><div class="header"><h3>Recent runs</h3><button data-command="clear">Clear</button></div><div class="history-list">${rows || '<div class="empty-history">No recent runs.</div>'}</div></section><section class="detail-wrap"><main class="detail">${detail}</main></section>
+  <script nonce="${nonce}">const vscode=acquireVsCodeApi();let selectedIndex=Math.max(0,[...document.querySelectorAll('.history-row')].findIndex(x=>x.classList.contains('selected')));function selectIndex(next){const rows=[...document.querySelectorAll('.history-row')];if(!rows.length)return;selectedIndex=Math.max(0,Math.min(next,rows.length-1));rows[selectedIndex].click();rows[selectedIndex].scrollIntoView({block:'nearest'});}document.addEventListener('click',event=>{const button=event.target.closest('button[data-command]');if(!button)return;if(button.dataset.command==='jumpFailure'){document.getElementById(button.dataset.target)?.scrollIntoView({behavior:'smooth',block:'start'});return;}if(button.dataset.command==='toggleFramework'){const target=document.getElementById(button.dataset.target);if(target){target.classList.toggle('open');button.textContent=target.classList.contains('open')?'Hide framework frames':button.dataset.label;}return;}const message={command:button.dataset.command,id:button.dataset.id};if(button.dataset.line)message.line=Number(button.dataset.line);if(button.dataset.file)message.file=button.dataset.file;if(button.dataset.class)message.className=button.dataset.class;vscode.postMessage(message);});document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA'].includes(event.target.tagName))return;const key=event.key.toLowerCase();if(key==='j'||event.key==='ArrowDown'){event.preventDefault();selectIndex(selectedIndex+1);}else if(key==='k'||event.key==='ArrowUp'){event.preventDefault();selectIndex(selectedIndex-1);}else if(key==='enter'||key==='o'){event.preventDefault();document.querySelector('[data-command="openSource"]')?.click();}else if(key==='r'){event.preventDefault();document.querySelector('[data-command="rerun"]')?.click();}else if(key==='d'){event.preventDefault();document.querySelector('[data-command="debug"]')?.click();}else if(key==='f'){event.preventDefault();document.querySelector('.failure-card')?.scrollIntoView({behavior:'smooth',block:'start'});}});document.body.tabIndex=0;document.body.focus();</script></body></html>`;
 }
 
 function renderResultDetail(result) {
   const isClass = result.invocation && result.invocation.scope === 'class';
-  const rerunLabel = isClass ? 'Rerun Class' : 'Rerun Test';
-  const debugLabel = isClass ? 'Debug Class' : 'Debug Test';
   const className = result.invocation?.classDisplayName || result.filter?.split('.').slice(-2, -1)[0] || '';
   const simpleName = isClass ? result.displayName : String(result.displayName || '').split('.').pop();
-  const subtitle = [className && className !== simpleName ? className : '', result.task, formatDuration(result.durationMs)].filter(Boolean).join(' · ');
   const failureItems = Array.isArray(result.failures) && result.failures.length
     ? result.failures
     : (result.failure ? [{ displayName: result.displayName, failure: result.failure }] : []);
   const failureSection = failureItems.length
-    ? `<div class="section"><div class="section-title"><h3>Failures · ${failureItems.length}</h3></div><div class="failure-groups">${failureItems.map((item, index) => renderFailureCard(analyzeFailure(item.failure, result, item), result, index, item.displayName)).join('')}</div></div>`
+    ? `<div class="section failure-section"><div class="section-title"><h3>Failures${failureItems.length > 1 ? ` · ${failureItems.length}` : ''}</h3></div>${failureItems.length > 1 ? `<div class="failure-nav">${failureItems.map((item, index) => `<button data-command="jumpFailure" data-target="failure-${index}"><span class="failure-nav-status">✕</span><span class="failure-nav-name">${escapeHtml(shortTestName(item.displayName))}</span><span class="jump-mark">›</span></button>`).join('')}</div>` : ''}<div class="failure-groups">${failureItems.map((item, index) => renderFailureCard(analyzeFailure(item.failure, result, item), result, index, shortTestName(item.displayName))).join('')}</div></div>`
     : '';
   const consoleSection = result.testOutput
     ? `<div class="section"><div class="section-title"><h3>Test output</h3></div><pre class="console">${escapeHtml(result.testOutput)}</pre></div>`
     : (result.status === 'failed' ? `<div class="section"><div class="section-title"><h3>Test output</h3></div><div class="empty-output">No output was written by this test.</div></div>` : '');
-  const eventLines = String(result.summary || '').split('\n').filter(Boolean);
+  const failureAnalyses = failureItems.map(item => analyzeFailure(item.failure, result, item));
+  const eventLines = String(result.summary || '').split('\n').filter(line => {
+    if (!line.trim() || /FAILURE:\s*Build failed/i.test(line) || /^>\s*Task\b/.test(line.trim())) return false;
+    return /\s(PASSED|FAILED|SKIPPED)$/.test(line);
+  });
   const showResults = isClass || eventLines.length > 1;
   const resultSection = showResults && eventLines.length
     ? `<div class="section"><div class="section-title"><h3>Results · ${eventLines.length}</h3></div><div class="event-list">${eventLines.map(line => {
         const match = line.match(/\s(PASSED|FAILED|SKIPPED)$/);
         const state = match ? match[1].toLowerCase() : result.status;
         const mark = state === 'passed' ? '✓' : state === 'failed' ? '✕' : '○';
-        const name = match ? line.slice(0, -match[0].length) : line;
-        return `<div class="event ${escapeHtml(state)}"><span class="event-mark">${mark}</span><span class="event-name">${escapeHtml(name)}</span></div>`;
+        const fullName = match ? line.slice(0, -match[0].length) : line;
+        const name = shortTestName(fullName);
+        const failureIndex = state === 'failed' ? failureItems.findIndex(item => normalizeTestDisplay(item.displayName) === normalizeTestDisplay(fullName)) : -1;
+        const info = failureIndex >= 0 ? failureAnalyses[failureIndex] : undefined;
+        const attrs = info?.line ? ` data-command="openLocation" data-id="${escapeHtml(result.id)}" data-line="${info.line}" data-file="${escapeHtml(info.file || '')}" data-class="${escapeHtml(info.className || '')}" title="Open failed test"` : '';
+        return `<${info?.line ? 'button' : 'div'} class="event ${escapeHtml(state)}"${attrs}><span class="event-mark">${mark}</span><span class="event-name">${escapeHtml(name)}</span>${info?.line ? '<span class="event-open">Open</span>' : ''}</${info?.line ? 'button' : 'div'}>`;
       }).join('')}</div></div>` : '';
+  const stateText = result.status === 'running' ? 'Running' : result.status;
 
-  return `<div class="hero"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div><h1>${escapeHtml(simpleName)}</h1><div class="subtitle" title="${escapeHtml(result.filter)}">${escapeHtml(subtitle)}</div></div></div>
-    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
-    ${failureSection}${consoleSection}${resultSection}`;
+  return `<div class="hero ${escapeHtml(result.status)}"><div class="hero-main"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div class="hero-title"><h1 title="${escapeHtml(result.displayName)}">${escapeHtml(simpleName)}</h1><span class="hero-state"><strong>${escapeHtml(stateText)}</strong> · ${formatDuration(result.durationMs)}</span></div></div><div class="hero-task" title="${escapeHtml(result.filter)}">${escapeHtml(result.task || result.filter || '')}</div></div>
+    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}"><span class="icon">${toolbarIcon('run')}</span>Run</button><button data-command="debug" data-id="${escapeHtml(result.id)}"><span class="icon">${toolbarIcon('debug')}</span>Debug</button><button data-command="openSource" data-id="${escapeHtml(result.id)}"><span class="icon">${toolbarIcon('source')}</span>Source</button><button data-command="copy" data-id="${escapeHtml(result.id)}"><span class="icon">${toolbarIcon('copy')}</span>Copy</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
+    ${resultSection}${failureSection}${consoleSection}`;
 }
 
 function analyzeFailure(failure, result, failureItem = {}) {
@@ -816,17 +935,37 @@ function analyzeFailure(failure, result, failureItem = {}) {
     || frames.find(line => /\([^():]+\.java:\d+\)/.test(line))
     || '';
   const locationMatch = primary.match(/([^/.(]+\.java):(\d+)\)/);
-  return { type, message, expected, actual, userFrames, frameworkFrames, primary, file: locationMatch?.[1], line: locationMatch ? Number(locationMatch[2]) : undefined };
+  return { type, message, expected, actual, userFrames, frameworkFrames, primary, file: locationMatch?.[1], line: locationMatch ? Number(locationMatch[2]) : undefined, className: fullClassName };
 }
 
 function renderFailureCard(info, result, index = 0, testName = '') {
   const comparison = info.expected || info.actual ? `<div class="comparison"><div><label>Expected</label><code>${escapeHtml(info.expected || '—')}</code></div><div><label>Actual</label><code>${escapeHtml(info.actual || '—')}</code></div></div>` : '';
-  const location = info.line ? `<button class="location" data-command="openLocation" data-id="${escapeHtml(result.id)}" data-line="${info.line}">↗ ${escapeHtml(info.file || 'Open failure')} : ${info.line}</button>` : '';
+  const location = info.line ? `<button class="location" data-command="openLocation" data-id="${escapeHtml(result.id)}" data-line="${info.line}" data-file="${escapeHtml(info.file || '')}" data-class="${escapeHtml(info.className || '')}">↗ ${escapeHtml(info.file || 'Open failure')} : ${info.line}</button>` : '';
   const userFrames = info.userFrames.length ? `<pre class="frames">${escapeHtml(info.userFrames.join('\n'))}</pre>` : '';
   const frameworkId = `frameworkFrames-${index}`;
   const framework = info.frameworkFrames.length ? `<button class="framework-toggle" data-command="toggleFramework" data-target="${frameworkId}" data-label="Show ${info.frameworkFrames.length} framework frames">Show ${info.frameworkFrames.length} framework frames</button><pre id="${frameworkId}" class="frames framework-frames">${escapeHtml(info.frameworkFrames.join('\n'))}</pre>` : '';
   const testHeader = testName ? `<div class="failure-test"><span class="failure-test-mark">✕</span><span>${escapeHtml(testName)}</span></div>` : '';
-  return `<article class="failure-group">${testHeader}<div class="failure-card"><div class="failure-head"><div class="failure-type">${escapeHtml(info.type)}</div>${info.message ? `<div class="failure-message">${escapeHtml(info.message)}</div>` : ''}</div>${comparison}${location}${userFrames}${framework}</div></article>`;
+  return `<article id="failure-${index}" class="failure-group">${testHeader}<div class="failure-card"><div class="failure-head"><div class="failure-type">${escapeHtml(info.type)}</div>${info.message ? `<div class="failure-message">${escapeHtml(info.message)}</div>` : ''}</div>${comparison}${location}${userFrames}${framework}</div></article>`;
+}
+
+function normalizeTestDisplay(value) {
+  return String(value || '').replace(/\s+(PASSED|FAILED|SKIPPED)$/i, '').replace(/\(\)$/, '').replace(/\s+/g, '').toLowerCase();
+}
+
+function shortTestName(value) {
+  const text = String(value || 'Test failure');
+  const separator = text.lastIndexOf('>');
+  return (separator >= 0 ? text.slice(separator + 1) : text).trim();
+}
+
+function toolbarIcon(name) {
+  const icons = {
+    run: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 4v3h-3"/><path d="M12.2 6.4A5 5 0 1 0 13 9"/></svg>',
+    debug: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 6.5h6v5H5z"/><path d="M6.5 4.5h3M8 2.5v2M3 8h2M11 8h2M3.5 11.5 5 10.5M12.5 11.5 11 10.5"/></svg>',
+    source: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3M6 8h4M6 10.5h4"/></svg>',
+    copy: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx=".5"/><path d="M10 5V3H3v8h2"/></svg>'
+  };
+  return icons[name] || '';
 }
 
 function statusGlyph(status) {
@@ -1111,6 +1250,45 @@ function smallestRange(items) {
 
 function rangeSize(range) {
   return (range.end.line - range.start.line) * 100000 + (range.end.character - range.start.character);
+}
+
+
+async function refreshLastRunDecorations() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'java' || !lastPassedDecoration || !lastFailedDecoration) return;
+  const sourcePath = normalizePath(editor.document.uri.fsPath);
+  if (invalidatedSourcePaths.has(sourcePath)) {
+    editor.setDecorations(lastPassedDecoration, []);
+    editor.setDecorations(lastFailedDecoration, []);
+    return;
+  }
+  const parsed = await parseJavaDocument(editor.document);
+  const statuses = new Map();
+  const relevant = testHistory.filter(item => normalizePath(item.sourcePath || '') === sourcePath);
+  for (const result of relevant) {
+    if (result.invocation?.scope === 'method') {
+      const method = String(result.filter || '').split('.').pop();
+      if (method && !statuses.has(method)) statuses.set(method, result.status);
+      continue;
+    }
+    for (const line of String(result.summary || '').split('\n')) {
+      const match = line.match(/(?:^|>\s*)([A-Za-z_$][\w$]*)\s*(?:\([^)]*\))?\s+(PASSED|FAILED|SKIPPED)\s*$/);
+      if (!match || statuses.has(match[1])) continue;
+      statuses.set(match[1], match[2].toLowerCase());
+    }
+  }
+  const passed = [], failed = [];
+  for (const method of parsed.methods.filter(item => item.isTest)) {
+    const status = statuses.get(method.name);
+    if (status !== 'passed' && status !== 'failed') continue;
+    const option = {
+      range: new vscode.Range(method.selectionRange.start.line, 0, method.selectionRange.start.line, 0),
+      hoverMessage: `Last run: ${status}. Marker clears when this file changes.`
+    };
+    (status === 'passed' ? passed : failed).push(option);
+  }
+  editor.setDecorations(lastPassedDecoration, passed);
+  editor.setDecorations(lastFailedDecoration, failed);
 }
 
 class CompositeGradleCodeLensProvider {

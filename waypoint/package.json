@@ -11,6 +11,7 @@
   "activationEvents": [
     "onCommand:visualBookmarks.add",
     "onCommand:visualBookmarks.remove",
+    "onCommand:visualBookmarks.label",
     "onCommand:visualBookmarks.openMap",
     "onCommand:visualBookmarks.clearFile"
   ],
@@ -24,6 +25,10 @@
       {
         "command": "visualBookmarks.remove",
         "title": "Visual Bookmarks: Remove Bookmark at Cursor"
+      },
+      {
+        "command": "visualBookmarks.label",
+        "title": "Visual Bookmarks: Label Bookmark at Cursor"
       },
       {
         "command": "visualBookmarks.openMap",

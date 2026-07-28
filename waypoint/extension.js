@@ -37,6 +37,7 @@ function activate(context) {
     bookmarkDecoration,
     vscode.commands.registerCommand('visualBookmarks.add', addBookmark),
     vscode.commands.registerCommand('visualBookmarks.remove', removeBookmarkAtCursor),
+    vscode.commands.registerCommand('visualBookmarks.label', labelBookmarkAtCursor),
     vscode.commands.registerCommand('visualBookmarks.openMap', openVisualMap),
     vscode.commands.registerCommand('visualBookmarks.clearFile', clearCurrentFile),
     vscode.window.onDidChangeActiveTextEditor(updateDecorations),
@@ -97,20 +98,40 @@ async function addBookmark() {
 
   const landmark = LANDMARKS.find(item => item.id === bookmark.landmarkId) || LANDMARKS[0];
   const verb = duplicateIndex >= 0 ? 'Updated' : 'Created';
-  const action = await vscode.window.showInformationMessage(
-    `${verb} ${bookmark.color} ${bookmark.shape} bookmark ${bookmark.direction} the ${landmark.name} ${landmark.icon}.`,
-    'Add label'
-  );
-  if (action === 'Add label') {
-    const label = await vscode.window.showInputBox({ prompt: 'Bookmark label', placeHolder: lineText.trim().slice(0, 80), value: bookmark.label });
-    if (label !== undefined) {
-      bookmark.label = label.trim(); bookmark.updatedAt = Date.now();
-      const index = bookmarks.findIndex(item => item.id === bookmark.id);
-      if (index >= 0) bookmarks[index] = bookmark;
-      await saveBookmarks(bookmarks);
-    }
-  }
+  const message = `${verb} ${bookmark.color} ${bookmark.shape} bookmark ${bookmark.direction} the ${landmark.name} ${landmark.icon}.`;
+
+  // An information notification with action buttons can capture keyboard focus.
+  // Use the status bar so adding a bookmark never interrupts editor typing.
+  vscode.window.setStatusBarMessage(message, 5000);
+  await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
 }
+
+async function labelBookmarkAtCursor() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+
+  const uri = editor.document.uri.toString();
+  const line = editor.selection.active.line;
+  const bookmarks = getBookmarks();
+  const index = bookmarks.findIndex(item => item.uri === uri && item.line === line);
+
+  if (index < 0) {
+    vscode.window.showInformationMessage('There is no visual bookmark on this line.');
+    return;
+  }
+
+  const bookmark = bookmarks[index];
+  const label = await vscode.window.showInputBox({
+    prompt: 'Bookmark label',
+    placeHolder: bookmark.lineText.trim().slice(0, 80),
+    value: bookmark.label || ''
+  });
+
+  if (label === undefined) return;
+  bookmarks[index] = { ...bookmark, label: label.trim(), updatedAt: Date.now() };
+  await saveBookmarks(bookmarks);
+}
+
 
 function chooseLandmarkVisual(bookmarks) {
   const visual = chooseVisual(bookmarks);

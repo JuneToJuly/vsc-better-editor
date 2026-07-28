@@ -2,7 +2,7 @@
   "name": "file-change-history",
   "displayName": "Recent Code Locations",
   "description": "Tracks meaningful cursor locations with grouped and chronological journey views.",
-  "version": "0.0.23",
+  "version": "0.0.35",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
