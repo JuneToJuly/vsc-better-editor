@@ -1,0 +1,15 @@
+/* Optional and unsupported by VS Code itself.
+   Requires a third-party custom-CSS loader. Replace the image URL with your own local file URI. */
+.monaco-workbench {
+  background-image: linear-gradient(rgba(255,253,242,.84), rgba(255,253,242,.84)),
+                    url('file:///ABSOLUTE/PATH/TO/meadow-background.png') !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+.monaco-workbench .part.editor > .content,
+.monaco-workbench .part.sidebar,
+.monaco-workbench .part.auxiliarybar,
+.monaco-workbench .part.panel {
+  background-color: rgba(255,253,242,.78) !important;
+  backdrop-filter: blur(2px);
+}

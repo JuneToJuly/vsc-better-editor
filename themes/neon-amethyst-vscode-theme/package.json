@@ -1,0 +1,37 @@
+{
+  "name": "neon-amethyst-palette",
+  "displayName": "Neon Amethyst Palette",
+  "description": "A polished amethyst, fuchsia, yellow, cyan, and deep-ocean VS Code theme family with carefully balanced semantic highlighting.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "keywords": [
+    "theme",
+    "neon",
+    "amethyst",
+    "fuchsia",
+    "cyan",
+    "yellow",
+    "dark theme",
+    "light theme"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Neon Amethyst Night",
+        "uiTheme": "vs-dark",
+        "path": "./themes/neon-amethyst-night-color-theme.json"
+      },
+      {
+        "label": "Neon Amethyst Day",
+        "uiTheme": "vs",
+        "path": "./themes/neon-amethyst-day-color-theme.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "meadow-daylight-theme",
+  "displayName": "Meadow Daylight",
+  "description": "A soft illustrated countryside-inspired VS Code light theme with sky, parchment, leaf, and meadow accents.",
+  "version": "1.0.0",
+  "publisher": "local-theme-studio",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Themes"],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Meadow Daylight",
+        "uiTheme": "vs",
+        "path": "./themes/meadow-daylight-color-theme.json"
+      }
+    ]
+  }
+}

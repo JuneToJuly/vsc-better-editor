@@ -1,0 +1,38 @@
+{
+  "name": "pastel-circuit-dual-theme",
+  "displayName": "Pastel Circuit: Nocturne & Daybreak",
+  "description": "A refined pastel VS Code theme family with a layered charcoal dark theme and a crisp, low-glare light theme.",
+  "version": "1.1.0",
+  "publisher": "custom-themes",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "keywords": [
+    "theme",
+    "dark theme",
+    "light theme",
+    "pastel",
+    "mauve",
+    "cyan",
+    "aquamarine",
+    "semantic highlighting"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Pastel Circuit Nocturne",
+        "uiTheme": "vs-dark",
+        "path": "./themes/pastel-circuit-dark-color-theme.json"
+      },
+      {
+        "label": "Pastel Circuit Daybreak",
+        "uiTheme": "vs",
+        "path": "./themes/pastel-circuit-light-color-theme.json"
+      }
+    ]
+  }
+}

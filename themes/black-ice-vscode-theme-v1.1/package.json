@@ -1,0 +1,35 @@
+{
+  "name": "black-ice-palette",
+  "displayName": "Black Ice Palette",
+  "description": "A cool steel and pale-sky VS Code theme family with a readable softened dark theme and a bright light theme.",
+  "version": "1.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "keywords": [
+    "theme",
+    "dark theme",
+    "light theme",
+    "black ice",
+    "blue",
+    "cool steel"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Black Ice Soft",
+        "uiTheme": "vs-dark",
+        "path": "./themes/black-ice-soft-color-theme.json"
+      },
+      {
+        "label": "Black Ice Daylight",
+        "uiTheme": "vs",
+        "path": "./themes/black-ice-daylight-color-theme.json"
+      }
+    ]
+  }
+}

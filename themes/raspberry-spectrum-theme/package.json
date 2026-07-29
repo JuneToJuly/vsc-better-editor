@@ -1,0 +1,36 @@
+{
+  "name": "raspberry-spectrum-theme",
+  "displayName": "Raspberry Spectrum Themes",
+  "description": "Dark and light VS Code themes built from raspberry red, blush rose, thistle, full-spectrum blue, and electric violet.",
+  "version": "1.1.0",
+  "publisher": "custom-themes",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "keywords": [
+    "theme",
+    "dark theme",
+    "light theme",
+    "raspberry",
+    "violet",
+    "blue"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Raspberry Spectrum",
+        "uiTheme": "vs-dark",
+        "path": "./themes/raspberry-spectrum-color-theme.json"
+      },
+      {
+        "label": "Raspberry Spectrum Light",
+        "uiTheme": "vs",
+        "path": "./themes/raspberry-spectrum-light-color-theme.json"
+      }
+    ]
+  }
+}
