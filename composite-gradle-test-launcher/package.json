@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.1.20",
+  "version": "0.1.26",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -32,7 +32,11 @@
     "onCommand:compositeGradleTests.showResults",
     "onCommand:compositeGradleTests.showHistory",
     "onCommand:compositeGradleTests.clearHistory",
-    "onView:compositeGradleTests.resultsView"
+    "onView:compositeGradleTests.resultsView",
+    "onCommand:compositeGradleTests.addTest",
+    "onCommand:compositeGradleTests.openLastTest",
+    "onCommand:compositeGradleTests.evaluateExpression",
+    "onCommand:compositeGradleTests.evaluateCurrentExpression"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -61,6 +65,11 @@
         "command": "compositeGradleTests.repeatLast",
         "title": "Composite Gradle: Repeat Last Test",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.openLastTest",
+        "title": "Composite Gradle: Open Last Run Test",
+        "icon": "$(go-to-file)"
       },
       {
         "command": "compositeGradleTests.stop",
@@ -111,6 +120,21 @@
         "command": "compositeGradleTests.projectTests.runFailed",
         "title": "Composite Gradle: Run Failed Project Tests",
         "icon": "$(error)"
+      },
+      {
+        "command": "compositeGradleTests.addTest",
+        "title": "Composite Gradle: Add Test",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.evaluateExpression",
+        "title": "Composite Gradle: Evaluate Expression",
+        "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "compositeGradleTests.evaluateCurrentExpression",
+        "title": "Composite Gradle: Evaluate Current Expression",
+        "icon": "$(play)"
       }
     ],
     "menus": {
@@ -134,6 +158,11 @@
           "command": "compositeGradleTests.debugClass",
           "when": "editorLangId == java",
           "group": "testing@4"
+        },
+        {
+          "command": "compositeGradleTests.addTest",
+          "when": "editorLangId == java",
+          "group": "testing@5"
         }
       ],
       "view/title": [
@@ -143,14 +172,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "compositeGradleTests.stop",
+          "command": "compositeGradleTests.openLastTest",
           "when": "view == compositeGradleTests.resultsView",
           "group": "navigation@2"
         },
         {
-          "command": "compositeGradleTests.clearHistory",
+          "command": "compositeGradleTests.stop",
           "when": "view == compositeGradleTests.resultsView",
           "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.clearHistory",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@4"
         },
         {
           "command": "compositeGradleTests.projectTests.refresh",
@@ -179,6 +213,13 @@
           "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
           "group": "navigation@1"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "compositeGradleTests.evaluateCurrentExpression",
+          "when": "compositeGradleTests.evaluateEditorActive",
+          "group": "navigation@1"
+        }
       ]
     },
     "keybindings": [
@@ -186,6 +227,18 @@
         "command": "compositeGradleTests.repeatLast",
         "key": "ctrl+shift+r",
         "mac": "cmd+shift+r"
+      },
+      {
+        "command": "compositeGradleTests.evaluateExpression",
+        "key": "alt+f8",
+        "mac": "alt+f8",
+        "when": "inDebugMode"
+      },
+      {
+        "command": "compositeGradleTests.evaluateCurrentExpression",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "compositeGradleTests.evaluateEditorActive && editorTextFocus"
       }
     ],
     "configuration": {

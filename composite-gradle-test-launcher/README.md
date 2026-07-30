@@ -197,3 +197,25 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - Shows latest known passed, failed, skipped, running, stale, and not-run states.
 - Run, debug, or open tests directly from the tree.
 - Added Refresh and Run Failed toolbar actions.
+
+## 0.1.23
+
+- Added **Open Last Run Test** to jump directly to the most recently executed test case.
+- Java debugger attach configurations now include the owning Java project name so the Debug Console resolves the correct project context.
+
+
+## 0.1.26
+
+- Replaced the webview textarea evaluator with a real untitled Java editor.
+- VSCodeVim, selections, undo/redo, syntax highlighting, and normal editor keybindings now work.
+- Press `Ctrl+Enter` to evaluate the selection or the entire scratch document.
+- Debug-adapter completions are surfaced through VS Code's native completion widget and replace only the identifier under the cursor.
+- Evaluation output is written to the **Composite Gradle Evaluate** output channel.
+- The attach debugger now asks the Java language server for the owning Java project name before falling back to Gradle path inference.
+
+
+## 0.1.26
+
+- Force Evaluate results output channel to open and receive focus after Ctrl+Enter.
+- Show a status-bar preview for successful evaluations.
+- Surface evaluation errors as visible notifications in addition to the output channel.

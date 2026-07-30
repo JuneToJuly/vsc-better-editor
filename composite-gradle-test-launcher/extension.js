@@ -14,6 +14,11 @@ let resultsViewProvider;
 let testHistory = [];
 let codeLensProviderInstance;
 let projectTestsProvider;
+let debugEvaluatePanel;
+let debugEvaluateScratchUri;
+let debugEvaluateSession;
+let debugEvaluateFrameId;
+let debugEvaluateOutput;
 let lastPassedDecoration;
 let lastFailedDecoration;
 const invalidatedSourcePaths = new Set();
@@ -25,18 +30,23 @@ async function activate(context) {
   output = vscode.window.createOutputChannel('Composite Gradle Tests');
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
   statusItem.command = 'compositeGradleTests.stop';
-  context.subscriptions.push(output, statusItem);
+  debugEvaluateOutput = vscode.window.createOutputChannel('Composite Gradle Evaluate');
+  context.subscriptions.push(output, debugEvaluateOutput, statusItem);
 
   register(context, 'compositeGradleTests.runMethod', () => launchFromEditor('method', false));
   register(context, 'compositeGradleTests.debugMethod', () => launchFromEditor('method', true));
   register(context, 'compositeGradleTests.runClass', () => launchFromEditor('class', false));
   register(context, 'compositeGradleTests.debugClass', () => launchFromEditor('class', true));
   register(context, 'compositeGradleTests.repeatLast', repeatLast);
+  register(context, 'compositeGradleTests.openLastTest', openLastTest);
   register(context, 'compositeGradleTests.stop', stopCurrent);
   register(context, 'compositeGradleTests.copyLastCommand', copyLastCommand);
   register(context, 'compositeGradleTests.showResults', () => showResultsView());
   register(context, 'compositeGradleTests.showHistory', () => showResultsView());
   register(context, 'compositeGradleTests.clearHistory', clearHistory);
+  register(context, 'compositeGradleTests.addTest', addTestCase);
+  register(context, 'compositeGradleTests.evaluateExpression', () => showDebugEvaluateWindow());
+  register(context, 'compositeGradleTests.evaluateCurrentExpression', evaluateCurrentExpression);
 
   resultsViewProvider = new CompositeGradleResultsViewProvider(context.extensionUri);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(
@@ -103,7 +113,7 @@ async function launchFromEditor(scope, debug, providedTarget) {
       : 'No containing Java class was found.');
   }
 
-  const invocation = createInvocation(editor.document.uri, target, debug);
+  const invocation = await createInvocation(editor.document.uri, target, debug);
   await executeInvocation(invocation);
 }
 
@@ -112,6 +122,28 @@ async function repeatLast() {
     throw new Error('No test has been run yet.');
   }
   await executeInvocation({ ...lastInvocation });
+}
+
+async function openLastTest() {
+  const result = testHistory[0];
+  const invocation = result?.invocation || lastInvocation;
+  const sourcePath = result?.sourcePath || invocation?.sourcePath;
+  if (!sourcePath) {
+    throw new Error('No previously run test source is available.');
+  }
+
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  let line = Number.isInteger(invocation?.targetLine) ? invocation.targetLine : undefined;
+  let character = Number.isInteger(invocation?.targetCharacter) ? invocation.targetCharacter : 0;
+  if (!Number.isInteger(line)) {
+    const target = await findTargetByFilter(document, result?.filter || invocation?.filter, invocation?.scope);
+    line = target?.range?.start?.line || 0;
+    character = target?.range?.start?.character || 0;
+  }
+  const position = new vscode.Position(Math.max(0, Math.min(line, document.lineCount - 1)), Math.max(0, character));
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(document.lineAt(position.line).range, vscode.TextEditorRevealType.InCenter);
 }
 
 async function copyLastCommand() {
@@ -130,7 +162,7 @@ async function stopCurrent() {
   terminateProcessTree(runningProcess);
 }
 
-function createInvocation(documentUri, target, debug) {
+async function createInvocation(documentUri, target, debug) {
   const config = vscode.workspace.getConfiguration('compositeGradleTests', documentUri);
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
   if (!workspaceFolder) {
@@ -165,6 +197,7 @@ function createInvocation(documentUri, target, debug) {
     displayName: target.displayName,
     filter: target.filter,
     task,
+    projectName: await resolveJavaProjectNameFromJavaExtension(documentUri.fsPath, task),
     showOutput: config.get('showOutput', false),
     documentUri: documentUri.toString(),
     sourcePath: documentUri.fsPath,
@@ -174,6 +207,195 @@ function createInvocation(documentUri, target, debug) {
     targetLine: target.range?.start?.line,
     targetCharacter: target.range?.start?.character
   };
+}
+
+
+async function addTestCase() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'java') {
+    throw new Error('Open a Java source or test file first.');
+  }
+
+  const sourceDocument = editor.document;
+  const parsed = await parseJavaDocument(sourceDocument);
+  const cursor = editor.selection.active;
+  const activeClass = parsed.classes
+    .filter(clazz => clazz.range.contains(cursor))
+    .sort((a, b) => rangeSize(a.range) - rangeSize(b.range))[0] || parsed.classes[0];
+  if (!activeClass) throw new Error('No Java class was found in the current file.');
+
+  const activeMethod = parsed.methods
+    .filter(method => method.parentClass === activeClass && method.range.contains(cursor))
+    .sort((a, b) => rangeSize(a.range) - rangeSize(b.range))[0];
+
+  const defaultDescription = activeMethod
+    ? humanizeMethodName(activeMethod.name)
+    : `Tests ${humanizeTypeName(activeClass.name)}`;
+  const description = await vscode.window.showInputBox({
+    title: 'Add Test',
+    prompt: 'Describe the test behavior. This text is used for @DisplayName.',
+    value: defaultDescription,
+    valueSelection: [0, defaultDescription.length],
+    validateInput: value => value.trim() ? undefined : 'Enter a test description.'
+  });
+  if (description === undefined) return;
+
+  const displayName = description.trim();
+  const methodName = toJavaMethodName(displayName);
+  if (!methodName) throw new Error('The description could not be converted into a Java method name.');
+
+  const testUri = resolveTestFileUri(sourceDocument.uri, activeClass.name);
+  let testDocument;
+  try {
+    testDocument = await vscode.workspace.openTextDocument(testUri);
+  } catch {
+    await createTestFile(testUri, parsed.packageName, activeClass.name);
+    testDocument = await vscode.workspace.openTextDocument(testUri);
+  }
+
+  let text = testDocument.getText();
+  if (new RegExp(`\\bvoid\\s+${escapeRegExp(methodName)}\\s*\\(`).test(text)
+      || text.includes(`@DisplayName(${JSON.stringify(displayName)})`)) {
+    const choice = await vscode.window.showWarningMessage(
+      `A test named "${displayName}" already appears to exist.`,
+      'Open Existing', 'Create Anyway'
+    );
+    if (!choice) return;
+    if (choice === 'Open Existing') {
+      const existingEditor = await vscode.window.showTextDocument(testDocument);
+      const match = text.match(new RegExp(`\\b${escapeRegExp(methodName)}\\s*\\(`));
+      if (match) {
+        const position = testDocument.positionAt(match.index);
+        existingEditor.selection = new vscode.Selection(position, position);
+        existingEditor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+      }
+      return;
+    }
+  }
+
+  await ensureJUnitImports(testDocument);
+  testDocument = await vscode.workspace.openTextDocument(testUri);
+  text = testDocument.getText();
+  const classClose = findLastClassClosingBrace(text);
+  if (classClose < 0) throw new Error('Could not find the test class closing brace.');
+
+  const indent = detectMemberIndent(text);
+  const bodyIndent = indent + detectIndentUnit(text);
+  const method = [
+    '',
+    `${indent}@Test`,
+    `${indent}@DisplayName(${JSON.stringify(displayName)})`,
+    `${indent}void ${methodName}() {`,
+    `${bodyIndent}// Arrange`,
+    '',
+    `${bodyIndent}// Act`,
+    '',
+    `${bodyIndent}// Assert`,
+    `${indent}}`,
+    ''
+  ].join(testDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n');
+
+  const edit = new vscode.WorkspaceEdit();
+  edit.insert(testUri, testDocument.positionAt(classClose), method);
+  if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code could not insert the test method.');
+
+  // Keep the developer in the source file. Format the created/updated test
+  // document through the provider without opening or revealing it.
+  const updated = await vscode.workspace.openTextDocument(testUri);
+  const formatEdits = await vscode.commands.executeCommand(
+    'vscode.executeFormatDocumentProvider',
+    testUri,
+    { tabSize: editor.options.tabSize || 4, insertSpaces: editor.options.insertSpaces !== false }
+  );
+  if (Array.isArray(formatEdits) && formatEdits.length) {
+    const formatWorkspaceEdit = new vscode.WorkspaceEdit();
+    formatWorkspaceEdit.set(testUri, formatEdits);
+    await vscode.workspace.applyEdit(formatWorkspaceEdit);
+  }
+  await updated.save();
+  projectTestsProvider?.refresh();
+  vscode.window.showInformationMessage(`Created test: ${displayName}`);
+}
+
+function resolveTestFileUri(sourceUri, className) {
+  const sourcePath = sourceUri.fsPath;
+  const normalized = sourcePath.replace(/\\/g, '/');
+  if (/\/src\/(test|integrationTest|functionalTest)\/java\//.test(normalized)) {
+    return sourceUri;
+  }
+  const replaced = normalized.replace(/\/src\/main\/java\//, '/src/test/java/');
+  if (replaced !== normalized) {
+    const directory = path.dirname(replaced);
+    return vscode.Uri.file(path.join(directory, `${className}Test.java`));
+  }
+  return vscode.Uri.file(path.join(path.dirname(sourcePath), `${className}Test.java`));
+}
+
+async function createTestFile(testUri, packageName, className) {
+  await fs.promises.mkdir(path.dirname(testUri.fsPath), { recursive: true });
+  const eol = require('os').EOL;
+  const contents = [
+    packageName ? `package ${packageName};` : '',
+    packageName ? '' : null,
+    'import org.junit.jupiter.api.DisplayName;',
+    'import org.junit.jupiter.api.Test;',
+    '',
+    `class ${className}Test {`,
+    '',
+    '}',
+    ''
+  ].filter(line => line !== null).join(eol);
+  await fs.promises.writeFile(testUri.fsPath, contents, { flag: 'wx' });
+}
+
+async function ensureJUnitImports(document) {
+  let text = document.getText();
+  const missing = [];
+  if (!/^\s*import\s+org\.junit\.jupiter\.api\.Test\s*;/m.test(text)) missing.push('import org.junit.jupiter.api.Test;');
+  if (!/^\s*import\s+org\.junit\.jupiter\.api\.DisplayName\s*;/m.test(text)) missing.push('import org.junit.jupiter.api.DisplayName;');
+  if (!missing.length) return;
+
+  const packageMatch = text.match(/^\s*package\s+[\w.]+\s*;\s*/m);
+  const imports = [...text.matchAll(/^\s*import\s+[^;]+;\s*$/gm)];
+  const offset = imports.length
+    ? imports[imports.length - 1].index + imports[imports.length - 1][0].length
+    : packageMatch ? packageMatch.index + packageMatch[0].length : 0;
+  const eol = document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+  const prefix = imports.length ? eol : (packageMatch ? eol : '');
+  const edit = new vscode.WorkspaceEdit();
+  edit.insert(document.uri, document.positionAt(offset), `${prefix}${missing.join(eol)}${eol}`);
+  if (!await vscode.workspace.applyEdit(edit)) throw new Error('Could not add JUnit imports.');
+}
+
+function findLastClassClosingBrace(text) {
+  for (let index = text.length - 1; index >= 0; index--) if (text[index] === '}') return index;
+  return -1;
+}
+
+function detectMemberIndent(text) {
+  const match = text.match(/\n([ \t]+)(?:@|(?:public|protected|private|static|final|void)\b)/);
+  return match ? match[1] : '    ';
+}
+
+function detectIndentUnit(text) {
+  return /\n\t+\S/.test(text) ? '\t' : '    ';
+}
+
+function humanizeTypeName(value) {
+  return String(value).replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+}
+
+function humanizeMethodName(value) {
+  const words = String(value).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'New test';
+}
+
+function toJavaMethodName(value) {
+  const words = String(value).normalize('NFKD').replace(/[^A-Za-z0-9_$]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  let result = words[0].toLowerCase() + words.slice(1).map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join('');
+  if (/^\d/.test(result)) result = `test${result}`;
+  return result.replace(/[^A-Za-z0-9_$]/g, '');
 }
 
 function resolveCompositeRoot(configuredRoot, owningWorkspaceFolder) {
@@ -268,6 +490,13 @@ function findProjectDirectoryFromSourcePath(filePath) {
     }
   }
   return undefined;
+}
+
+function resolveJavaProjectName(filePath, task) {
+  const projectDirectory = findProjectDirectoryFromSourcePath(filePath);
+  if (projectDirectory) return path.basename(projectDirectory);
+  const parts = String(task || '').split(':').filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 2] : parts[0];
 }
 
 function findSourceSetName(filePath, projectDirectory) {
@@ -980,13 +1209,14 @@ function isDebugReady(text, port) {
 }
 
 async function attachDebugger(invocation) {
-  output.appendLine(`\n[debug] Attaching Java debugger to localhost:${invocation.debugPort}...`);
+  output.appendLine(`\n[debug] Attaching Java debugger to localhost:${invocation.debugPort} for project ${invocation.projectName || '(automatic)'}...`);
   const started = await vscode.debug.startDebugging(undefined, {
     type: 'java',
     request: 'attach',
     name: `Composite Gradle: ${invocation.displayName}`,
     hostName: 'localhost',
     port: invocation.debugPort,
+    projectName: invocation.projectName,
     timeout: 120000
   });
   if (!started) {
@@ -1057,8 +1287,10 @@ async function parseJavaDocument(document) {
         const prefixStart = Math.max(0, symbol.range.start.line - 8);
         const prefix = document.getText(new vscode.Range(prefixStart, 0, symbol.selectionRange.start.line, 500));
         const foundAnnotations = [...prefix.matchAll(/@([A-Za-z_$][\w$]*)/g)].map(match => match[1]);
+        const displayNameMatch = prefix.match(/@DisplayName\s*\(\s*\"((?:\\.|[^\"\\])*)\"\s*\)/s);
         methods.push({
           name: stripMethodSignature(symbol.name),
+          displayName: displayNameMatch ? decodeJavaString(displayNameMatch[1]) : undefined,
           range: symbol.range,
           selectionRange: symbol.selectionRange,
           parentClass: currentClass,
@@ -1093,6 +1325,7 @@ function mergeFallbackSymbols(classes, methods, fallback) {
       && item.selectionRange.start.line === fallbackMethod.selectionRange.start.line);
     if (existing) {
       existing.isTest = existing.isTest || fallbackMethod.isTest;
+      existing.displayName = existing.displayName || fallbackMethod.displayName;
       // Language-server ranges sometimes begin at the method name and exclude
       // modifiers/annotations. The fallback range covers the whole declaration
       // and body, which makes "under cursor" behavior consistent.
@@ -1171,8 +1404,10 @@ function parseJavaSourceFallback(document, annotations) {
     const parentClass = classes
       .filter(clazz => clazz.openOffset < match.index && clazz.closeOffset > closeOffset)
       .sort((a, b) => (a.closeOffset - a.openOffset) - (b.closeOffset - b.openOffset))[0];
+    const displayNameMatch = match[1].match(/@DisplayName\s*\(\s*\"((?:\\.|[^\"\\])*)\"\s*\)/s);
     methods.push({
       name: methodName,
+      displayName: displayNameMatch ? decodeJavaString(displayNameMatch[1]) : undefined,
       range: new vscode.Range(document.positionAt(match.index), document.positionAt(closeOffset + 1)),
       selectionRange: new vscode.Range(document.positionAt(nameOffset), document.positionAt(nameOffset + methodName.length)),
       parentClass,
@@ -1181,6 +1416,15 @@ function parseJavaSourceFallback(document, annotations) {
   }
 
   return { classes, methods };
+}
+
+function decodeJavaString(value) {
+  return String(value)
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
 }
 
 function findMatchingBrace(text, openOffset) {
@@ -1332,7 +1576,7 @@ class CompositeGradleCodeLensProvider {
 async function runProvidedTarget(uri, target, debug) {
   const resolvedUri = typeof uri === 'string' ? vscode.Uri.parse(uri) : uri;
   const document = await vscode.workspace.openTextDocument(resolvedUri);
-  const invocation = createInvocation(document.uri, target, debug);
+  const invocation = await createInvocation(document.uri, target, debug);
   await executeInvocation(invocation);
 }
 
@@ -1480,6 +1724,7 @@ class ProjectTestsProvider {
             const clazz = taskNode.classes.get(fqcn);
             clazz.methods.set(method.name, {
               name: method.name,
+              displayName: method.displayName,
               filter: `${fqcn}.${method.name}`,
               sourcePath: uri.fsPath,
               uri: uri.toString(),
@@ -1541,7 +1786,9 @@ class ProjectTestsProvider {
     return new ProjectTestItem('method', `${methodData.name}()`, {
       id:`method:${methodData.filter}`, status, taskData, classData, methodData,
       sourcePath:methodData.sourcePath, line:methodData.line,
-      tooltip:`${methodData.filter}${status === 'stale' ? ' — result is stale' : ''}`
+      tooltip: methodData.displayName
+        ? `${methodData.displayName}\n${methodData.filter}${status === 'stale' ? ' — result is stale' : ''}`
+        : `${methodData.filter}${status === 'stale' ? ' — result is stale' : ''}`
     }, vscode.TreeItemCollapsibleState.None);
   }
 
@@ -1613,8 +1860,193 @@ async function runFailedProjectTests() {
   }
 }
 
+
+async function showDebugEvaluateWindow() {
+  const session = vscode.debug.activeDebugSession;
+  if (!session) throw new Error('Start a Java debug session first.');
+  if (session.type !== 'java') throw new Error('The active debug session is not a Java session.');
+
+  const frame = await resolveCurrentDebugFrame(session);
+  if (!frame) throw new Error('Pause the debugger at a breakpoint before evaluating.');
+
+  debugEvaluateSession = session;
+  debugEvaluateFrameId = frame.id;
+
+  let document;
+  if (debugEvaluateScratchUri) {
+    document = vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === debugEvaluateScratchUri.toString());
+  }
+  if (!document) {
+    document = await vscode.workspace.openTextDocument({
+      language: 'java',
+      content: '// Evaluate against the paused stack frame.\n// Select a region or press Ctrl+Enter to evaluate the whole document.\n\n'
+    });
+    debugEvaluateScratchUri = document.uri;
+  }
+
+  const editor = await vscode.window.showTextDocument(document, {
+    viewColumn: vscode.ViewColumn.Beside,
+    preserveFocus: false,
+    preview: false
+  });
+  await vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', true);
+  const end = document.lineAt(document.lineCount - 1).range.end;
+  editor.selection = new vscode.Selection(end, end);
+  editor.revealRange(new vscode.Range(end, end));
+  vscode.window.setStatusBarMessage(`Evaluate Expression — ${frame.name || 'paused frame'}`, 3500);
+}
+
+async function resolveCurrentDebugFrame(session) {
+  try {
+    const threads = await session.customRequest('threads');
+    for (const thread of threads?.threads || []) {
+      try {
+        const stack = await session.customRequest('stackTrace', { threadId: thread.id, startFrame: 0, levels: 1 });
+        const frame = stack?.stackFrames?.[0];
+        if (frame) return { ...frame, threadId: thread.id };
+      } catch (_) { }
+    }
+  } catch (_) { }
+  return undefined;
+}
+
+async function evaluateCurrentExpression() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !debugEvaluateScratchUri || editor.document.uri.toString() !== debugEvaluateScratchUri.toString()) {
+    throw new Error('Open the Evaluate Expression editor first with Alt+F8.');
+  }
+
+  const session = vscode.debug.activeDebugSession || debugEvaluateSession;
+  if (!session || session.type !== 'java') throw new Error('The Java debug session has ended.');
+  const frame = await resolveCurrentDebugFrame(session);
+  if (!frame) throw new Error('Pause the debugger at a breakpoint before evaluating.');
+  debugEvaluateSession = session;
+  debugEvaluateFrameId = frame.id;
+
+  const selection = editor.selection;
+  let expression = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
+  expression = expression
+    .split(/\r?\n/)
+    .filter(line => !/^\s*\/\//.test(line) && !/^\s*import\s+/.test(line))
+    .join('\n')
+    .trim();
+  if (!expression) throw new Error('Enter or select an expression to evaluate.');
+
+  debugEvaluateOutput.appendLine(`\n> ${expression.replace(/\n/g, '\n  ')}`);
+  // Force the Evaluate output channel into view. preserveFocus=false makes the
+  // result visible instead of silently appending to a hidden channel.
+  debugEvaluateOutput.show(false);
+  try {
+    const result = await session.customRequest('evaluate', {
+      expression,
+      frameId: debugEvaluateFrameId,
+      context: 'repl'
+    });
+    const renderedResult = `${result?.result ?? ''}${result?.type ? `  (${result.type})` : ''}`;
+    debugEvaluateOutput.appendLine(renderedResult);
+    debugEvaluateOutput.show(false);
+    vscode.window.setStatusBarMessage(`Evaluate: ${String(result?.result ?? '').slice(0, 120) || '(no value)'}`, 5000);
+    if (result?.variablesReference) {
+      const variables = await session.customRequest('variables', { variablesReference: result.variablesReference });
+      for (const variable of (variables?.variables || []).slice(0, 100)) {
+        debugEvaluateOutput.appendLine(`  ${variable.name} = ${variable.value}${variable.type ? `  (${variable.type})` : ''}`);
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugEvaluateOutput.appendLine(`ERROR: ${message}`);
+    debugEvaluateOutput.show(false);
+    vscode.window.showErrorMessage(`Evaluate failed: ${message}`);
+    throw error;
+  }
+}
+
+class DebugEvaluateCompletionProvider {
+  async provideCompletionItems(document, position) {
+    if (!debugEvaluateScratchUri || document.uri.toString() !== debugEvaluateScratchUri.toString()) return undefined;
+    const session = vscode.debug.activeDebugSession || debugEvaluateSession;
+    if (!session || session.type !== 'java') return undefined;
+    const frame = await resolveCurrentDebugFrame(session);
+    if (!frame) return undefined;
+    debugEvaluateSession = session;
+    debugEvaluateFrameId = frame.id;
+
+    const offset = document.offsetAt(position);
+    const text = document.getText();
+    const before = text.slice(0, offset);
+    const line = position.line + 1;
+    const column = position.character + 1;
+    let response;
+    try {
+      response = await session.customRequest('completions', {
+        frameId: debugEvaluateFrameId,
+        text,
+        line,
+        column
+      });
+    } catch (_) {
+      return undefined;
+    }
+
+    const wordRange = document.getWordRangeAtPosition(position, /[A-Za-z_$][\w$]*/)
+      || new vscode.Range(position, position);
+    return (response?.targets || []).slice(0, 250).map(target => {
+      const item = new vscode.CompletionItem(target.label, vscode.CompletionItemKind.Method);
+      item.detail = target.detail || target.type || 'Debug value';
+      item.insertText = target.text || target.label;
+      // Deliberately replace only the identifier under the cursor. The Java
+      // debug adapter may report a range that includes the receiver expression.
+      item.range = wordRange;
+      item.sortText = target.sortText || target.label;
+      return item;
+    });
+  }
+}
+
+async function resolveJavaProjectNameFromJavaExtension(filePath, task) {
+  const fallback = resolveJavaProjectName(filePath, task);
+  try {
+    const projects = await vscode.commands.executeCommand('java.project.getAll');
+    const candidates = collectJavaProjects(projects);
+    const normalizedFile = normalizePath(filePath);
+    const matches = candidates
+      .map(project => ({ ...project, normalizedPath: project.path ? normalizePath(project.path) : '' }))
+      .filter(project => project.name && project.normalizedPath && isPathInside(normalizedFile, project.normalizedPath))
+      .sort((a, b) => b.normalizedPath.length - a.normalizedPath.length);
+    if (matches[0]?.name) {
+      output.appendLine(`[debug] Java project resolved by language server: ${matches[0].name}`);
+      return matches[0].name;
+    }
+  } catch (error) {
+    output.appendLine(`[debug] Java project lookup unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return fallback;
+}
+
+function collectJavaProjects(value, results = []) {
+  if (!value) return results;
+  if (Array.isArray(value)) {
+    for (const item of value) collectJavaProjects(item, results);
+    return results;
+  }
+  if (typeof value !== 'object') return results;
+  const name = value.name || value.projectName || value.displayName;
+  const rawPath = value.path || value.projectPath || value.uri || value.location || value.rootPath;
+  let projectPath;
+  if (typeof rawPath === 'string') {
+    try { projectPath = rawPath.startsWith('file:') ? vscode.Uri.parse(rawPath).fsPath : rawPath; } catch (_) { projectPath = rawPath; }
+  }
+  if (name && projectPath) results.push({ name: String(name), path: projectPath });
+  for (const child of Object.values(value)) {
+    if (child && typeof child === 'object') collectJavaProjects(child, results);
+  }
+  return results;
+}
+
 function deactivate() {
   if (runningProcess) terminateProcessTree(runningProcess);
+  debugEvaluatePanel?.panel?.dispose();
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', false);
 }
 
 module.exports = { activate, deactivate };
@@ -1632,6 +2064,11 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.debug', item => runProjectTreeItem(item, true)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.open', openProjectTreeItem));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.runFailed', runFailedProjectTests));
+  context.subscriptions.push(vscode.languages.registerCompletionItemProvider({ language: 'java', scheme: 'untitled' }, new DebugEvaluateCompletionProvider(), '.'));
+  context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(editor => {
+    const active = !!editor && !!debugEvaluateScratchUri && editor.document.uri.toString() === debugEvaluateScratchUri.toString();
+    vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', active);
+  }));
   context.subscriptions.push(vscode.workspace.onDidCreateFiles(() => projectTestsProvider.refresh()));
   context.subscriptions.push(vscode.workspace.onDidDeleteFiles(() => projectTestsProvider.refresh()));
   context.subscriptions.push(vscode.workspace.onDidRenameFiles(() => projectTestsProvider.refresh()));
