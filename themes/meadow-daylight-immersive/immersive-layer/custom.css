@@ -1,0 +1,109 @@
+/* Meadow Daylight Immersive — optional unsupported layer.
+   Requires a VS Code custom-CSS loader. Re-run the loader after VS Code updates.
+   Replace __EXTENSION_PATH__ with this extension's absolute folder URI. */
+
+:root {
+  --meadow-border: rgba(103, 143, 92, .48);
+  --meadow-soft-border: rgba(121, 157, 108, .28);
+  --meadow-paper: rgba(255, 253, 243, .86);
+  --meadow-sage: rgba(232, 243, 237, .88);
+  --meadow-sky: rgba(207, 233, 238, .88);
+}
+
+/* Original subtle meadow artwork behind the workbench. */
+.monaco-workbench {
+  background:
+    linear-gradient(rgba(255,253,243,.56), rgba(255,253,243,.56)),
+    url("__EXTENSION_PATH__/immersive-layer/meadow-wallpaper.png") center / cover fixed !important;
+}
+
+/* Let the artwork breathe through primary surfaces. */
+.monaco-workbench .part.editor > .content,
+.monaco-workbench .part.panel,
+.monaco-workbench .part.sidebar,
+.monaco-workbench .part.auxiliarybar {
+  backdrop-filter: blur(2px) saturate(.92);
+}
+
+.monaco-workbench .part.editor > .content {
+  background: var(--meadow-paper) !important;
+}
+
+.monaco-workbench .part.sidebar,
+.monaco-workbench .part.auxiliarybar {
+  background: var(--meadow-sage) !important;
+}
+
+.monaco-workbench .part.panel {
+  background: rgba(247, 241, 217, .90) !important;
+}
+
+/* Softer card-like tabs and widgets. */
+.monaco-workbench .part.editor > .content .editor-group-container {
+  border: 1px solid var(--meadow-soft-border);
+  border-radius: 12px 12px 5px 5px;
+  overflow: hidden;
+  margin: 4px;
+}
+
+.monaco-workbench .part.editor > .content .tabs-container .tab {
+  border-radius: 10px 10px 0 0;
+  margin-top: 4px;
+}
+
+.monaco-workbench .part.editor > .content .tabs-container .tab.active {
+  box-shadow: inset 0 2px 0 rgba(103,143,92,.72);
+}
+
+.quick-input-widget,
+.monaco-dialog-box,
+.monaco-workbench .notifications-center,
+.monaco-workbench .notification-toast,
+.monaco-editor .suggest-widget,
+.monaco-editor .monaco-hover,
+.monaco-workbench .context-view .monaco-menu-container {
+  border: 1px solid var(--meadow-border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 10px 30px rgba(65, 91, 68, .12) !important;
+  overflow: hidden;
+}
+
+/* Rounded inputs and buttons. */
+.monaco-workbench input,
+.monaco-workbench .monaco-inputbox,
+.monaco-workbench .monaco-button,
+.monaco-workbench select {
+  border-radius: 8px !important;
+}
+
+/* Gentle panel/side boundaries. */
+.monaco-workbench .part.sidebar {
+  border-right: 1px solid var(--meadow-border) !important;
+}
+
+.monaco-workbench .part.auxiliarybar {
+  border-left: 1px solid var(--meadow-border) !important;
+}
+
+.monaco-workbench .part.panel {
+  border-top: 1px solid var(--meadow-border) !important;
+}
+
+/* Thin organic-feeling scrollbars. */
+.monaco-scrollable-element > .scrollbar > .slider {
+  border-radius: 8px !important;
+}
+
+/* Slightly more spacious explorer rows. */
+.monaco-list-row {
+  border-radius: 6px;
+  margin-left: 3px;
+  margin-right: 3px;
+}
+
+/* Keep the actual code surface readable. */
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .margin {
+  background-color: rgba(255,253,243,.93) !important;
+}

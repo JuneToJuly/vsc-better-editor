@@ -1,0 +1,14 @@
+{
+  "workbench.colorTheme": "Meadow Daylight Immersive",
+  "workbench.productIconTheme": "Default",
+  "window.commandCenter": true,
+  "workbench.tree.indent": 16,
+  "workbench.list.smoothScrolling": true,
+  "editor.smoothScrolling": true,
+  "editor.cursorSmoothCaretAnimation": "on",
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": "active",
+  "editor.guides.highlightActiveIndentation": true,
+  "editor.minimap.showSlider": "mouseover",
+  "editor.renderLineHighlight": "all"
+}

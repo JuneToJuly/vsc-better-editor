@@ -1,0 +1,15 @@
+{
+  "workbench.colorTheme": "Meadow Daylight Immersive",
+  "apc.electron": {
+    "frame": false,
+    "titleBarStyle": "hiddenInset"
+  },
+  "apc.stylesheet": {
+    ".monaco-workbench .part.editor > .content .editor-group-container": "border-radius: 12px; overflow: hidden;",
+    ".monaco-workbench .tabs-container .tab": "border-radius: 10px 10px 0 0;",
+    ".quick-input-widget": "border-radius: 12px;",
+    ".monaco-workbench .part.sidebar": "border-right: 1px solid rgba(103,143,92,.42);",
+    ".monaco-workbench .part.auxiliarybar": "border-left: 1px solid rgba(103,143,92,.42);",
+    ".monaco-workbench .part.panel": "border-top: 1px solid rgba(103,143,92,.42);"
+  }
+}

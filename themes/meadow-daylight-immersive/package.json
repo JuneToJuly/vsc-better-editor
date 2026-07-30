@@ -1,0 +1,22 @@
+{
+  "name": "meadow-daylight-theme",
+  "displayName": "Meadow Daylight Immersive",
+  "description": "A refined countryside-inspired VS Code light theme with stronger visual hierarchy and an optional illustrated UI layer.",
+  "version": "1.2.0",
+  "publisher": "local-theme-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Meadow Daylight Immersive",
+        "uiTheme": "vs",
+        "path": "./themes/meadow-daylight-immersive-color-theme.json"
+      }
+    ]
+  }
+}
