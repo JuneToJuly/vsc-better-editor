@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -357,6 +357,16 @@
           "type": "string",
           "default": "",
           "description": "Optional exact Java project name used by the Java debugger attach configuration. Leave empty to use only a project name positively resolved by the Java language server; otherwise the debugger attaches without projectName."
+        },
+        "compositeGradleTests.navigationOpenMode": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "pinned",
+            "side"
+          ],
+          "default": "preview",
+          "description": "How source navigation opens files. preview reuses a preview editor in the first group, pinned keeps files open, and side opens a preview beside the current editor."
         }
       }
     },

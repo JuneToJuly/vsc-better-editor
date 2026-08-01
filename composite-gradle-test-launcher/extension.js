@@ -148,6 +148,31 @@ async function repeatLast() {
   await executeInvocation({ ...lastInvocation });
 }
 
+async function showNavigationDocument(document, position, resourceUri) {
+  const config = vscode.workspace.getConfiguration('compositeGradleTests', resourceUri || document.uri);
+  const mode = String(config.get('navigationOpenMode', 'preview'));
+  const options = {
+    preserveFocus: false,
+    preview: mode !== 'pinned'
+  };
+
+  if (mode === 'side') {
+    options.viewColumn = vscode.ViewColumn.Beside;
+  } else {
+    options.viewColumn = vscode.ViewColumn.One;
+  }
+
+  const editor = await vscode.window.showTextDocument(document, options);
+  if (position) {
+    const line = Math.max(0, Math.min(position.line, document.lineCount - 1));
+    const character = Math.max(0, Math.min(position.character || 0, document.lineAt(line).text.length));
+    const target = new vscode.Position(line, character);
+    editor.selection = new vscode.Selection(target, target);
+    editor.revealRange(document.lineAt(line).range, vscode.TextEditorRevealType.InCenter);
+  }
+  return editor;
+}
+
 async function openLastTest() {
   const result = testHistory[0];
   const invocation = result?.invocation || lastInvocation;
@@ -157,7 +182,6 @@ async function openLastTest() {
   }
 
   const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
-  const editor = await vscode.window.showTextDocument(document, { preview: false });
   let line = Number.isInteger(invocation?.targetLine) ? invocation.targetLine : undefined;
   let character = Number.isInteger(invocation?.targetCharacter) ? invocation.targetCharacter : 0;
   if (!Number.isInteger(line)) {
@@ -166,8 +190,7 @@ async function openLastTest() {
     character = target?.range?.start?.character || 0;
   }
   const position = new vscode.Position(Math.max(0, Math.min(line, document.lineCount - 1)), Math.max(0, character));
-  editor.selection = new vscode.Selection(position, position);
-  editor.revealRange(document.lineAt(position.line).range, vscode.TextEditorRevealType.InCenter);
+  await showNavigationDocument(document, position, vscode.Uri.file(sourcePath));
 }
 
 async function copyLastCommand() {
@@ -986,7 +1009,6 @@ class CompositeGradleResultsViewProvider {
         }
         if (!sourcePath) throw new Error('The source file for this result could not be located.');
         const document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
-        const editor = await vscode.window.showTextDocument(document, { preview: false });
         let line = 0;
         let character = 0;
         if (message.command === 'openLocation' && Number.isInteger(message.line)) {
@@ -1000,9 +1022,8 @@ class CompositeGradleResultsViewProvider {
           character = target?.range?.start?.character || 0;
         }
         const position = new vscode.Position(Math.max(0, Math.min(line, document.lineCount - 1)), Math.max(0, character));
-        editor.selection = new vscode.Selection(position, position);
+        const editor = await showNavigationDocument(document, position, vscode.Uri.file(sourcePath));
         const range = document.lineAt(position.line).range;
-        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
         const highlight = vscode.window.createTextEditorDecorationType({
           isWholeLine: true,
           backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground')
@@ -1869,11 +1890,10 @@ async function openProjectTreeItem(item) {
   const sourcePath=item?.data?.sourcePath || item?.data?.methodData?.sourcePath || item?.data?.classData?.sourcePath;
   const line=item?.data?.line ?? item?.data?.methodData?.line ?? item?.data?.classData?.line ?? 0;
   if (!sourcePath) return;
-  const document=await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
-  const editor=await vscode.window.showTextDocument(document,{preview:false});
+  const uri=vscode.Uri.file(sourcePath);
+  const document=await vscode.workspace.openTextDocument(uri);
   const position=new vscode.Position(Math.max(0,Math.min(line,document.lineCount-1)),0);
-  editor.selection=new vscode.Selection(position,position);
-  editor.revealRange(document.lineAt(position.line).range,vscode.TextEditorRevealType.InCenter);
+  await showNavigationDocument(document,position,uri);
 }
 
 async function runFailedProjectTests() {

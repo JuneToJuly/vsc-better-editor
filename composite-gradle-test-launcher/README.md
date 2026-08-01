@@ -249,3 +249,10 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 
 - Keeps the Evaluate scratch editor above the result view in a consistent vertical layout.
 - Selecting evaluation history replaces the existing scratch document contents without opening another editor.
+
+## 0.1.31
+
+- Test Explorer, Open Last Test, result-source, and failure-source navigation now share one configurable open behavior.
+- Navigation defaults to a replaceable preview editor in the first editor group.
+- Set `compositeGradleTests.navigationOpenMode` to `preview`, `pinned`, or `side`.
+- Evaluate scratch editors and explicit editing workflows remain pinned.
