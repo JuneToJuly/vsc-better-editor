@@ -256,3 +256,26 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - Navigation defaults to a replaceable preview editor in the first editor group.
 - Set `compositeGradleTests.navigationOpenMode` to `preview`, `pinned`, or `side`.
 - Evaluate scratch editors and explicit editing workflows remain pinned.
+
+
+## 0.1.32 — Executed code and affected tests
+
+- Added Run Test/Class with Executed Code commands.
+- Captures JaCoCo XML per run and shows hit production lines in Test Results.
+- Clicking a hit line opens the source and temporarily highlights all lines hit in that file.
+- Production-file edits create an Affected Tests group based on prior per-test execution data.
+- Added Run Affected Tests.
+- Regular runs remain unchanged unless `compositeGradleTests.captureExecutedCode` is enabled.
+
+Executed-code capture uses Gradle's JaCoCo plugin and may require the build environment to resolve JaCoCo artifacts.
+
+
+## 0.1.33
+
+- Fixed Gradle configuration failures in executed-code runs by resolving JaCoCo classes only after the plugin is applied.
+- Improved missing-report guidance to direct users to the exact raw Gradle error.
+
+
+## Affected tests
+
+Affected Tests uses previously captured JaCoCo execution data. A test appears when a production file it previously executed is edited during the current VS Code session. Use the inline clear action on the Affected Tests row to dismiss the pending affected-test list without deleting coverage history.

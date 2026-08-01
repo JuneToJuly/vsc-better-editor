@@ -1,0 +1,27 @@
+{
+  "name": "wisteria-forge-theme",
+  "displayName": "Wisteria Forge",
+  "description": "A balanced light and dark VS Code theme pair using cool blues, lavender, crisp white, and flag red.",
+  "version": "1.0.0",
+  "publisher": "local-theme-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Wisteria Forge Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/wisteria-forge-dark-color-theme.json"
+      },
+      {
+        "label": "Wisteria Forge Light",
+        "uiTheme": "vs",
+        "path": "./themes/wisteria-forge-light-color-theme.json"
+      }
+    ]
+  }
+}

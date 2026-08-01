@@ -1,0 +1,27 @@
+{
+  "name": "navy-electric-theme",
+  "displayName": "Navy Electric Dual",
+  "description": "A navy-electric VS Code theme pair with dark and light variants.",
+  "version": "1.1.0",
+  "publisher": "local-theme-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Navy Electric Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/navy-electric-dark-color-theme.json"
+      },
+      {
+        "label": "Navy Electric Light",
+        "uiTheme": "vs",
+        "path": "./themes/navy-electric-light-color-theme.json"
+      }
+    ]
+  }
+}

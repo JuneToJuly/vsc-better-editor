@@ -1,0 +1,22 @@
+{
+  "name": "velvet-orchid-theme",
+  "displayName": "Velvet Orchid",
+  "description": "A polished dark VS Code theme built around velvet purple, berry blush, white, and deep shadow greys.",
+  "version": "1.0.0",
+  "publisher": "local-theme-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Velvet Orchid",
+        "uiTheme": "vs-dark",
+        "path": "./themes/velvet-orchid-color-theme.json"
+      }
+    ]
+  }
+}

@@ -24,6 +24,9 @@ let debugEvaluateStoppedThreadId;
 let debugEvaluateCurrentFrame;
 let debugEvaluateHistory = [];
 let debugEvaluateCurrentModel;
+let coverageIndex = {};
+const changedProductionPaths = new Set();
+let executedLineDecoration;
 let lastPassedDecoration;
 let lastFailedDecoration;
 const invalidatedSourcePaths = new Set();
@@ -33,6 +36,7 @@ async function activate(context) {
   extensionContext = context;
   testHistory = context.workspaceState.get('testHistory', []);
   debugEvaluateHistory = context.workspaceState.get('debugEvaluateHistory', []);
+  coverageIndex = context.workspaceState.get('coverageIndex', {});
   output = vscode.window.createOutputChannel('Composite Gradle Tests');
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
   statusItem.command = 'compositeGradleTests.stop';
@@ -43,6 +47,8 @@ async function activate(context) {
   register(context, 'compositeGradleTests.debugMethod', () => launchFromEditor('method', true));
   register(context, 'compositeGradleTests.runClass', () => launchFromEditor('class', false));
   register(context, 'compositeGradleTests.debugClass', () => launchFromEditor('class', true));
+  register(context, 'compositeGradleTests.runMethodWithFlow', () => launchFromEditor('method', false, undefined, true));
+  register(context, 'compositeGradleTests.runClassWithFlow', () => launchFromEditor('class', false, undefined, true));
   register(context, 'compositeGradleTests.repeatLast', repeatLast);
   register(context, 'compositeGradleTests.openLastTest', openLastTest);
   register(context, 'compositeGradleTests.stop', stopCurrent);
@@ -75,7 +81,13 @@ async function activate(context) {
     gutterIconPath: vscode.Uri.joinPath(context.extensionUri, 'resources', 'last-failed.svg'),
     gutterIconSize: '8px'
   });
-  context.subscriptions.push(lastPassedDecoration, lastFailedDecoration);
+  executedLineDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
+    overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.infoForeground'),
+    overviewRulerLane: vscode.OverviewRulerLane.Left
+  });
+  context.subscriptions.push(lastPassedDecoration, lastFailedDecoration, executedLineDecoration);
 
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => {
     codeLensProviderInstance.refresh();
@@ -104,9 +116,12 @@ async function activate(context) {
 
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
     if (event.document.languageId === 'java') {
-      invalidatedSourcePaths.add(normalizePath(event.document.uri.fsPath));
+      const changedPath = normalizePath(event.document.uri.fsPath);
+      invalidatedSourcePaths.add(changedPath);
+      if (/\/src\/main\/(?:java|kotlin)\//.test(changedPath)) changedProductionPaths.add(changedPath);
       codeLensProviderInstance.refresh();
       refreshLastRunDecorations();
+      projectTestsProvider?.refreshStatuses();
     }
   }));
   refreshLastRunDecorations();
@@ -124,7 +139,7 @@ function register(context, command, handler) {
   }));
 }
 
-async function launchFromEditor(scope, debug, providedTarget) {
+async function launchFromEditor(scope, debug, providedTarget, forceCoverage = false) {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'java') {
     throw new Error('Open a Java test file first.');
@@ -138,6 +153,7 @@ async function launchFromEditor(scope, debug, providedTarget) {
   }
 
   const invocation = await createInvocation(editor.document.uri, target, debug);
+  if (forceCoverage) invocation.captureCoverage = true;
   await executeInvocation(invocation);
 }
 
@@ -224,7 +240,9 @@ async function createInvocation(documentUri, target, debug) {
     config.get('gradleWrapper', '')
   );
   const task = resolveTask(documentUri.fsPath, root, config);
-  const args = [task, '--tests', target.filter, ...config.get('arguments', ['--console=plain'])];
+  // Make the command independent of the caller's current working directory.
+  // This is especially important for copied commands run from a PowerShell prompt.
+  const args = ['--project-dir', root, task, '--tests', target.filter, ...config.get('arguments', ['--console=plain'])];
 
   if (config.get('enhancedTestLogging', true)) {
     const initScript = ensureTestLoggingInitScript();
@@ -252,7 +270,8 @@ async function createInvocation(documentUri, target, debug) {
     classFilter: target.classFilter || target.filter,
     classDisplayName: target.classDisplayName || target.displayName,
     targetLine: target.range?.start?.line,
-    targetCharacter: target.range?.start?.character
+    targetCharacter: target.range?.start?.character,
+    captureCoverage: config.get('captureExecutedCode', false)
   };
 }
 
@@ -641,6 +660,19 @@ async function executeInvocation(invocation) {
     await delay(250);
   }
 
+  const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  if (invocation.captureCoverage) {
+    const coverageDir = path.join(extensionContext.globalStorageUri.fsPath, 'coverage', runId);
+    fs.mkdirSync(coverageDir, { recursive: true });
+    const argsWithoutOldCoverage = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.coverageDir='));
+    // -D is a global Gradle option. Keep it before the task selector; Gradle 9 may
+    // otherwise interpret it as another task name (especially in copied commands).
+    const taskIndex = argsWithoutOldCoverage.indexOf(invocation.task);
+    const coverageArg = `-Dcgtl.coverageDir=${coverageDir}`;
+    const argsWithCoverage = [...argsWithoutOldCoverage];
+    argsWithCoverage.splice(taskIndex >= 0 ? taskIndex : 0, 0, coverageArg);
+    invocation = { ...invocation, coverageDir, args: argsWithCoverage };
+  }
   lastInvocation = invocation;
   output.clear();
   output.appendLine(`> ${formatCommand(invocation.executable, invocation.args)}`);
@@ -649,7 +681,7 @@ async function executeInvocation(invocation) {
   if (invocation.showOutput) output.show(true);
 
   const runningResult = {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    id: runId,
     displayName: invocation.displayName,
     filter: invocation.filter,
     task: invocation.task,
@@ -715,6 +747,7 @@ async function executeInvocation(invocation) {
     statusItem.hide();
 
     const parsed = parseGradleTestOutput(rawOutput, invocation, code);
+    const executedCode = invocation.coverageDir ? await collectExecutedCode(invocation.coverageDir) : [];
     const result = {
       ...runningResult,
       status: parsed.status,
@@ -725,11 +758,14 @@ async function executeInvocation(invocation) {
       failure: parsed.failure,
       failures: parsed.failures,
       events: parsed.events,
+      executedCode,
+      coverageCaptured: !!invocation.coverageDir,
       output: rawOutput,
       exitCode: code
     };
 
     await recordResult(result);
+    if (executedCode.length) await updateCoverageIndex(result);
     showResultsView(result);
     latestResults.set(invocation.filter, result);
 
@@ -749,8 +785,60 @@ function ensureTestLoggingInitScript() {
   fs.mkdirSync(directory, { recursive: true });
   const scriptPath = path.join(directory, 'composite-test-logging.init.gradle');
   const contents = `
-allprojects {
-    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+def cgtlCoverageDir = System.getProperty("cgtl.coverageDir")
+allprojects { project ->
+    def cgtlReportProvider = null
+
+    if (cgtlCoverageDir) {
+        // Plugin application and report-task registration must happen in the
+        // normal project configuration context. Gradle forbids creating tasks
+        // while a TaskCollection.configureEach callback is being executed.
+        project.pluginManager.apply("jacoco")
+
+        def reportClass = Class.forName(
+            "org.gradle.testing.jacoco.tasks.JacocoReport",
+            true,
+            project.plugins.findPlugin("jacoco").class.classLoader
+        )
+        cgtlReportProvider = project.tasks.register("cgtlJacocoReport", reportClass) { reportTask ->
+            def reportSafeProject = project.path.replaceAll("[^A-Za-z0-9_-]", "_")
+            def reportCoverageDir = System.getProperty("cgtl.coverageDir")
+            def projectExecutionDir = project.file("\${reportCoverageDir}/\${reportSafeProject}")
+            reportTask.group = "verification"
+            reportTask.description = "Generates Composite Gradle Test Launcher execution data."
+
+            // Do not pass a Test task collection to executionData. JacocoReport
+            // traverses that collection with TaskCollection.all(), which Gradle 9
+            // forbids while the report task itself is being realized as a finalizer.
+            // Reading the known per-project .exec directory is configuration-safe.
+            reportTask.executionData.from(project.fileTree(projectExecutionDir) {
+                include "*.exec"
+            })
+
+            // Resolve source sets lazily so this also works when the Java plugin
+            // is applied after this initialization script configures the project.
+            reportTask.sourceDirectories.from(project.provider {
+                def sourceSets = project.extensions.findByName("sourceSets")
+                def mainSourceSet = sourceSets == null ? null : sourceSets.findByName("main")
+                return mainSourceSet == null ? [] : mainSourceSet.allSource.srcDirs
+            })
+            reportTask.classDirectories.from(project.provider {
+                def sourceSets = project.extensions.findByName("sourceSets")
+                def mainSourceSet = sourceSets == null ? null : sourceSets.findByName("main")
+                return mainSourceSet == null ? [] : mainSourceSet.output
+            })
+
+            reportTask.reports {
+                xml.required.set(true)
+                xml.outputLocation.set(project.file("\${reportCoverageDir}/\${reportSafeProject}.xml"))
+                html.required.set(false)
+                csv.required.set(false)
+            }
+            reportTask.onlyIf { reportTask.executionData.files.any { it.exists() } }
+        }
+    }
+
+    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach { testTask ->
         testLogging {
             events "passed", "failed", "skipped", "standardOut", "standardError"
             showStandardStreams = true
@@ -759,6 +847,17 @@ allprojects {
             showCauses = true
             showStackTraces = true
         }
+
+        if (cgtlCoverageDir) {
+            def taskCoverageDir = System.getProperty("cgtl.coverageDir")
+            def taskSafeProject = project.path.replaceAll("[^A-Za-z0-9_-]", "_")
+            def safeTask = testTask.path.replaceAll("[^A-Za-z0-9_-]", "_")
+            def jacocoExtension = testTask.extensions.findByName("jacoco")
+            if (jacocoExtension != null) {
+                jacocoExtension.destinationFile = project.file("\${taskCoverageDir}/\${taskSafeProject}/\${safeTask}.exec")
+            }
+            testTask.finalizedBy(cgtlReportProvider)
+        }
     }
 }
 `;
@@ -766,6 +865,99 @@ allprojects {
     fs.writeFileSync(scriptPath, contents, 'utf8');
   }
   return scriptPath;
+}
+
+async function collectExecutedCode(coverageDir) {
+  if (!coverageDir || !fs.existsSync(coverageDir)) return [];
+  const xmlFiles = fs.readdirSync(coverageDir).filter(name => name.endsWith('.xml')).map(name => path.join(coverageDir, name));
+  const byFile = new Map();
+  for (const xmlFile of xmlFiles) {
+    let xml;
+    try { xml = fs.readFileSync(xmlFile, 'utf8'); } catch (_) { continue; }
+    const packageBlocks = [...xml.matchAll(/<package name="([^"]*)">([\s\S]*?)<\/package>/g)];
+    for (const packageMatch of packageBlocks) {
+      const packagePath = decodeXml(packageMatch[1]);
+      const body = packageMatch[2];
+      for (const sourceMatch of body.matchAll(/<sourcefile name="([^"]+)">([\s\S]*?)<\/sourcefile>/g)) {
+        const fileName = decodeXml(sourceMatch[1]);
+        const relativePath = [packagePath, fileName].filter(Boolean).join('/');
+        const hitLines = [...sourceMatch[2].matchAll(/<line nr="(\d+)"[^>]*ci="(\d+)"[^>]*\/>/g)]
+          .filter(match => Number(match[2]) > 0).map(match => Number(match[1]));
+        if (!hitLines.length) continue;
+        const resolved = await resolveCoverageSource(relativePath, fileName);
+        const key = resolved || relativePath;
+        const existing = byFile.get(key) || { sourcePath: resolved, relativePath, lines: new Set() };
+        for (const line of hitLines) existing.lines.add(line);
+        byFile.set(key, existing);
+      }
+    }
+  }
+  return [...byFile.values()].map(item => ({ ...item, lines: [...item.lines].sort((a,b)=>a-b) }))
+    .sort((a,b)=>(a.sourcePath || a.relativePath).localeCompare(b.sourcePath || b.relativePath));
+}
+
+async function resolveCoverageSource(relativePath, fileName) {
+  const normalizedRelative = relativePath.replace(/\\/g, '/');
+  const exact = await vscode.workspace.findFiles(`**/src/main/{java,kotlin}/${normalizedRelative}`, '**/{build,.gradle,node_modules,out,bin}/**', 5);
+  if (exact.length) return exact[0].fsPath;
+  const candidates = await vscode.workspace.findFiles(`**/${fileName}`, '**/{build,.gradle,node_modules,out,bin}/**', 50);
+  const preferred = candidates.find(uri => normalizePath(uri.fsPath).endsWith(`/src/main/java/${normalizedRelative}`) || normalizePath(uri.fsPath).endsWith(`/src/main/kotlin/${normalizedRelative}`));
+  return (preferred || candidates[0])?.fsPath;
+}
+
+function decodeXml(value) {
+  return String(value || '').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+async function updateCoverageIndex(result) {
+  coverageIndex[result.filter] = {
+    filter: result.filter,
+    displayName: result.displayName,
+    task: result.task,
+    sourcePath: result.sourcePath,
+    invocation: result.invocation,
+    capturedAt: result.finishedAt,
+    files: result.executedCode
+  };
+  await extensionContext.workspaceState.update('coverageIndex', coverageIndex);
+  projectTestsProvider?.refreshStatuses();
+}
+
+function affectedCoverageEntries() {
+  if (!changedProductionPaths.size) return [];
+  return Object.values(coverageIndex).filter(entry => (entry.files || []).some(file => file.sourcePath && changedProductionPaths.has(normalizePath(file.sourcePath))));
+}
+
+async function openExecutedCodeLocation(result, sourcePath, line) {
+  if (!sourcePath) throw new Error('The executed source file could not be located.');
+  const uri = vscode.Uri.file(sourcePath);
+  const document = await vscode.workspace.openTextDocument(uri);
+  const position = new vscode.Position(Math.max(0, Math.min(Number(line || 1) - 1, document.lineCount - 1)), 0);
+  const editor = await showNavigationDocument(document, position, uri);
+  const fileCoverage = (result.executedCode || []).find(file => normalizePath(file.sourcePath || '') === normalizePath(sourcePath));
+  if (editor && executedLineDecoration && fileCoverage) {
+    const ranges = fileCoverage.lines.filter(value => value > 0 && value <= document.lineCount).map(value => document.lineAt(value - 1).range);
+    editor.setDecorations(executedLineDecoration, ranges);
+  }
+}
+
+async function clearAffectedTests() {
+  const count = changedProductionPaths.size;
+  changedProductionPaths.clear();
+  projectTestsProvider?.refreshStatuses();
+  if (count) {
+    vscode.window.setStatusBarMessage(`Cleared affected-test tracking for ${count} changed ${count === 1 ? 'file' : 'files'}.`, 2500);
+  }
+}
+
+async function runAffectedTests() {
+  const affected = affectedCoverageEntries();
+  if (!affected.length) return vscode.window.showInformationMessage('No affected tests are known for the changed production files.');
+  for (const entry of affected) {
+    const base = entry.invocation;
+    if (!base) continue;
+    await executeInvocation({ ...base, debug: false, captureCoverage: true, args: rebuildDebugArgs(base.args || [], false) });
+  }
 }
 
 function parseGradleTestOutput(raw, invocation, code) {
@@ -1002,6 +1194,12 @@ class CompositeGradleResultsViewProvider {
       } else if (message.command === 'copy') {
         await vscode.env.clipboard.writeText(selected.command || formatCommand(selected.invocation.executable, selected.invocation.args));
         vscode.window.setStatusBarMessage('Composite Gradle command copied.', 2500);
+      } else if (message.command === 'openExecuted') {
+        await openExecutedCodeLocation(selected, message.file, message.line);
+      } else if (message.command === 'rerunFlow') {
+        const next = invocationFromResult(selected, false);
+        next.captureCoverage = true;
+        await executeInvocation(next);
       } else if (message.command === 'openSource' || message.command === 'openLocation') {
         let sourcePath = selected.sourcePath;
         if (message.command === 'openLocation') {
@@ -1124,12 +1322,12 @@ function renderResultsHtml(current, history) {
     .history{flex:0 0 auto;max-height:28vh;display:flex;flex-direction:column;background:color-mix(in srgb,var(--vscode-sideBar-background) 90%,var(--vscode-editor-background));border-bottom:1px solid var(--vscode-panel-border)}
     .header{padding:8px 10px 6px;display:flex;justify-content:space-between;align-items:center}.header h3,.detail-label{font-size:10px;font-weight:700;margin:0;text-transform:uppercase;letter-spacing:.1em;color:var(--vscode-descriptionForeground)}.header button{border:0;border-radius:3px;padding:2px 6px;cursor:pointer;background:transparent;color:var(--vscode-descriptionForeground);font-size:10px}.header button:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}
     .history-list{overflow:auto;min-height:0}.history-row{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);border-left:2px solid transparent;background:transparent;color:inherit;text-align:left;padding:6px 9px;display:grid;grid-template-columns:17px minmax(0,1fr) auto;gap:7px;align-items:center;cursor:pointer}.history-row:hover{background:var(--vscode-list-hoverBackground)}.history-row.selected{border-left-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.history-status{font-size:14px}.history-copy{min-width:0;display:flex;flex-direction:column}.history-copy strong{font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-copy small{font-size:9px;color:var(--vscode-descriptionForeground);text-transform:capitalize}.history-time{color:var(--vscode-descriptionForeground);font-size:9px;font-variant-numeric:tabular-nums}.history-row.selected .history-time,.history-row.selected .history-copy small{color:inherit;opacity:.78}.empty-history{padding:10px;color:var(--vscode-descriptionForeground);font-size:11px}
-    .detail-wrap{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;background:var(--vscode-sideBar-background)}.detail-label{flex:0 0 auto;padding:9px 10px 7px;border-top:5px solid color-mix(in srgb,var(--vscode-focusBorder) 45%,var(--vscode-panel-border));border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-sideBar-background) 82%,var(--vscode-editor-background))}.detail{min-height:0;overflow:auto;padding:12px 12px 28px;scroll-behavior:smooth}.hero{display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;align-items:start}.hero .big{font-size:20px;line-height:1}.hero h1{font-size:14px;font-weight:650;line-height:1.25;margin:0;word-break:break-word}.subtitle{margin-top:3px;color:var(--vscode-descriptionForeground);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.subtitle code{font-family:var(--vscode-editor-font-family);font-size:10px}
-    .actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px;margin:10px 0 0;padding:6px 0;border-top:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border)}.actions button{border:0;border-radius:3px;padding:3px 6px;cursor:pointer;background:transparent;color:var(--vscode-foreground);font-size:11px}.actions button:hover{background:var(--vscode-toolbar-hoverBackground)}.actions .primary{color:var(--vscode-textLink-foreground);font-weight:600}.actions .separator{width:1px;height:14px;background:var(--vscode-panel-border);margin:0 2px}.actions .raw{margin-left:auto;color:var(--vscode-descriptionForeground)}
+    .detail-wrap{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;background:var(--vscode-sideBar-background)}.detail-label{flex:0 0 auto;padding:9px 10px 7px;border-top:5px solid color-mix(in srgb,var(--vscode-focusBorder) 45%,var(--vscode-panel-border));border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-sideBar-background) 82%,var(--vscode-editor-background))}.detail{min-height:0;overflow:auto;padding:10px 12px 28px;scroll-behavior:smooth}.hero{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:7px;align-items:center;padding:2px 0 8px}.hero .big{font-size:17px;line-height:1}.hero h1{font-size:13px;font-weight:650;line-height:1.2;margin:0;word-break:break-word}.hero-duration{font-size:10px;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}.subtitle{margin-top:2px;color:var(--vscode-descriptionForeground);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.subtitle code{font-family:var(--vscode-editor-font-family);font-size:10px}
+    .actions{display:flex;align-items:center;flex-wrap:wrap;gap:2px;margin:0;padding:5px 0;border-top:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border)}.actions button{border:0;border-radius:3px;padding:3px 6px;cursor:pointer;background:transparent;color:var(--vscode-foreground);font-size:11px}.actions button:hover{background:var(--vscode-toolbar-hoverBackground)}.actions .primary{color:var(--vscode-textLink-foreground);font-weight:600}.actions .separator{width:1px;height:14px;background:var(--vscode-panel-border);margin:0 2px}.actions .raw{margin-left:auto;color:var(--vscode-descriptionForeground)}
     .status.passed{color:var(--vscode-testing-iconPassed)}.status.failed{color:var(--vscode-testing-iconFailed)}.status.skipped{color:var(--vscode-testing-iconSkipped)}.status.running{color:var(--vscode-progressBar-background)}.status.stopped{color:var(--vscode-descriptionForeground)}
     .section{margin-top:16px}.failure-section{margin-top:12px}.section-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section h3{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--vscode-descriptionForeground);margin:0}.console{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.55;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);border-radius:var(--radius);padding:9px 10px;margin:0;max-height:260px;overflow:auto}.failure-nav{display:flex;gap:5px;overflow-x:auto;padding:0 0 8px;margin-bottom:4px}.failure-nav button{flex:0 0 auto;max-width:220px;border:1px solid var(--vscode-panel-border);border-radius:999px;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:4px 8px;cursor:pointer;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.failure-nav button span{color:var(--vscode-testing-iconFailed);margin-right:5px}.failure-nav button:hover{background:var(--vscode-button-secondaryHoverBackground)}.failure-groups{display:flex;flex-direction:column;gap:16px}.failure-group{min-width:0}.failure-test{display:flex;align-items:center;gap:7px;margin:0 0 6px 1px;padding-top:2px;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600}.failure-test-mark{color:var(--vscode-testing-iconFailed);font-size:13px}.failure-card{scroll-margin-top:10px;border:1px solid color-mix(in srgb,var(--vscode-testing-iconFailed) 60%,var(--vscode-panel-border));border-left:3px solid var(--vscode-testing-iconFailed);border-radius:var(--radius);background:color-mix(in srgb,var(--vscode-testing-iconFailed) 5%,var(--vscode-textCodeBlock-background));overflow:hidden}.failure-head{padding:9px 10px;border-bottom:1px solid var(--vscode-panel-border)}.failure-type{font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:700}.failure-message{font-size:11px;margin-top:3px;color:var(--vscode-descriptionForeground)}.comparison{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.comparison>div{padding:8px 10px;min-width:0}.comparison>div+div{border-left:1px solid var(--vscode-panel-border)}.comparison label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin-bottom:3px}.comparison code{font-family:var(--vscode-editor-font-family);font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.location{display:block;width:100%;border:0;background:transparent;text-align:left;color:var(--vscode-textLink-foreground);cursor:pointer;padding:7px 10px;font-family:var(--vscode-editor-font-family);font-size:11px}.location:hover{background:var(--vscode-toolbar-hoverBackground)}.frames{margin:0;padding:8px 10px;white-space:pre;overflow:auto;font-family:var(--vscode-editor-font-family);font-size:10px;line-height:1.55}.framework-toggle{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer;text-align:left;padding:6px 10px;font-size:10px}.framework-toggle:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}.framework-frames{display:none;border-top:1px solid var(--vscode-panel-border)}.framework-frames.open{display:block}
     .event-list{display:flex;flex-direction:column;gap:3px}.event{width:100%;border:0;text-align:left;background:transparent;color:inherit;display:grid;grid-template-columns:14px minmax(0,1fr) auto;gap:6px;padding:5px 6px;border-radius:3px;font-family:var(--vscode-editor-font-family);font-size:11px}.event:hover{background:var(--vscode-list-hoverBackground)}.event .event-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-open{font-family:var(--vscode-font-family);font-size:9px;color:var(--vscode-textLink-foreground);opacity:0}.event.failed:hover .event-open,.event.failed:focus .event-open{opacity:1}.event.failed{cursor:pointer}.event.passed .event-mark{color:var(--vscode-testing-iconPassed)}.event.failed .event-mark{color:var(--vscode-testing-iconFailed)}.event.skipped .event-mark{color:var(--vscode-testing-iconSkipped)}
-    .empty-output{padding:8px 10px;border:1px dashed var(--vscode-panel-border);border-radius:var(--radius);color:var(--vscode-descriptionForeground);font-size:11px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
+    .coverage-files{display:flex;flex-direction:column;gap:10px}.coverage-file{border:1px solid var(--vscode-panel-border);border-radius:var(--radius);overflow:hidden;background:var(--vscode-editor-background)}.coverage-file-head{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-textCodeBlock-background) 82%,var(--vscode-sideBar-background))}.coverage-file-name{min-width:0;flex:1;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coverage-file-meta{font-size:9px;color:var(--vscode-descriptionForeground);white-space:nowrap}.coverage-open{border:0;background:transparent;color:var(--vscode-textLink-foreground);font-size:10px;padding:2px 4px;cursor:pointer}.coverage-open:hover{background:var(--vscode-toolbar-hoverBackground)}.coverage-code{font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.5;overflow-x:auto}.coverage-row{width:100%;display:grid;grid-template-columns:38px minmax(max-content,1fr);border:0;background:transparent;color:var(--vscode-foreground);padding:0;text-align:left;cursor:pointer}.coverage-row:hover{background:var(--vscode-list-hoverBackground)}.coverage-row.context{opacity:.42}.coverage-row.executed{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 7%,transparent)}.coverage-row.executed:hover{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 13%,var(--vscode-list-hoverBackground))}.coverage-number{padding:2px 8px 2px 4px;text-align:right;color:var(--vscode-editorLineNumber-foreground);border-right:1px solid var(--vscode-panel-border);font-variant-numeric:tabular-nums;user-select:none}.coverage-row.executed .coverage-number{color:var(--vscode-textLink-foreground);font-weight:600}.coverage-source{padding:2px 9px;white-space:pre}.coverage-gap{height:7px;border-top:1px dotted var(--vscode-panel-border);opacity:.6}.empty-output{padding:8px 10px;border:1px dashed var(--vscode-panel-border);border-radius:var(--radius);color:var(--vscode-descriptionForeground);font-size:11px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
   </style></head><body><section class="history"><div class="header"><h3>Recent runs</h3><button data-command="clear">Clear</button></div><div class="history-list">${rows || '<div class="empty-history">No recent runs.</div>'}</div></section><section class="detail-wrap"><div class="detail-label">Selected run</div><main class="detail">${detail}</main></section>
   <script nonce="${nonce}">const vscode=acquireVsCodeApi();let selectedIndex=Math.max(0,[...document.querySelectorAll('.history-row')].findIndex(x=>x.classList.contains('selected')));function selectIndex(next){const rows=[...document.querySelectorAll('.history-row')];if(!rows.length)return;selectedIndex=Math.max(0,Math.min(next,rows.length-1));rows[selectedIndex].click();rows[selectedIndex].scrollIntoView({block:'nearest'});}document.addEventListener('click',event=>{const button=event.target.closest('button[data-command]');if(!button)return;if(button.dataset.command==='jumpFailure'){document.getElementById(button.dataset.target)?.scrollIntoView({behavior:'smooth',block:'start'});return;}if(button.dataset.command==='toggleFramework'){const target=document.getElementById(button.dataset.target);if(target){target.classList.toggle('open');button.textContent=target.classList.contains('open')?'Hide framework frames':button.dataset.label;}return;}const message={command:button.dataset.command,id:button.dataset.id};if(button.dataset.line)message.line=Number(button.dataset.line);if(button.dataset.file)message.file=button.dataset.file;if(button.dataset.class)message.className=button.dataset.class;vscode.postMessage(message);});document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA'].includes(event.target.tagName))return;const key=event.key.toLowerCase();if(key==='j'||event.key==='ArrowDown'){event.preventDefault();selectIndex(selectedIndex+1);}else if(key==='k'||event.key==='ArrowUp'){event.preventDefault();selectIndex(selectedIndex-1);}else if(key==='enter'||key==='o'){event.preventDefault();document.querySelector('[data-command="openSource"]')?.click();}else if(key==='r'){event.preventDefault();document.querySelector('[data-command="rerun"]')?.click();}else if(key==='d'){event.preventDefault();document.querySelector('[data-command="debug"]')?.click();}else if(key==='f'){event.preventDefault();document.querySelector('.failure-card')?.scrollIntoView({behavior:'smooth',block:'start'});}});document.body.tabIndex=0;document.body.focus();</script></body></html>`;
 }
@@ -1156,6 +1354,11 @@ function renderResultDetail(result) {
     return /\s(PASSED|FAILED|SKIPPED)$/.test(line);
   });
   const showResults = isClass || eventLines.length > 1;
+  const executedFileCount = Array.isArray(result.executedCode) ? result.executedCode.length : 0;
+  const executedLineCount = Array.isArray(result.executedCode) ? result.executedCode.reduce((total, file) => total + (Array.isArray(file.lines) ? file.lines.length : 0), 0) : 0;
+  const executedSection = executedFileCount
+    ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
+    : (result.coverageCaptured ? `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>` : '');
   const resultSection = showResults && eventLines.length
     ? `<div class="section"><div class="section-title"><h3>Results · ${eventLines.length}</h3></div><div class="event-list">${eventLines.map(line => {
         const match = line.match(/\s(PASSED|FAILED|SKIPPED)$/);
@@ -1168,9 +1371,40 @@ function renderResultDetail(result) {
         return `<${info?.line ? 'button' : 'div'} class="event ${escapeHtml(state)}"${attrs}><span class="event-mark">${mark}</span><span class="event-name">${escapeHtml(name)}</span>${info?.line ? '<span class="event-open">Open</span>' : ''}</${info?.line ? 'button' : 'div'}>`;
       }).join('')}</div></div>` : '';
 
-  return `<div class="hero"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div><h1>${escapeHtml(simpleName)}</h1><div class="subtitle" title="${escapeHtml(result.filter)}">${escapeHtml(subtitle)}</div></div></div>
-    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
-    ${failureSection}${consoleSection}${resultSection}`;
+  return `<div class="hero"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div><h1>${escapeHtml(simpleName)}</h1><div class="subtitle" title="${escapeHtml(result.filter)}">${escapeHtml([className && className !== simpleName ? className : '', result.task].filter(Boolean).join(' · '))}</div></div><span class="hero-duration">${formatDuration(result.durationMs)}</span></div>
+    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open test</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button data-command="rerunFlow" data-id="${escapeHtml(result.id)}">Capture flow</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
+    ${failureSection}${consoleSection}${executedSection}${resultSection}`;
+}
+
+function renderExecutedFile(file, result) {
+  const sourcePath = String(file.sourcePath || '');
+  const displayPath = path.basename(sourcePath || file.relativePath || 'Source');
+  const executed = [...new Set((file.lines || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+  const firstLine = executed[0] || 1;
+  let sourceLines = [];
+  try {
+    if (sourcePath && fs.existsSync(sourcePath)) sourceLines = fs.readFileSync(sourcePath, 'utf8').split(/\r?\n/);
+  } catch (_) {}
+
+  if (!sourceLines.length) {
+    const buttons = executed.map(line => `<button class="coverage-row executed" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${line}" data-file="${escapeHtml(sourcePath)}"><span class="coverage-number">${line}</span><span class="coverage-source">Executed line</span></button>`).join('');
+    return `<div class="coverage-file"><div class="coverage-file-head"><span class="coverage-file-name" title="${escapeHtml(sourcePath)}">${escapeHtml(displayPath)}</span><span class="coverage-file-meta">${executed.length} ${executed.length === 1 ? 'line' : 'lines'}</span><button class="coverage-open" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${firstLine}" data-file="${escapeHtml(sourcePath)}">Open file</button></div><div class="coverage-code">${buttons}</div></div>`;
+  }
+
+  const executedSet = new Set(executed);
+  const visible = new Set();
+  for (const line of executed) {
+    for (let candidate = Math.max(1, line - 1); candidate <= Math.min(sourceLines.length, line + 1); candidate++) visible.add(candidate);
+  }
+  const visibleLines = [...visible].sort((a, b) => a - b).slice(0, 120);
+  let previous = 0;
+  const rows = visibleLines.map(line => {
+    const gap = previous && line > previous + 1 ? '<div class="coverage-gap"></div>' : '';
+    previous = line;
+    const state = executedSet.has(line) ? 'executed' : 'context';
+    return `${gap}<button class="coverage-row ${state}" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${line}" data-file="${escapeHtml(sourcePath)}"><span class="coverage-number">${line}</span><span class="coverage-source">${escapeHtml(sourceLines[line - 1] || '')}</span></button>`;
+  }).join('');
+  return `<div class="coverage-file"><div class="coverage-file-head"><span class="coverage-file-name" title="${escapeHtml(sourcePath)}">${escapeHtml(displayPath)}</span><span class="coverage-file-meta">${executed.length} ${executed.length === 1 ? 'line' : 'lines'}</span><button class="coverage-open" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${firstLine}" data-file="${escapeHtml(sourcePath)}">Open file</button></div><div class="coverage-code">${rows}</div></div>`;
 }
 
 function analyzeFailure(failure, result, failureItem = {}) {
@@ -1798,7 +2032,19 @@ class ProjectTestsProvider {
       if (this.discovering && !this.tasks.length) {
         return [new ProjectTestItem('message', 'Discovering Java tests…', { id:'discovering', status:'running' }, vscode.TreeItemCollapsibleState.None)];
       }
-      return this.tasks.map(task => this.taskItem(task));
+      const affected = affectedCoverageEntries();
+      const roots = this.tasks.map(task => this.taskItem(task));
+      if (affected.length) roots.unshift(new ProjectTestItem('affectedRoot', 'Affected Tests', {
+        id:'affected',
+        status:'stale',
+        description:`${affected.length} ${affected.length === 1 ? 'test' : 'tests'}`,
+        affected,
+        tooltip:'Tests whose previously captured executed code includes a production file edited during this VS Code session. This is based on JaCoCo run history, not a new source scan.'
+      }, vscode.TreeItemCollapsibleState.Collapsed));
+      return roots;
+    }
+    if (element.kind === 'affectedRoot') {
+      return element.data.affected.map(entry => new ProjectTestItem('affectedMethod', entry.displayName || entry.filter, { id:`affected:${entry.filter}`, status:'stale', description:entry.task, coverageEntry:entry, sourcePath:entry.sourcePath, line:entry.invocation?.targetLine || 0, tooltip:`Previously executed changed production code\n${entry.filter}` }, vscode.TreeItemCollapsibleState.None));
     }
     if (element.kind === 'task') {
       return [...element.data.taskData.classes.values()]
@@ -1870,6 +2116,11 @@ function aggregateStatus(statuses) {
 
 async function runProjectTreeItem(item, debug) {
   if (!item || !item.data) return;
+  if (item.kind === 'affectedMethod') {
+    const base = item.data.coverageEntry?.invocation;
+    if (!base) return;
+    return executeInvocation({ ...base, debug, captureCoverage:true, args:rebuildDebugArgs(base.args || [], debug) });
+  }
   if (item.kind === 'method') {
     const m=item.data.methodData, c=item.data.classData;
     return runProvidedTarget(m.uri, { filter:m.filter, displayName:`${c.name}.${m.name}`, classFilter:c.fqcn, classDisplayName:c.name, scope:'method', range:new vscode.Range(m.line,0,m.line,0) }, debug);
@@ -2264,6 +2515,8 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.debug', item => runProjectTreeItem(item, true)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.open', openProjectTreeItem));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.runFailed', runFailedProjectTests));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.runAffected', runAffectedTests));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.projectTests.clearAffected', clearAffectedTests));
   context.subscriptions.push(vscode.languages.registerCompletionItemProvider({ language: 'java', scheme: 'untitled' }, new DebugEvaluateCompletionProvider(), '.'));
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(editor => {
     const active = !!editor && !!debugEvaluateScratchUri && editor.document.uri.toString() === debugEvaluateScratchUri.toString();

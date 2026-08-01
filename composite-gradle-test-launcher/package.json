@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.1.31",
+  "version": "0.1.42",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -135,6 +135,26 @@
         "command": "compositeGradleTests.evaluateCurrentExpression",
         "title": "Composite Gradle: Evaluate Current Expression",
         "icon": "$(play)"
+      },
+      {
+        "command": "compositeGradleTests.runMethodWithFlow",
+        "title": "Composite Gradle: Run Test with Executed Code",
+        "icon": "$(coverage)"
+      },
+      {
+        "command": "compositeGradleTests.runClassWithFlow",
+        "title": "Composite Gradle: Run Test Class with Executed Code",
+        "icon": "$(coverage)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.runAffected",
+        "title": "Composite Gradle: Run Affected Tests",
+        "icon": "$(run-errors)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.clearAffected",
+        "title": "Composite Gradle: Clear Affected Tests",
+        "icon": "$(close)"
       }
     ],
     "menus": {
@@ -163,6 +183,16 @@
           "command": "compositeGradleTests.addTest",
           "when": "editorLangId == java",
           "group": "testing@5"
+        },
+        {
+          "command": "compositeGradleTests.runMethodWithFlow",
+          "when": "editorLangId == java",
+          "group": "testing@5"
+        },
+        {
+          "command": "compositeGradleTests.runClassWithFlow",
+          "when": "editorLangId == java",
+          "group": "testing@6"
         }
       ],
       "view/title": [
@@ -195,9 +225,19 @@
           "command": "compositeGradleTests.projectTests.runFailed",
           "when": "view == compositeGradleTests.projectTestsView",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.runAffected",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
+        {
+          "command": "compositeGradleTests.projectTests.clearAffected",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedRoot",
+          "group": "inline@1"
+        },
         {
           "command": "compositeGradleTests.projectTests.run",
           "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(task|class|method)/",
@@ -212,6 +252,11 @@
           "command": "compositeGradleTests.projectTests.open",
           "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
           "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.run",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedMethod",
+          "group": "inline@1"
         }
       ],
       "editor/title": [
@@ -367,6 +412,11 @@
           ],
           "default": "preview",
           "description": "How source navigation opens files. preview reuses a preview editor in the first group, pinned keeps files open, and side opens a preview beside the current editor."
+        },
+        "compositeGradleTests.captureExecutedCode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Capture per-run executed production lines with JaCoCo. This may require Gradle to resolve JaCoCo artifacts. Use the Run with Executed Code commands for one-off capture."
         }
       }
     },
