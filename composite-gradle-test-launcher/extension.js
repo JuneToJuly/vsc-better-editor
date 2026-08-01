@@ -19,6 +19,8 @@ let debugEvaluateScratchUri;
 let debugEvaluateSession;
 let debugEvaluateFrameId;
 let debugEvaluateOutput;
+let debugEvaluateResultPanel;
+let debugEvaluateStoppedThreadId;
 let lastPassedDecoration;
 let lastFailedDecoration;
 const invalidatedSourcePaths = new Set();
@@ -78,6 +80,24 @@ async function activate(context) {
   context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
     if (event.textEditor.document.languageId === 'java') codeLensProviderInstance.refresh();
   }));
+  context.subscriptions.push(vscode.debug.onDidReceiveDebugSessionCustomEvent(event => {
+    if (event.session.type !== 'java') return;
+    if (event.event === 'stopped') {
+      debugEvaluateSession = event.session;
+      debugEvaluateStoppedThreadId = event.body?.threadId;
+    } else if (event.event === 'continued' || event.event === 'terminated') {
+      debugEvaluateStoppedThreadId = undefined;
+    }
+  }));
+  context.subscriptions.push(vscode.debug.onDidTerminateDebugSession(session => {
+    if (debugEvaluateSession?.id === session.id) {
+      debugEvaluateSession = undefined;
+      debugEvaluateFrameId = undefined;
+      debugEvaluateStoppedThreadId = undefined;
+      renderDebugEvaluateResult({ status: 'idle', message: 'The debug session ended.' });
+    }
+  }));
+
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
     if (event.document.languageId === 'java') {
       invalidatedSourcePaths.add(normalizePath(event.document.uri.fsPath));
@@ -197,7 +217,7 @@ async function createInvocation(documentUri, target, debug) {
     displayName: target.displayName,
     filter: target.filter,
     task,
-    projectName: await resolveJavaProjectNameFromJavaExtension(documentUri.fsPath, task),
+    projectName: String(config.get('javaProjectName', '') || '').trim() || await resolveJavaProjectNameFromJavaExtension(documentUri.fsPath),
     showOutput: config.get('showOutput', false),
     documentUri: documentUri.toString(),
     sourcePath: documentUri.fsPath,
@@ -1210,15 +1230,19 @@ function isDebugReady(text, port) {
 
 async function attachDebugger(invocation) {
   output.appendLine(`\n[debug] Attaching Java debugger to localhost:${invocation.debugPort} for project ${invocation.projectName || '(automatic)'}...`);
-  const started = await vscode.debug.startDebugging(undefined, {
+  const configuration = {
     type: 'java',
     request: 'attach',
     name: `Composite Gradle: ${invocation.displayName}`,
     hostName: 'localhost',
     port: invocation.debugPort,
-    projectName: invocation.projectName,
     timeout: 120000
-  });
+  };
+  // An incorrect Java project name causes the Java debug adapter to reject
+  // every evaluate request. Only pass a name that was explicitly configured
+  // or positively resolved from the Java language server.
+  if (invocation.projectName) configuration.projectName = invocation.projectName;
+  const started = await vscode.debug.startDebugging(undefined, configuration);
   if (!started) {
     throw new Error('VS Code could not start the Java attach debugger. Ensure the Java debugger extension is installed.');
   }
@@ -1879,7 +1903,7 @@ async function showDebugEvaluateWindow() {
   if (!document) {
     document = await vscode.workspace.openTextDocument({
       language: 'java',
-      content: '// Evaluate against the paused stack frame.\n// Select a region or press Ctrl+Enter to evaluate the whole document.\n\n'
+      content: '// Evaluate directly in the paused Java stack frame.\n// Locals, fields, this, and the current source context are already available.\n// Select a region or press Ctrl+Enter to evaluate the whole document.\n\n'
     });
     debugEvaluateScratchUri = document.uri;
   }
@@ -1893,21 +1917,84 @@ async function showDebugEvaluateWindow() {
   const end = document.lineAt(document.lineCount - 1).range.end;
   editor.selection = new vscode.Selection(end, end);
   editor.revealRange(new vscode.Range(end, end));
+  ensureDebugEvaluateResultPanel();
+  renderDebugEvaluateResult({ status: 'idle', message: `Paused at ${frame.name || 'stack frame'}. Press Ctrl+Enter to evaluate.` });
   vscode.window.setStatusBarMessage(`Evaluate Expression — ${frame.name || 'paused frame'}`, 3500);
 }
 
 async function resolveCurrentDebugFrame(session) {
   try {
+    if (debugEvaluateStoppedThreadId) {
+      const stack = await session.customRequest('stackTrace', {
+        threadId: debugEvaluateStoppedThreadId,
+        startFrame: 0,
+        levels: 1
+      });
+      const frame = stack?.stackFrames?.[0];
+      if (frame) return { ...frame, threadId: debugEvaluateStoppedThreadId };
+    }
+
     const threads = await session.customRequest('threads');
     for (const thread of threads?.threads || []) {
       try {
-        const stack = await session.customRequest('stackTrace', { threadId: thread.id, startFrame: 0, levels: 1 });
+        const stack = await session.customRequest('stackTrace', {
+          threadId: thread.id,
+          startFrame: 0,
+          levels: 1
+        });
         const frame = stack?.stackFrames?.[0];
-        if (frame) return { ...frame, threadId: thread.id };
+        if (frame) {
+          debugEvaluateStoppedThreadId = thread.id;
+          return { ...frame, threadId: thread.id };
+        }
       } catch (_) { }
     }
   } catch (_) { }
   return undefined;
+}
+
+function ensureDebugEvaluateResultPanel() {
+  if (debugEvaluateResultPanel) {
+    debugEvaluateResultPanel.reveal(vscode.ViewColumn.Beside, true);
+    return debugEvaluateResultPanel;
+  }
+  debugEvaluateResultPanel = vscode.window.createWebviewPanel(
+    'compositeGradleTests.evaluateResult',
+    'Evaluate Result',
+    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+    { enableScripts: false, retainContextWhenHidden: true }
+  );
+  debugEvaluateResultPanel.onDidDispose(() => { debugEvaluateResultPanel = undefined; });
+  renderDebugEvaluateResult({ status: 'idle', message: 'Press Ctrl+Enter in the Evaluate Expression editor.' });
+  return debugEvaluateResultPanel;
+}
+
+function renderDebugEvaluateResult(model) {
+  if (!debugEvaluateResultPanel) return;
+  const escape = value => String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const status = model?.status || 'idle';
+  const expression = model?.expression ? `<section><h3>Expression</h3><pre>${escape(model.expression)}</pre></section>` : '';
+  const type = model?.type ? `<span class="type">${escape(model.type)}</span>` : '';
+  const variables = Array.isArray(model?.variables) && model.variables.length
+    ? `<section><h3>Fields</h3><div class="vars">${model.variables.map(v => `<div><b>${escape(v.name)}</b><code>${escape(v.value)}</code><small>${escape(v.type || '')}</small></div>`).join('')}</div></section>`
+    : '';
+  const body = status === 'success'
+    ? `<div class="headline ok">Result ${type}</div><pre class="result">${escape(model.result || '(no value)')}</pre>${variables}`
+    : status === 'error'
+      ? `<div class="headline bad">Evaluation failed</div><pre class="error">${escape(model.message)}</pre>`
+      : status === 'running'
+        ? `<div class="headline">Evaluating…</div>`
+        : `<div class="headline">${escape(model.message || 'Ready')}</div>`;
+  debugEvaluateResultPanel.webview.html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:18px;line-height:1.45}
+    .headline{font-size:15px;font-weight:650;margin-bottom:12px}.ok{color:var(--vscode-testing-iconPassed)}.bad{color:var(--vscode-testing-iconFailed)}
+    h3{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin:18px 0 6px}
+    pre{font-family:var(--vscode-editor-font-family);white-space:pre-wrap;overflow-wrap:anywhere;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);padding:10px;margin:0}
+    .result{font-size:14px}.error{border-left:3px solid var(--vscode-testing-iconFailed)}.type{font-size:11px;color:var(--vscode-descriptionForeground);font-weight:400;margin-left:6px}
+    .vars{border:1px solid var(--vscode-panel-border)}.vars>div{display:grid;grid-template-columns:minmax(100px,.7fr) minmax(120px,1fr) auto;gap:10px;padding:6px 8px;border-top:1px solid var(--vscode-panel-border)}.vars>div:first-child{border-top:0}.vars code{font-family:var(--vscode-editor-font-family)}.vars small{color:var(--vscode-descriptionForeground)}
+  </style></head><body>${expression}${body}</body></html>`;
 }
 
 async function evaluateCurrentExpression() {
@@ -1932,32 +2019,33 @@ async function evaluateCurrentExpression() {
     .trim();
   if (!expression) throw new Error('Enter or select an expression to evaluate.');
 
+  ensureDebugEvaluateResultPanel();
+  renderDebugEvaluateResult({ status: 'running', expression });
   debugEvaluateOutput.appendLine(`\n> ${expression.replace(/\n/g, '\n  ')}`);
-  // Force the Evaluate output channel into view. preserveFocus=false makes the
-  // result visible instead of silently appending to a hidden channel.
-  debugEvaluateOutput.show(false);
+  vscode.window.setStatusBarMessage('$(sync~spin) Evaluating Java expression…');
   try {
     const result = await session.customRequest('evaluate', {
       expression,
       frameId: debugEvaluateFrameId,
       context: 'repl'
     });
-    const renderedResult = `${result?.result ?? ''}${result?.type ? `  (${result.type})` : ''}`;
-    debugEvaluateOutput.appendLine(renderedResult);
-    debugEvaluateOutput.show(false);
-    vscode.window.setStatusBarMessage(`Evaluate: ${String(result?.result ?? '').slice(0, 120) || '(no value)'}`, 5000);
+    const variables = [];
     if (result?.variablesReference) {
-      const variables = await session.customRequest('variables', { variablesReference: result.variablesReference });
-      for (const variable of (variables?.variables || []).slice(0, 100)) {
-        debugEvaluateOutput.appendLine(`  ${variable.name} = ${variable.value}${variable.type ? `  (${variable.type})` : ''}`);
-      }
+      const response = await session.customRequest('variables', { variablesReference: result.variablesReference });
+      variables.push(...(response?.variables || []).slice(0, 200));
     }
+    const renderedResult = `${result?.result ?? ''}${result?.type ? `  (${result.type})` : ''}`;
+    debugEvaluateOutput.appendLine(renderedResult || '(no value)');
+    renderDebugEvaluateResult({
+      status: 'success', expression,
+      result: String(result?.result ?? ''), type: result?.type || '', variables
+    });
+    vscode.window.setStatusBarMessage(`$(check) ${String(result?.result ?? '').slice(0, 120) || '(no value)'}`, 5000);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     debugEvaluateOutput.appendLine(`ERROR: ${message}`);
-    debugEvaluateOutput.show(false);
+    renderDebugEvaluateResult({ status: 'error', expression, message });
     vscode.window.showErrorMessage(`Evaluate failed: ${message}`);
-    throw error;
   }
 }
 
@@ -2003,8 +2091,7 @@ class DebugEvaluateCompletionProvider {
   }
 }
 
-async function resolveJavaProjectNameFromJavaExtension(filePath, task) {
-  const fallback = resolveJavaProjectName(filePath, task);
+async function resolveJavaProjectNameFromJavaExtension(filePath) {
   try {
     const projects = await vscode.commands.executeCommand('java.project.getAll');
     const candidates = collectJavaProjects(projects);
@@ -2017,10 +2104,11 @@ async function resolveJavaProjectNameFromJavaExtension(filePath, task) {
       output.appendLine(`[debug] Java project resolved by language server: ${matches[0].name}`);
       return matches[0].name;
     }
+    output.appendLine('[debug] Java project was not positively resolved; attaching without projectName.');
   } catch (error) {
-    output.appendLine(`[debug] Java project lookup unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    output.appendLine(`[debug] Java project lookup unavailable; attaching without projectName: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return fallback;
+  return undefined;
 }
 
 function collectJavaProjects(value, results = []) {
@@ -2046,6 +2134,7 @@ function collectJavaProjects(value, results = []) {
 function deactivate() {
   if (runningProcess) terminateProcessTree(runningProcess);
   debugEvaluatePanel?.panel?.dispose();
+  debugEvaluateResultPanel?.dispose();
   vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', false);
 }
 

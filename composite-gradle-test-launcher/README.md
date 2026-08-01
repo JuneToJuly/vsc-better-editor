@@ -219,3 +219,19 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - Force Evaluate results output channel to open and receive focus after Ctrl+Enter.
 - Show a status-bar preview for successful evaluations.
 - Surface evaluation errors as visible notifications in addition to the output channel.
+
+
+## 0.1.27
+
+- Reworked Evaluate Expression output into a visible companion result panel.
+- Tracks the debugger stopped thread before resolving the active stack frame.
+- Ctrl+Enter now evaluates from the real Java scratch editor without relying on a fragile custom context key.
+- Shows expression results, object fields, and errors directly beside the editor.
+
+
+## 0.1.28
+
+- Fixed evaluation failures caused by passing a guessed Java project name to the debugger.
+- The attach configuration now includes `projectName` only when explicitly configured or positively resolved by the Java language server.
+- Added `compositeGradleTests.javaProjectName` as an exact-name override.
+- Evaluate Expression now works directly in the paused frame without generated import lines.
