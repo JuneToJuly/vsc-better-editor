@@ -235,3 +235,17 @@ Version 0.1.11 does not register a VS Code TestController and does not use Test 
 - The attach configuration now includes `projectName` only when explicitly configured or positively resolved by the Java language server.
 - Added `compositeGradleTests.javaProjectName` as an exact-name override.
 - Evaluate Expression now works directly in the paused frame without generated import lines.
+
+
+## 0.1.29
+
+- Refined Evaluate into a compact debugger-style layout.
+- Added paused frame context, aligned name/value/type columns, and lazy object expansion.
+- Added persistent evaluation history that can restore expressions to the scratch editor.
+- Reduced the scratch editor instructions to a single line.
+
+
+## 0.1.30
+
+- Keeps the Evaluate scratch editor above the result view in a consistent vertical layout.
+- Selecting evaluation history replaces the existing scratch document contents without opening another editor.

@@ -21,6 +21,9 @@ let debugEvaluateFrameId;
 let debugEvaluateOutput;
 let debugEvaluateResultPanel;
 let debugEvaluateStoppedThreadId;
+let debugEvaluateCurrentFrame;
+let debugEvaluateHistory = [];
+let debugEvaluateCurrentModel;
 let lastPassedDecoration;
 let lastFailedDecoration;
 const invalidatedSourcePaths = new Set();
@@ -29,6 +32,7 @@ const latestResults = new Map();
 async function activate(context) {
   extensionContext = context;
   testHistory = context.workspaceState.get('testHistory', []);
+  debugEvaluateHistory = context.workspaceState.get('debugEvaluateHistory', []);
   output = vscode.window.createOutputChannel('Composite Gradle Tests');
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 40);
   statusItem.command = 'compositeGradleTests.stop';
@@ -1895,6 +1899,7 @@ async function showDebugEvaluateWindow() {
 
   debugEvaluateSession = session;
   debugEvaluateFrameId = frame.id;
+  debugEvaluateCurrentFrame = frame;
 
   let document;
   if (debugEvaluateScratchUri) {
@@ -1903,7 +1908,7 @@ async function showDebugEvaluateWindow() {
   if (!document) {
     document = await vscode.workspace.openTextDocument({
       language: 'java',
-      content: '// Evaluate directly in the paused Java stack frame.\n// Locals, fields, this, and the current source context are already available.\n// Select a region or press Ctrl+Enter to evaluate the whole document.\n\n'
+      content: '// Ctrl+Enter evaluates the selection or document in the paused frame.\n\n'
     });
     debugEvaluateScratchUri = document.uri;
   }
@@ -1917,8 +1922,8 @@ async function showDebugEvaluateWindow() {
   const end = document.lineAt(document.lineCount - 1).range.end;
   editor.selection = new vscode.Selection(end, end);
   editor.revealRange(new vscode.Range(end, end));
-  ensureDebugEvaluateResultPanel();
-  renderDebugEvaluateResult({ status: 'idle', message: `Paused at ${frame.name || 'stack frame'}. Press Ctrl+Enter to evaluate.` });
+  await ensureDebugEvaluateResultPanel();
+  renderDebugEvaluateResult({ status: 'idle', message: 'Ready to evaluate.', frame });
   vscode.window.setStatusBarMessage(`Evaluate Expression — ${frame.name || 'paused frame'}`, 3500);
 }
 
@@ -1953,48 +1958,127 @@ async function resolveCurrentDebugFrame(session) {
   return undefined;
 }
 
-function ensureDebugEvaluateResultPanel() {
+async function ensureDebugEvaluateResultPanel() {
   if (debugEvaluateResultPanel) {
-    debugEvaluateResultPanel.reveal(vscode.ViewColumn.Beside, true);
+    debugEvaluateResultPanel.reveal(undefined, true);
     return debugEvaluateResultPanel;
   }
+
+  // Keep the expression editor above the result view, matching an IDE-style
+  // evaluate window. The scratch editor is active when this is called.
+  await vscode.commands.executeCommand('workbench.action.newGroupBelow');
   debugEvaluateResultPanel = vscode.window.createWebviewPanel(
     'compositeGradleTests.evaluateResult',
-    'Evaluate Result',
-    { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-    { enableScripts: false, retainContextWhenHidden: true }
+    'Evaluate',
+    { viewColumn: vscode.ViewColumn.Active, preserveFocus: true },
+    { enableScripts: true, retainContextWhenHidden: true }
   );
+  debugEvaluateResultPanel.webview.onDidReceiveMessage(handleDebugEvaluateMessage);
   debugEvaluateResultPanel.onDidDispose(() => { debugEvaluateResultPanel = undefined; });
-  renderDebugEvaluateResult({ status: 'idle', message: 'Press Ctrl+Enter in the Evaluate Expression editor.' });
+  renderDebugEvaluateResult({ status: 'idle', message: 'Press Ctrl+Enter in the Evaluate editor.', frame: debugEvaluateCurrentFrame });
+  await vscode.commands.executeCommand('workbench.action.navigateUp');
   return debugEvaluateResultPanel;
+}
+
+async function handleDebugEvaluateMessage(message) {
+  try {
+    if (message.command === 'expand' && Number.isInteger(message.variablesReference)) {
+      const session = vscode.debug.activeDebugSession || debugEvaluateSession;
+      if (!session) return;
+      const response = await session.customRequest('variables', { variablesReference: message.variablesReference });
+      debugEvaluateResultPanel?.webview.postMessage({
+        command: 'expanded',
+        nodeId: message.nodeId,
+        variables: response?.variables || []
+      });
+      return;
+    }
+    if (message.command === 'history' && Number.isInteger(message.index)) {
+      const item = debugEvaluateHistory[message.index];
+      if (!item || !debugEvaluateScratchUri) return;
+      const document = vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === debugEvaluateScratchUri.toString());
+      if (!document) return;
+      const edit = new vscode.WorkspaceEdit();
+      const full = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+      edit.replace(document.uri, full, `// Ctrl+Enter evaluates the selection or document in the paused frame.\n\n${item.expression}`);
+      await vscode.workspace.applyEdit(edit);
+      const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === document.uri.toString());
+      if (editor) {
+        const end = document.lineAt(document.lineCount - 1).range.end;
+        editor.selection = new vscode.Selection(end, end);
+        editor.revealRange(new vscode.Range(end, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      }
+      renderDebugEvaluateResult(item.model || { status: 'idle', message: 'Expression restored.', frame: debugEvaluateCurrentFrame });
+    }
+  } catch (error) {
+    vscode.window.showErrorMessage(`Evaluate: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function renderDebugEvaluateResult(model) {
   if (!debugEvaluateResultPanel) return;
+  debugEvaluateCurrentModel = model;
   const escape = value => String(value ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const status = model?.status || 'idle';
-  const expression = model?.expression ? `<section><h3>Expression</h3><pre>${escape(model.expression)}</pre></section>` : '';
-  const type = model?.type ? `<span class="type">${escape(model.type)}</span>` : '';
-  const variables = Array.isArray(model?.variables) && model.variables.length
-    ? `<section><h3>Fields</h3><div class="vars">${model.variables.map(v => `<div><b>${escape(v.name)}</b><code>${escape(v.value)}</code><small>${escape(v.type || '')}</small></div>`).join('')}</div></section>`
-    : '';
-  const body = status === 'success'
-    ? `<div class="headline ok">Result ${type}</div><pre class="result">${escape(model.result || '(no value)')}</pre>${variables}`
+  const frame = model?.frame || debugEvaluateCurrentFrame;
+  const frameLabel = frame
+    ? `${escape(frame.name || 'stack frame')} · ${escape(frame.source?.name || frame.source?.path || '')}${frame.line ? `:${frame.line}` : ''}`
+    : 'No paused frame';
+  const history = debugEvaluateHistory.map((item, index) =>
+    `<button class="history-item" data-history="${index}" title="${escape(item.expression)}">${escape(item.expression.replace(/\s+/g, ' ').slice(0, 80))}</button>`
+  ).join('');
+  const vars = Array.isArray(model?.variables) ? model.variables : [];
+  const rootRows = vars.map((v, index) => renderEvaluateVariable(v, `root-${index}`, 0, escape)).join('');
+  const resultLine = status === 'success'
+    ? `<div class="root-result"><span class="value">${escape(formatDebugValue(model.result))}</span><span class="type">${escape(model.type || '')}</span></div>`
     : status === 'error'
-      ? `<div class="headline bad">Evaluation failed</div><pre class="error">${escape(model.message)}</pre>`
+      ? `<div class="error">${escape(model.message)}</div>`
       : status === 'running'
-        ? `<div class="headline">Evaluating…</div>`
-        : `<div class="headline">${escape(model.message || 'Ready')}</div>`;
-  debugEvaluateResultPanel.webview.html = `<!doctype html><html><head><meta charset="utf-8"><style>
-    body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:18px;line-height:1.45}
-    .headline{font-size:15px;font-weight:650;margin-bottom:12px}.ok{color:var(--vscode-testing-iconPassed)}.bad{color:var(--vscode-testing-iconFailed)}
-    h3{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin:18px 0 6px}
-    pre{font-family:var(--vscode-editor-font-family);white-space:pre-wrap;overflow-wrap:anywhere;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);padding:10px;margin:0}
-    .result{font-size:14px}.error{border-left:3px solid var(--vscode-testing-iconFailed)}.type{font-size:11px;color:var(--vscode-descriptionForeground);font-weight:400;margin-left:6px}
-    .vars{border:1px solid var(--vscode-panel-border)}.vars>div{display:grid;grid-template-columns:minmax(100px,.7fr) minmax(120px,1fr) auto;gap:10px;padding:6px 8px;border-top:1px solid var(--vscode-panel-border)}.vars>div:first-child{border-top:0}.vars code{font-family:var(--vscode-editor-font-family)}.vars small{color:var(--vscode-descriptionForeground)}
-  </style></head><body>${expression}${body}</body></html>`;
+        ? `<div class="running">Evaluating…</div>`
+        : `<div class="idle">${escape(model.message || 'Ready')}</div>`;
+  const expression = model?.expression ? `<div class="expression">${escape(model.expression)}</div>` : '';
+  const nonce = Math.random().toString(36).slice(2);
+  debugEvaluateResultPanel.webview.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';"><style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);display:flex;flex-direction:column;font-size:12px}
+    .context{padding:8px 12px;border-bottom:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.context strong{color:var(--vscode-foreground);font-weight:600}
+    .main{display:grid;grid-template-columns:minmax(0,1fr) 155px;min-height:0;flex:1}.result-pane{min-width:0;overflow:auto;padding:10px 12px 24px}.history{border-left:1px solid var(--vscode-panel-border);min-width:0;overflow:auto;background:var(--vscode-sideBar-background)}
+    .section-label{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--vscode-descriptionForeground);font-weight:700;padding:8px 9px 5px}.history-item{display:block;width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-foreground);text-align:left;padding:7px 8px;font:inherit;font-family:var(--vscode-editor-font-family);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}.history-item:hover{background:var(--vscode-list-hoverBackground)}
+    .expression{font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-descriptionForeground);padding:0 0 8px;white-space:pre-wrap}.root-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:7px 8px;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);margin-bottom:8px}.value{font-family:var(--vscode-editor-font-family);font-size:13px;overflow-wrap:anywhere}.type{color:var(--vscode-descriptionForeground);font-size:10px}.error{border-left:3px solid var(--vscode-testing-iconFailed);background:var(--vscode-inputValidation-errorBackground);padding:9px;white-space:pre-wrap}.running,.idle{color:var(--vscode-descriptionForeground);padding:8px 0}
+    .tree{border:1px solid var(--vscode-panel-border)}.var-row{display:grid;grid-template-columns:minmax(110px,.8fr) minmax(100px,1.2fr) minmax(70px,.55fr);align-items:center;min-height:26px;border-top:1px solid var(--vscode-panel-border);font-family:var(--vscode-editor-font-family);font-size:11px}.var-row:first-child{border-top:0}.cell{padding:4px 7px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.name{display:flex;align-items:center;gap:3px}.toggle{width:16px;height:18px;padding:0;border:0;background:transparent;color:var(--vscode-foreground);cursor:pointer;font-size:11px}.toggle.empty{visibility:hidden}.var-value{color:var(--vscode-debugTokenExpression-value)}.var-type{color:var(--vscode-descriptionForeground);font-size:10px}.children{grid-column:1/-1}.children:empty{display:none}.child-wrap .var-row{border-left:1px solid var(--vscode-panel-border)}
+    @media(max-width:520px){.main{grid-template-columns:1fr}.history{display:none}.var-row{grid-template-columns:minmax(95px,.9fr) minmax(95px,1.1fr)}.var-type{display:none}}
+  </style></head><body><div class="context"><strong>Paused:</strong> ${frameLabel}</div><div class="main"><div class="result-pane">${expression}${resultLine}${rootRows ? `<div class="section-label">Fields</div><div class="tree">${rootRows}</div>` : ''}</div><aside class="history"><div class="section-label">History</div>${history || '<div class="idle" style="padding:8px">No evaluations</div>'}</aside></div><script nonce="${nonce}">
+    const vscode=acquireVsCodeApi();
+    document.addEventListener('click',event=>{
+      const history=event.target.closest('[data-history]');
+      if(history){vscode.postMessage({command:'history',index:Number(history.dataset.history)});return;}
+      const button=event.target.closest('[data-ref]');
+      if(!button)return;
+      const id=button.dataset.node;const target=document.getElementById(id);if(!target)return;
+      if(target.dataset.loaded==='true'){target.hidden=!target.hidden;button.textContent=target.hidden?'▸':'▾';return;}
+      button.textContent='…';vscode.postMessage({command:'expand',nodeId:id,variablesReference:Number(button.dataset.ref)});
+    });
+    window.addEventListener('message',event=>{
+      const message=event.data;if(message.command!=='expanded')return;
+      const target=document.getElementById(message.nodeId);const button=document.querySelector('[data-node="'+message.nodeId+'"]');if(!target)return;
+      target.innerHTML=(message.variables||[]).map((v,i)=>renderVar(v,message.nodeId+'-'+i,Number(target.dataset.depth||0)+1)).join('');target.dataset.loaded='true';target.hidden=false;if(button)button.textContent='▾';
+    });
+    function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    function renderVar(v,id,depth){const ref=Number(v.variablesReference||0);const pad=depth*14;return '<div class="child-wrap"><div class="var-row"><div class="cell name" style="padding-left:'+(7+pad)+'px"><button class="toggle '+(ref?'':'empty')+'" data-ref="'+ref+'" data-node="'+id+'">▸</button><span title="'+esc(v.name)+'">'+esc(v.name)+'</span></div><div class="cell var-value" title="'+esc(v.value)+'">'+esc(v.value)+'</div><div class="cell var-type" title="'+esc(v.type||'')+'">'+esc(v.type||'')+'</div><div id="'+id+'" class="children" data-depth="'+depth+'" hidden></div></div></div>';}
+  </script></body></html>`;
+}
+
+function renderEvaluateVariable(variable, nodeId, depth, escape) {
+  const ref = Number(variable?.variablesReference || 0);
+  const padding = 7 + depth * 14;
+  return `<div class="child-wrap"><div class="var-row"><div class="cell name" style="padding-left:${padding}px"><button class="toggle ${ref ? '' : 'empty'}" data-ref="${ref}" data-node="${nodeId}">▸</button><span title="${escape(variable?.name)}">${escape(variable?.name)}</span></div><div class="cell var-value" title="${escape(variable?.value)}">${escape(formatDebugValue(variable?.value))}</div><div class="cell var-type" title="${escape(variable?.type || '')}">${escape(variable?.type || '')}</div><div id="${nodeId}" class="children" data-depth="${depth}" hidden></div></div></div>`;
+}
+
+function formatDebugValue(value) {
+  const text = String(value ?? '');
+  if (text === 'null') return 'null';
+  return text;
 }
 
 async function evaluateCurrentExpression() {
@@ -2009,6 +2093,7 @@ async function evaluateCurrentExpression() {
   if (!frame) throw new Error('Pause the debugger at a breakpoint before evaluating.');
   debugEvaluateSession = session;
   debugEvaluateFrameId = frame.id;
+  debugEvaluateCurrentFrame = frame;
 
   const selection = editor.selection;
   let expression = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
@@ -2019,8 +2104,8 @@ async function evaluateCurrentExpression() {
     .trim();
   if (!expression) throw new Error('Enter or select an expression to evaluate.');
 
-  ensureDebugEvaluateResultPanel();
-  renderDebugEvaluateResult({ status: 'running', expression });
+  await ensureDebugEvaluateResultPanel();
+  renderDebugEvaluateResult({ status: 'running', expression, frame });
   debugEvaluateOutput.appendLine(`\n> ${expression.replace(/\n/g, '\n  ')}`);
   vscode.window.setStatusBarMessage('$(sync~spin) Evaluating Java expression…');
   try {
@@ -2036,15 +2121,21 @@ async function evaluateCurrentExpression() {
     }
     const renderedResult = `${result?.result ?? ''}${result?.type ? `  (${result.type})` : ''}`;
     debugEvaluateOutput.appendLine(renderedResult || '(no value)');
-    renderDebugEvaluateResult({
-      status: 'success', expression,
+    const successModel = {
+      status: 'success', expression, frame,
       result: String(result?.result ?? ''), type: result?.type || '', variables
-    });
+    };
+    debugEvaluateHistory = [{ expression, model: successModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 20);
+    if (extensionContext) await extensionContext.workspaceState.update('debugEvaluateHistory', debugEvaluateHistory);
+    renderDebugEvaluateResult(successModel);
     vscode.window.setStatusBarMessage(`$(check) ${String(result?.result ?? '').slice(0, 120) || '(no value)'}`, 5000);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     debugEvaluateOutput.appendLine(`ERROR: ${message}`);
-    renderDebugEvaluateResult({ status: 'error', expression, message });
+    const errorModel = { status: 'error', expression, message, frame };
+    debugEvaluateHistory = [{ expression, model: errorModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 20);
+    if (extensionContext) await extensionContext.workspaceState.update('debugEvaluateHistory', debugEvaluateHistory);
+    renderDebugEvaluateResult(errorModel);
     vscode.window.showErrorMessage(`Evaluate failed: ${message}`);
   }
 }
