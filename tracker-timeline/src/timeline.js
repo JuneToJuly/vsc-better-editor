@@ -9,7 +9,7 @@ class TimelineItem extends vscode.TreeItem {
 
     this.commit = commit;
     this.repository = repository;
-    this.contextValue = 'xPlaneSave';
+    this.contextValue = 'trackerSave';
     this.baseDescription = new Date(commit.timestamp * 1000).toLocaleTimeString([], {
       hour: 'numeric',
       minute: '2-digit',
@@ -33,7 +33,7 @@ class TimelineItem extends vscode.TreeItem {
 
     this.iconPath = new vscode.ThemeIcon('history');
     this.command = {
-      command: 'xPlaneTimeline.openViewer',
+      command: 'trackerTimeline.openViewer',
       title: 'Open in Change Viewer',
       arguments: [this]
     };
@@ -95,7 +95,7 @@ class TimelineProvider {
       item.description = active
         ? `${item.baseDescription} · current`
         : item.baseDescription;
-      item.contextValue = active ? 'xPlaneSaveActive' : 'xPlaneSave';
+      item.contextValue = active ? 'trackerSaveActive' : 'trackerSave';
     }
   }
 
@@ -120,7 +120,7 @@ class TimelineProvider {
   async loadRepository(root) {
     const repository = new GitRepository(root);
     const maxEntries = vscode.workspace
-      .getConfiguration('xPlaneTimeline')
+      .getConfiguration('trackerTimeline')
       .get('maxVisibleEntries', 250);
 
     const commits = await repository.listTimeline(maxEntries);
@@ -178,7 +178,7 @@ class TimelineProvider {
   async getChildren() {
     const root = await this.resolveRepositoryRoot();
     if (!root) {
-      // A refresh while a virtual X-Plane diff has focus must not visually
+      // A refresh while a virtual Tracker diff has focus must not visually
       // erase a timeline that was already loaded.
       return this.cachedItems;
     }
@@ -212,7 +212,7 @@ class GitDocumentProvider {
 
 function historicalUri(root, commit, file) {
   return vscode.Uri.from({
-    scheme: 'x-plane-git',
+    scheme: 'tracker-git',
     path: `/${file}`,
     query: new URLSearchParams({ root, commit, file }).toString()
   });

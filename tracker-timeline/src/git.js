@@ -58,7 +58,7 @@ class GitRepository {
       .replace(/^\/+|\/+$/g, '')
       .replace(/\/$|\.lock$/g, '-');
 
-    return `refs/x-plane/timeline/${safeBranch || 'unknown'}`;
+    return `refs/tracker/timeline/${safeBranch || 'unknown'}`;
   }
 
   async createSnapshot(savedFile, includeUntracked) {
@@ -67,7 +67,7 @@ class GitRepository {
     const headCommit = await this.tryResolve('HEAD');
 
     const gitDirectory = await this.gitCommonDir();
-    const privateIndexDirectory = path.join(gitDirectory, 'x-plane', 'indexes');
+    const privateIndexDirectory = path.join(gitDirectory, 'tracker', 'indexes');
     await mkdir(privateIndexDirectory, { recursive: true });
 
     const indexKey = createHash('sha256')
@@ -124,11 +124,11 @@ class GitRepository {
       const branch = await this.currentBranch();
       const relativeSavedFile = this.relative(savedFile);
       const commitMessage = [
-        `X-Plane save: ${relativeSavedFile}`,
+        `Tracker save: ${relativeSavedFile}`,
         '',
-        'X-Plane-Event: save',
-        `X-Plane-File: ${relativeSavedFile}`,
-        `X-Plane-Branch: ${branch}`
+        'Tracker-Event: save',
+        `Tracker-File: ${relativeSavedFile}`,
+        `Tracker-Branch: ${branch}`
       ].join('\n');
 
       let parentCommit = previousTimelineCommit || headCommit;
@@ -139,7 +139,7 @@ class GitRepository {
         parentCommit = (
           await this.runWithInput(
             ['commit-tree', emptyTreeHash],
-            'X-Plane timeline base\n',
+            'Tracker timeline base\n',
             privateIndexEnvironment
           )
         ).trim();
@@ -157,7 +157,7 @@ class GitRepository {
         ? [
             'update-ref',
             '-m',
-            `x-plane save: ${relativeSavedFile}`,
+            `tracker save: ${relativeSavedFile}`,
             timelineRef,
             commitHash,
             previousTimelineCommit
@@ -165,7 +165,7 @@ class GitRepository {
         : [
             'update-ref',
             '-m',
-            `x-plane save: ${relativeSavedFile}`,
+            `tracker save: ${relativeSavedFile}`,
             timelineRef,
             commitHash
           ];
@@ -210,7 +210,7 @@ class GitRepository {
     // A multi-root workspace can place one Git repository inside another
     // repository's working tree. Git tries to stage an untracked nested repo as
     // a gitlink, and an unborn nested repo makes `git add` fail with
-    // "does not have a commit checked out". X-Plane records each repository
+    // "does not have a commit checked out". Tracker records each repository
     // independently, so nested repositories must be excluded from the parent
     // repository snapshot.
     const status = await this.run([
@@ -266,12 +266,12 @@ class GitRepository {
     const commits = [];
     for (const entry of entries) {
       const [hash, parents, epoch, subject, body = ''] = entry.split('\x1f');
-      if (!body.includes('X-Plane-Event: save')) {
+      if (!body.includes('Tracker-Event: save')) {
         continue;
       }
 
-      const savedFileMatch = body.match(/^X-Plane-File:\s*(.+)$/m);
-      const branchMatch = body.match(/^X-Plane-Branch:\s*(.+)$/m);
+      const savedFileMatch = body.match(/^Tracker-File:\s*(.+)$/m);
+      const branchMatch = body.match(/^Tracker-Branch:\s*(.+)$/m);
       const parent = parents.split(' ')[0] || undefined;
       const changedFiles = parent
         ? (await this.run(['diff', '--name-only', parent, hash]))

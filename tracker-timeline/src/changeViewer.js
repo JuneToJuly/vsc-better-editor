@@ -19,7 +19,7 @@ class ChangeViewer {
     }
 
     const maxEntries = vscode.workspace
-      .getConfiguration('xPlaneTimeline')
+      .getConfiguration('trackerTimeline')
       .get('maxVisibleEntries', 250);
 
     const newestFirst = await item.repository.listTimeline(maxEntries);
@@ -27,7 +27,7 @@ class ChangeViewer {
     const currentIndex = commits.findIndex(commit => commit.hash === item.commit.hash);
     if (currentIndex < 0) {
       await vscode.window.showInformationMessage(
-        'This save is no longer available in the visible X-Plane timeline.'
+        'This save is no longer available in the visible Tracker timeline.'
       );
       return;
     }
@@ -42,15 +42,15 @@ class ChangeViewer {
       this.panel.reveal(vscode.ViewColumn.Active, true);
     }
 
-    this.panel.title = `X-Plane Changes — ${path.basename(this.repository.root)}`;
+    this.panel.title = `Tracker Changes — ${path.basename(this.repository.root)}`;
     this.panel.webview.html = this.getHtml(this.panel.webview);
     await this.activateCurrentCommit();
   }
 
   createPanel() {
     this.panel = vscode.window.createWebviewPanel(
-      'xPlaneChangeViewer',
-      'X-Plane Changes',
+      'trackerChangeViewer',
+      'Tracker Changes',
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -185,7 +185,7 @@ class ChangeViewer {
     const target = path.resolve(root, file);
     const relative = path.relative(root, target);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      await vscode.window.showWarningMessage('X-Plane refused to open a file outside the repository.');
+      await vscode.window.showWarningMessage('Tracker refused to open a file outside the repository.');
       return;
     }
 
@@ -261,7 +261,7 @@ class ChangeViewer {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>X-Plane Change Viewer</title>
+  <title>Tracker Change Viewer</title>
   <style>
     :root { --card-width: 620px; --gap: 18px; --toolbar-height: 46px; --minimap-height: 48px; }
     * { box-sizing: border-box; }

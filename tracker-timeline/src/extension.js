@@ -12,7 +12,7 @@ let snapshotQueue = Promise.resolve();
 
 function activate(context) {
   const timelineProvider = new TimelineProvider();
-  const treeView = vscode.window.createTreeView('xPlaneTimeline', {
+  const treeView = vscode.window.createTreeView('trackerTimeline', {
     treeDataProvider: timelineProvider,
     showCollapseAll: false
   });
@@ -27,7 +27,7 @@ function activate(context) {
       // VS Code does not always commit a TreeView selection when reveal() is
       // invoked from a diff/peek editor with focus:false. Briefly focus the
       // timeline, select the exact live item, then return focus to the editor.
-      await vscode.commands.executeCommand('xPlaneTimeline.focus');
+      await vscode.commands.executeCommand('trackerTimeline.focus');
       await treeView.reveal(item, {
         select: true,
         focus: true,
@@ -61,7 +61,7 @@ function activate(context) {
 
   function updateStatus() {
     const enabled = vscode.workspace
-      .getConfiguration('xPlaneTimeline')
+      .getConfiguration('trackerTimeline')
       .get('enabled', true);
 
     if (!enabled) {
@@ -70,14 +70,14 @@ function activate(context) {
     }
 
     statusItem.text = recordingPaused
-      ? '$(debug-pause) X-Plane: Paused'
-      : '$(history) X-Plane: Recording';
+      ? '$(debug-pause) Tracker: Paused'
+      : '$(history) Tracker: Recording';
     statusItem.tooltip = recordingPaused
       ? 'Resume save timeline recording'
       : 'Pause save timeline recording';
     statusItem.command = recordingPaused
-      ? 'xPlaneTimeline.resume'
-      : 'xPlaneTimeline.pause';
+      ? 'trackerTimeline.resume'
+      : 'trackerTimeline.pause';
     statusItem.show();
   }
 
@@ -88,44 +88,44 @@ function activate(context) {
     treeView,
     statusItem,
     vscode.workspace.registerTextDocumentContentProvider(
-      'x-plane-git',
+      'tracker-git',
       gitDocumentProvider
     ),
     vscode.languages.registerCodeLensProvider(
-      { scheme: 'x-plane-git' },
+      { scheme: 'tracker-git' },
       new ReplayCodeLensProvider(replaySession)
     ),
-    vscode.commands.registerCommand('xPlaneTimeline.refresh', () => {
+    vscode.commands.registerCommand('trackerTimeline.refresh', () => {
       timelineProvider.refresh();
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.openCurrent', () => {
-      return vscode.commands.executeCommand('workbench.view.extension.xPlane');
+    vscode.commands.registerCommand('trackerTimeline.openCurrent', () => {
+      return vscode.commands.executeCommand('workbench.view.extension.tracker');
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.pause', () => {
+    vscode.commands.registerCommand('trackerTimeline.pause', () => {
       recordingPaused = true;
       updateStatus();
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.resume', () => {
+    vscode.commands.registerCommand('trackerTimeline.resume', () => {
       recordingPaused = false;
       updateStatus();
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.openViewer', async item => {
+    vscode.commands.registerCommand('trackerTimeline.openViewer', async item => {
       const target = item || treeView.selection[0] || await timelineProvider.getDefaultItem();
       if (!target) {
         await vscode.window.showInformationMessage(
-          'No X-Plane saves are available for the current repository.'
+          'No Tracker saves are available for the current repository.'
         );
         return;
       }
       return changeViewer.open(target);
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.openDiff', item => {
+    vscode.commands.registerCommand('trackerTimeline.openDiff', item => {
       return replaySession.open(item);
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.previousDiff', () => {
+    vscode.commands.registerCommand('trackerTimeline.previousDiff', () => {
       return replaySession.previous();
     }),
-    vscode.commands.registerCommand('xPlaneTimeline.nextDiff', () => {
+    vscode.commands.registerCommand('trackerTimeline.nextDiff', () => {
       return replaySession.next();
     }),
     vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -137,7 +137,7 @@ function activate(context) {
       }
 
       const configuration = vscode.workspace.getConfiguration(
-        'xPlaneTimeline',
+        'trackerTimeline',
         document.uri
       );
       if (!configuration.get('enabled', true)) {
@@ -160,12 +160,12 @@ function activate(context) {
         .catch(error => {
           const message = error instanceof Error ? error.message : String(error);
           vscode.window.showErrorMessage(
-            `X-Plane could not record this save: ${message}`
+            `Tracker could not record this save: ${message}`
           );
         });
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration('xPlaneTimeline')) {
+      if (event.affectsConfiguration('trackerTimeline')) {
         updateStatus();
         timelineProvider.refresh();
       }

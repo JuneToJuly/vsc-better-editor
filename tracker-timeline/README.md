@@ -1,12 +1,12 @@
-# X-Plane Timeline
+# Tracker Timeline
 
-X-Plane records a private Git snapshot whenever a file is saved, then lets you move through those changes as a horizontal code history.
+Tracker records a private Git snapshot whenever a file is saved, then lets you move through those changes as a horizontal code history.
 
-Recording uses a private Git index and a hidden ref under `refs/x-plane/timeline/`. It does not move `HEAD`, check out another branch, or modify the repository's normal staging area.
+Recording uses a private Git index and a hidden ref under `refs/tracker/timeline/`. It does not move `HEAD`, check out another branch, or modify the repository's normal staging area.
 
 ## Horizontal Change Viewer
 
-Click a save in the Development Timeline or run **X-Plane: Open Change Viewer**.
+Click a save in the Development Timeline or run **Tracker: Open Change Viewer**.
 
 The viewer displays each recorded save as a column containing the actual Git patch for that save. Move left and right across the project history instead of repeatedly opening separate diff editors.
 
@@ -25,7 +25,7 @@ The viewer supports saves that affect more than one file, although normal save-b
 ## Recording behavior
 
 1. VS Code fires `onDidSaveTextDocument`.
-2. X-Plane creates a temporary private Git index.
+2. Tracker creates a temporary private Git index.
 3. The private index starts from the previous timeline snapshot, or `HEAD` for the first save.
 4. The current working tree is added to the private index.
 5. `git write-tree`, `git commit-tree`, and `git update-ref` create and advance the hidden timeline.
@@ -34,14 +34,14 @@ New repositories with an unborn `HEAD` are supported through a private empty bas
 
 ## Commands
 
-- `X-Plane: Open Change Viewer`
-- `X-Plane: Open Save Diff`
-- `X-Plane: Refresh Timeline`
+- `Tracker: Open Change Viewer`
+- `Tracker: Open Save Diff`
+- `Tracker: Refresh Timeline`
 - `Previous Diff`
 - `Next Diff`
-- `X-Plane: Pause Recording`
-- `X-Plane: Resume Recording`
-- `X-Plane: Open Current Branch Timeline`
+- `Tracker: Pause Recording`
+- `Tracker: Resume Recording`
+- `Tracker: Open Current Branch Timeline`
 
 ## Version 0.5.0
 

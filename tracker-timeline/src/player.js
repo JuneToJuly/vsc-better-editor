@@ -17,7 +17,7 @@ class ReplaySession {
     }
 
     const maxEntries = vscode.workspace
-      .getConfiguration('xPlaneTimeline')
+      .getConfiguration('trackerTimeline')
       .get('maxVisibleEntries', 250);
 
     const newestFirst = await item.repository.listTimeline(maxEntries);
@@ -26,7 +26,7 @@ class ReplaySession {
 
     if (currentIndex < 0) {
       await vscode.window.showInformationMessage(
-        'This save is no longer available in the visible X-Plane timeline.'
+        'This save is no longer available in the visible Tracker timeline.'
       );
       return;
     }
@@ -66,7 +66,7 @@ class ReplaySession {
   }
 
   isCurrentDiffUri(uri) {
-    if (!uri || uri.scheme !== 'x-plane-git' || !this.repository) {
+    if (!uri || uri.scheme !== 'tracker-git' || !this.repository) {
       return false;
     }
 
@@ -94,15 +94,15 @@ class ReplaySession {
   async updateContext(activeUri) {
     const active = this.isCurrentDiffUri(activeUri);
     await Promise.all([
-      vscode.commands.executeCommand('setContext', 'xPlaneTimeline.replayDiffActive', active),
+      vscode.commands.executeCommand('setContext', 'trackerTimeline.replayDiffActive', active),
       vscode.commands.executeCommand(
         'setContext',
-        'xPlaneTimeline.canPreviousDiff',
+        'trackerTimeline.canPreviousDiff',
         active && this.canGoPrevious()
       ),
       vscode.commands.executeCommand(
         'setContext',
-        'xPlaneTimeline.canNextDiff',
+        'trackerTimeline.canNextDiff',
         active && this.canGoNext()
       )
     ]);
@@ -168,16 +168,16 @@ class ReplayCodeLensProvider {
     if (this.session.canGoPrevious()) {
       lenses.push(new vscode.CodeLens(range, {
         title: '$(arrow-left) Previous Diff',
-        command: 'xPlaneTimeline.previousDiff',
-        tooltip: 'Open the preceding X-Plane save diff'
+        command: 'trackerTimeline.previousDiff',
+        tooltip: 'Open the preceding Tracker save diff'
       }));
     }
 
     if (this.session.canGoNext()) {
       lenses.push(new vscode.CodeLens(range, {
         title: 'Next Diff $(arrow-right)',
-        command: 'xPlaneTimeline.nextDiff',
-        tooltip: 'Open the following X-Plane save diff'
+        command: 'trackerTimeline.nextDiff',
+        tooltip: 'Open the following Tracker save diff'
       }));
     }
 

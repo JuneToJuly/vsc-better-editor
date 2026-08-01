@@ -1,8 +1,8 @@
 {
-  "name": "x-plane-timeline",
-  "displayName": "X-Plane Timeline",
+  "name": "tracker-timeline",
+  "displayName": "Tracker Timeline",
   "description": "Walk through your development one save at a time using private Git timeline commits.",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -14,117 +14,117 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onView:xPlaneTimeline"
+    "onView:trackerTimeline"
   ],
   "main": "./src/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "xPlane",
-          "title": "X-Plane",
+          "id": "tracker",
+          "title": "Tracker",
           "icon": "media/timeline.svg"
         }
       ]
     },
     "views": {
-      "xPlane": [
+      "tracker": [
         {
-          "id": "xPlaneTimeline",
+          "id": "trackerTimeline",
           "name": "Development Timeline"
         }
       ]
     },
     "commands": [
       {
-        "command": "xPlaneTimeline.refresh",
-        "title": "X-Plane: Refresh Timeline",
+        "command": "trackerTimeline.refresh",
+        "title": "Tracker: Refresh Timeline",
         "icon": "$(refresh)"
       },
       {
-        "command": "xPlaneTimeline.openViewer",
-        "title": "X-Plane: Open Change Viewer",
+        "command": "trackerTimeline.openViewer",
+        "title": "Tracker: Open Change Viewer",
         "icon": "$(preview)"
       },
       {
-        "command": "xPlaneTimeline.openDiff",
-        "title": "X-Plane: Open Save Diff"
+        "command": "trackerTimeline.openDiff",
+        "title": "Tracker: Open Save Diff"
       },
       {
-        "command": "xPlaneTimeline.previousDiff",
+        "command": "trackerTimeline.previousDiff",
         "title": "Previous Diff",
         "icon": "$(arrow-left)"
       },
       {
-        "command": "xPlaneTimeline.nextDiff",
+        "command": "trackerTimeline.nextDiff",
         "title": "Next Diff",
         "icon": "$(arrow-right)"
       },
       {
-        "command": "xPlaneTimeline.pause",
-        "title": "X-Plane: Pause Recording"
+        "command": "trackerTimeline.pause",
+        "title": "Tracker: Pause Recording"
       },
       {
-        "command": "xPlaneTimeline.resume",
-        "title": "X-Plane: Resume Recording"
+        "command": "trackerTimeline.resume",
+        "title": "Tracker: Resume Recording"
       },
       {
-        "command": "xPlaneTimeline.openCurrent",
-        "title": "X-Plane: Open Current Branch Timeline"
+        "command": "trackerTimeline.openCurrent",
+        "title": "Tracker: Open Current Branch Timeline"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "xPlaneTimeline.refresh",
-          "when": "view == xPlaneTimeline",
+          "command": "trackerTimeline.refresh",
+          "when": "view == trackerTimeline",
           "group": "navigation"
         },
         {
-          "command": "xPlaneTimeline.openViewer",
-          "when": "view == xPlaneTimeline",
+          "command": "trackerTimeline.openViewer",
+          "when": "view == trackerTimeline",
           "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
-          "command": "xPlaneTimeline.openViewer",
-          "when": "view == xPlaneTimeline && (viewItem == xPlaneSave || viewItem == xPlaneSaveActive)",
+          "command": "trackerTimeline.openViewer",
+          "when": "view == trackerTimeline && (viewItem == trackerSave || viewItem == trackerSaveActive)",
           "group": "inline@1"
         },
         {
-          "command": "xPlaneTimeline.openDiff",
-          "when": "view == xPlaneTimeline && (viewItem == xPlaneSave || viewItem == xPlaneSaveActive)",
+          "command": "trackerTimeline.openDiff",
+          "when": "view == trackerTimeline && (viewItem == trackerSave || viewItem == trackerSaveActive)",
           "group": "inline@2"
         }
       ],
       "editor/title": [
         {
-          "command": "xPlaneTimeline.previousDiff",
-          "when": "xPlaneTimeline.replayDiffActive && xPlaneTimeline.canPreviousDiff",
+          "command": "trackerTimeline.previousDiff",
+          "when": "trackerTimeline.replayDiffActive && trackerTimeline.canPreviousDiff",
           "group": "navigation@1"
         },
         {
-          "command": "xPlaneTimeline.nextDiff",
-          "when": "xPlaneTimeline.replayDiffActive && xPlaneTimeline.canNextDiff",
+          "command": "trackerTimeline.nextDiff",
+          "when": "trackerTimeline.replayDiffActive && trackerTimeline.canNextDiff",
           "group": "navigation@2"
         }
       ]
     },
     "configuration": {
-      "title": "X-Plane Timeline",
+      "title": "Tracker Timeline",
       "properties": {
-        "xPlaneTimeline.enabled": {
+        "trackerTimeline.enabled": {
           "type": "boolean",
           "default": true,
           "description": "Record a private Git timeline commit whenever a file is saved."
         },
-        "xPlaneTimeline.includeUntracked": {
+        "trackerTimeline.includeUntracked": {
           "type": "boolean",
           "default": true,
           "description": "Include non-ignored untracked files in each repository snapshot."
         },
-        "xPlaneTimeline.maxVisibleEntries": {
+        "trackerTimeline.maxVisibleEntries": {
           "type": "number",
           "default": 250,
           "minimum": 10,
