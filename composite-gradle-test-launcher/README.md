@@ -328,3 +328,12 @@ Code Flow captures the instrumented receiver (`this`) both when a method is ente
 - Call-tree boundaries have clearer hierarchy and reduced visual weight.
 - State comparison becomes responsive at narrower editor widths.
 - Changed values receive stronger, localized emphasis.
+
+
+## Replay hierarchy cleanup (0.1.83)
+
+- Shortened lifecycle labels to Call, Entry, Exit, and Resume.
+- Removed the duplicate floating source-location label above the code card.
+- Added concise return/exception summaries to invocation rows.
+- Tightened tree indentation and visually separated boundary types.
+- Simple calls start collapsed; changed and exceptional paths expand automatically.
