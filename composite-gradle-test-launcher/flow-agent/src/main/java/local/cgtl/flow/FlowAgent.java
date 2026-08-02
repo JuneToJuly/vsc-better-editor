@@ -19,17 +19,41 @@ public final class FlowAgent {
       Class<?> matchers = Class.forName("net.bytebuddy.matcher.ElementMatchers", true, loader);
       Class<?> advice = Class.forName("net.bytebuddy.asm.Advice", true, loader);
       Object matcher = buildMatcher(matchers);
-      Object builder = call(builderDefault.getConstructor().newInstance(), "type", matcher);
+      Object builder = builderDefault.getConstructor().newInstance();
+      Class<?> listenerType = Class.forName("net.bytebuddy.agent.builder.AgentBuilder$Listener", true, loader);
+      Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{listenerType}, (proxy, method, values) -> {
+        if ("onError".equals(method.getName())) {
+          String typeName = values != null && values.length > 0 ? String.valueOf(values[0]) : "<unknown>";
+          Throwable error = values != null && values.length > 4 && values[4] instanceof Throwable ? (Throwable) values[4] : null;
+          System.err.println("[CGTL FLOW] Skipping " + typeName + " after transformation error: " + error);
+          if (error != null) error.printStackTrace(System.err);
+        }
+        if ("toString".equals(method.getName())) return "CGTL Snapshot Listener";
+        if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+        if ("equals".equals(method.getName())) return proxy == (values == null ? null : values[0]);
+        return null;
+      });
+      builder = call(builder, "with", listener);
+      builder = call(builder, "type", matcher);
       InvocationHandler handler = (proxy, method, values) -> {
         if ("transform".equals(method.getName())) {
           Object dynamicBuilder = values[0];
           String typeName = String.valueOf(values[1]);
-          Object methodMatcher = staticCall(matchers, "isMethod");
-          methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAbstract")));
-          methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isNative")));
-          Object visitor = staticCall(advice, "to", MethodAdvice.class);
-          System.err.println("[CGTL FLOW] Snapshot tracing " + typeName);
-          return call(dynamicBuilder, "visit", call(visitor, "on", methodMatcher));
+          try {
+            Object methodMatcher = staticCall(matchers, "isMethod");
+            methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAbstract")));
+            methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isNative")));
+            methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isSynthetic")));
+            methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isBridge")));
+            Object visitor = staticCall(advice, "to", MethodAdvice.class);
+            Object transformed = call(dynamicBuilder, "visit", call(visitor, "on", methodMatcher));
+            System.err.println("[CGTL FLOW] Snapshot tracing " + typeName);
+            return transformed;
+          } catch (Throwable error) {
+            System.err.println("[CGTL FLOW] Skipping " + typeName + " after transformer setup error: " + error);
+            error.printStackTrace(System.err);
+            return dynamicBuilder;
+          }
         }
         if ("toString".equals(method.getName())) return "CGTL Snapshot Transformer";
         if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
@@ -55,7 +79,14 @@ public final class FlowAgent {
       matcher = call(matcher, "or", staticCall(matchers, "named", pkg));
     }
     Object tests = staticCall(matchers, "nameMatches", ".*(?:Test|Tests|IT|ITCase)$");
-    return call(matcher, "and", staticCall(matchers, "not", tests));
+    matcher = call(matcher, "and", staticCall(matchers, "not", tests));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isInterface")));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAnnotation")));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isEnum")));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isRecord")));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isSynthetic")));
+    matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isSubTypeOf", Throwable.class)));
+    return matcher;
   }
   static Object staticCall(Class<?> type, String name, Object... args) throws Exception { return find(type.getMethods(), name, args).invoke(null, args); }
   static Object call(Object target, String name, Object... args) throws Exception { return find(target.getClass().getMethods(), name, args).invoke(target, args); }
@@ -130,13 +161,20 @@ public final class FlowAgent {
 
     public static void exit(long callId, Object receiverAfter, Object returnValue, Throwable thrown) {
       int currentDepth = Math.max(0, depth.get() - 1); depth.set(currentDepth);
-      Call call = calls.get().poll(); long eventId = sequence.incrementAndGet();
+      Deque<Call> stack = calls.get();
+      Call call = stack.poll();
+      Call parentCall = stack.peek();
+      long eventId = sequence.incrementAndGet();
       String className = call == null ? "" : call.className; String methodName = call == null ? "" : call.methodName; String descriptor = call == null ? "" : call.descriptor;
+      String callerReceiverAfter = parentCall == null ? "null" : snapshot(parentCall.receiver, 0, new IdentityHashMap<>());
+      String callerArgumentsAfter = parentCall == null ? "[]" : snapshotArray(parentCall.arguments, new IdentityHashMap<>());
       IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
       write("{\"sequence\":" + eventId + ",\"event\":\"exit\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() + ",\"threadName\":" + quote(Thread.currentThread().getName()) +
         ",\"receiverAfter\":" + snapshot(receiverAfter, 0, new IdentityHashMap<>()) +
+        ",\"callerReceiverAfter\":" + callerReceiverAfter +
+        ",\"callerArgumentsAfter\":" + callerArgumentsAfter +
         ",\"returnValue\":" + snapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + callerJson(call == null ? null : call.caller) + "}");
     }
 
