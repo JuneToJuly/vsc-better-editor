@@ -87,9 +87,10 @@ public final class FlowAgent {
 
     @Advice.OnMethodExit(onThrowable = Throwable.class)
     public static void exit(@Advice.Enter long callId,
+                            @Advice.This(optional = true) Object receiver,
                             @Advice.Return(typing = Assigner.Typing.DYNAMIC) Object returnValue,
                             @Advice.Thrown Throwable thrown) {
-      Recorder.exit(callId, returnValue, thrown);
+      Recorder.exit(callId, receiver, returnValue, thrown);
     }
   }
 
@@ -113,17 +114,21 @@ public final class FlowAgent {
       long callId = sequence.incrementAndGet();
       int currentDepth = depth.get();
       StackTraceElement caller = findCaller(className, methodName);
-      calls.get().push(new Call(callId, className, methodName, descriptor, caller));
+      Deque<Call> stack = calls.get();
+      Call parentCall = stack.peek();
+      String callerReceiver = parentCall == null ? "null" : snapshot(parentCall.receiver, 0, new IdentityHashMap<>());
+      String callerArguments = parentCall == null ? "[]" : snapshotArray(parentCall.arguments, new IdentityHashMap<>());
+      stack.push(new Call(callId, className, methodName, descriptor, caller, receiver, arguments));
       depth.set(currentDepth + 1);
       write("{\"sequence\":" + callId + ",\"event\":\"enter\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() +
-        ",\"threadName\":" + quote(Thread.currentThread().getName()) + callerJson(caller) + ",\"receiver\":" + snapshot(receiver, 0, new IdentityHashMap<>()) +
+        ",\"threadName\":" + quote(Thread.currentThread().getName()) + callerJson(caller) + ",\"callerReceiver\":" + callerReceiver + ",\"callerArguments\":" + callerArguments + ",\"receiver\":" + snapshot(receiver, 0, new IdentityHashMap<>()) +
         ",\"arguments\":" + snapshotArray(arguments, new IdentityHashMap<>()) + "}");
       return callId;
     }
 
-    public static void exit(long callId, Object returnValue, Throwable thrown) {
+    public static void exit(long callId, Object receiverAfter, Object returnValue, Throwable thrown) {
       int currentDepth = Math.max(0, depth.get() - 1); depth.set(currentDepth);
       Call call = calls.get().poll(); long eventId = sequence.incrementAndGet();
       String className = call == null ? "" : call.className; String methodName = call == null ? "" : call.methodName; String descriptor = call == null ? "" : call.descriptor;
@@ -131,6 +136,7 @@ public final class FlowAgent {
       write("{\"sequence\":" + eventId + ",\"event\":\"exit\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() + ",\"threadName\":" + quote(Thread.currentThread().getName()) +
+        ",\"receiverAfter\":" + snapshot(receiverAfter, 0, new IdentityHashMap<>()) +
         ",\"returnValue\":" + snapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + callerJson(call == null ? null : call.caller) + "}");
     }
 
@@ -191,6 +197,6 @@ public final class FlowAgent {
     private static String safeText(Object value) { try { return limit(String.valueOf(value), 500); } catch (Throwable ignored) { return "<toString failed>"; } }
     private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max) + "…"; }
     private static String quote(String value) { if (value == null) return "null"; return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n") + "\""; }
-    private static final class Call { final long id; final String className, methodName, descriptor; final StackTraceElement caller; Call(long id,String c,String m,String d,StackTraceElement caller){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;this.caller=caller;} }
+    private static final class Call { final long id; final String className, methodName, descriptor; final StackTraceElement caller; final Object receiver; final Object[] arguments; Call(long id,String c,String m,String d,StackTraceElement caller,Object receiver,Object[] arguments){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;this.caller=caller;this.receiver=receiver;this.arguments=arguments == null ? new Object[0] : arguments.clone();} }
   }
 }

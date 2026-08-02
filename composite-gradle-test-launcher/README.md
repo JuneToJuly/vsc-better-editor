@@ -313,3 +313,7 @@ The complete flow-agent source is included under `flow-agent/`. The runtime JAR 
 ## Call-site replay
 
 Code Flow records the live JVM caller stack frame for every method entry. The replay expands nested calls into explicit call-site, method entry, method return, and caller-resume steps. Caller source is resolved from the fully qualified class name, including `src/test` for the initiating test method.
+
+## Flow snapshots after return
+
+Code Flow captures the instrumented receiver (`this`) both when a method is entered and when it exits. Return and caller-resume replay steps display the post-method receiver snapshot together with the return value or thrown exception. This makes mutations performed by the method visible after control returns.
