@@ -11,6 +11,8 @@ let lastInvocation;
 let statusItem;
 let extensionContext;
 let resultsViewProvider;
+let executedCodePanel;
+let flowReplayPanel;
 let testHistory = [];
 let codeLensProviderInstance;
 let projectTestsProvider;
@@ -26,6 +28,7 @@ let debugEvaluateHistory = [];
 let debugEvaluateCurrentModel;
 let coverageIndex = {};
 const changedProductionPaths = new Set();
+const changedProductionMethods = new Map();
 let executedLineDecoration;
 let lastPassedDecoration;
 let lastFailedDecoration;
@@ -47,8 +50,10 @@ async function activate(context) {
   register(context, 'compositeGradleTests.debugMethod', () => launchFromEditor('method', true));
   register(context, 'compositeGradleTests.runClass', () => launchFromEditor('class', false));
   register(context, 'compositeGradleTests.debugClass', () => launchFromEditor('class', true));
-  register(context, 'compositeGradleTests.runMethodWithFlow', () => launchFromEditor('method', false, undefined, true));
-  register(context, 'compositeGradleTests.runClassWithFlow', () => launchFromEditor('class', false, undefined, true));
+  register(context, 'compositeGradleTests.runMethodWithReport', () => launchFromEditor('method', false, undefined, 'report'));
+  register(context, 'compositeGradleTests.runClassWithReport', () => launchFromEditor('class', false, undefined, 'report'));
+  register(context, 'compositeGradleTests.runMethodWithFlow', () => launchFromEditor('method', false, undefined, 'flow'));
+  register(context, 'compositeGradleTests.runClassWithFlow', () => launchFromEditor('class', false, undefined, 'flow'));
   register(context, 'compositeGradleTests.repeatLast', repeatLast);
   register(context, 'compositeGradleTests.openLastTest', openLastTest);
   register(context, 'compositeGradleTests.stop', stopCurrent);
@@ -114,11 +119,14 @@ async function activate(context) {
     }
   }));
 
-  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(async event => {
     if (event.document.languageId === 'java') {
       const changedPath = normalizePath(event.document.uri.fsPath);
       invalidatedSourcePaths.add(changedPath);
-      if (/\/src\/main\/(?:java|kotlin)\//.test(changedPath)) changedProductionPaths.add(changedPath);
+      if (/\/src\/main\/(?:java|kotlin)\//.test(changedPath)) {
+        changedProductionPaths.add(changedPath);
+        await recordModifiedMethods(event);
+      }
       codeLensProviderInstance.refresh();
       refreshLastRunDecorations();
       projectTestsProvider?.refreshStatuses();
@@ -139,7 +147,7 @@ function register(context, command, handler) {
   }));
 }
 
-async function launchFromEditor(scope, debug, providedTarget, forceCoverage = false) {
+async function launchFromEditor(scope, debug, providedTarget, analysisMode = 'normal') {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'java') {
     throw new Error('Open a Java test file first.');
@@ -153,7 +161,8 @@ async function launchFromEditor(scope, debug, providedTarget, forceCoverage = fa
   }
 
   const invocation = await createInvocation(editor.document.uri, target, debug);
-  if (forceCoverage) invocation.captureCoverage = true;
+  if (analysisMode === 'report') { invocation.captureCoverage = true; invocation.captureFlow = false; invocation.analysisMode = 'report'; }
+  if (analysisMode === 'flow') { invocation.captureCoverage = false; invocation.captureFlow = true; invocation.analysisMode = 'flow'; }
   await executeInvocation(invocation);
 }
 
@@ -648,7 +657,51 @@ function isPathInside(file, directory) {
   return file === directory || file.startsWith(`${directory}/`);
 }
 
+
+function refreshRuntimeInitScripts(invocation) {
+  const args = Array.isArray(invocation.args) ? [...invocation.args] : [];
+  const refreshed = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--init-script' && index + 1 < args.length) {
+      const scriptValue = String(args[index + 1] || '');
+      const basename = path.basename(scriptValue).toLowerCase();
+      if (basename === 'composite-test-logging.init.gradle' || basename === 'composite-test-flow.init.gradle') {
+        index += 1;
+        continue;
+      }
+    }
+    refreshed.push(arg);
+  }
+
+  const loggingEnabled = !!invocation.captureCoverage
+    || refreshed.some(arg => String(arg).startsWith('-Dcgtl.coverageDir='))
+    || args.some((arg, index) => arg === '--init-script'
+      && path.basename(String(args[index + 1] || '')).toLowerCase() === 'composite-test-logging.init.gradle');
+  if (loggingEnabled) {
+    const loggingScript = ensureTestLoggingInitScript();
+    if (!fs.existsSync(loggingScript)) throw new Error(`Failed to create Gradle logging init script: ${loggingScript}`);
+    refreshed.push('--init-script', loggingScript);
+  }
+
+  const flowEnabled = !!invocation.captureFlow
+    || refreshed.some(arg => String(arg).startsWith('-Dcgtl.flow.output='));
+  if (flowEnabled) {
+    const flowScript = ensureFlowInitScript();
+    if (!fs.existsSync(flowScript)) throw new Error(`Failed to create Gradle flow init script: ${flowScript}`);
+    refreshed.push('--init-script', flowScript);
+  }
+
+  return { ...invocation, args: refreshed };
+}
+
 async function executeInvocation(invocation) {
+  // Init scripts live in VS Code global storage, which can be cleared independently
+  // of saved/repeated invocations. Recreate them immediately before spawning Gradle
+  // and replace any stale paths retained by Repeat Last or a copied invocation.
+  invocation = refreshRuntimeInitScripts(invocation);
+
   if (runningProcess) {
     const choice = await vscode.window.showWarningMessage(
       'A Composite Gradle test is already running.',
@@ -661,6 +714,18 @@ async function executeInvocation(invocation) {
   }
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // Code Report and Code Flow are deliberately isolated. JaCoCo and the flow
+  // agent both transform application classes and must never run together.
+  if (invocation.captureFlow) {
+    invocation.captureCoverage = false;
+    invocation.coverageDir = undefined;
+    invocation.args = (invocation.args || []).filter(arg => !String(arg).startsWith('-Dcgtl.coverageDir='));
+  } else if (invocation.captureCoverage) {
+    invocation.captureFlow = false;
+    invocation.flowFile = undefined;
+    invocation.flowDir = undefined;
+    invocation.args = (invocation.args || []).filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
+  }
   if (invocation.captureCoverage) {
     const coverageDir = path.join(extensionContext.globalStorageUri.fsPath, 'coverage', runId);
     fs.mkdirSync(coverageDir, { recursive: true });
@@ -672,6 +737,19 @@ async function executeInvocation(invocation) {
     const argsWithCoverage = [...argsWithoutOldCoverage];
     argsWithCoverage.splice(taskIndex >= 0 ? taskIndex : 0, 0, coverageArg);
     invocation = { ...invocation, coverageDir, args: argsWithCoverage };
+  }
+  if (invocation.captureFlow) {
+    const flowDir = path.join(extensionContext.globalStorageUri.fsPath, 'flow', runId);
+    fs.mkdirSync(flowDir, { recursive: true });
+    const flowFile = path.join(flowDir, 'flow.jsonl');
+    const agentJar = path.join(extensionContext.extensionPath, 'resources', 'cgtl-flow-agent.jar');
+    if (!fs.existsSync(agentJar)) throw new Error('The packaged flow agent could not be found.');
+    ensureFlowInitScript();
+    const flowArgs = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
+    const taskIndex = flowArgs.indexOf(invocation.task);
+    const testPackage = String(invocation.classFilter || invocation.filter || '').split('.').slice(0, -1).join('.');
+    flowArgs.splice(taskIndex >= 0 ? taskIndex : 0, 0, `-Dcgtl.flow.output=${flowFile}`, `-Dcgtl.flow.agent=${agentJar}`, `-Dcgtl.flow.packages=${testPackage}`);
+    invocation = { ...invocation, flowDir, flowFile, captureFlow: true, args: flowArgs };
   }
   lastInvocation = invocation;
   output.clear();
@@ -747,7 +825,15 @@ async function executeInvocation(invocation) {
     statusItem.hide();
 
     const parsed = parseGradleTestOutput(rawOutput, invocation, code);
-    const executedCode = invocation.coverageDir ? await collectExecutedCode(invocation.coverageDir) : [];
+    const rawFlowEvents = invocation.flowFile ? collectFlowEvents(invocation.flowFile) : [];
+    if (invocation.flowFile) {
+      const flowCounts = rawFlowEvents.reduce((counts, event) => { const kind = event.event || 'unknown'; counts[kind] = (counts[kind] || 0) + 1; return counts; }, {});
+      output.appendLine(`[CGTL FLOW] Captured events: enter=${flowCounts.enter || 0}, line=${flowCounts.line || 0}, exit=${flowCounts.exit || 0}`);
+    }
+    const flowEvents = rawFlowEvents.length ? await enrichFlowEvents(rawFlowEvents) : [];
+    const executedCode = invocation.coverageDir
+      ? await collectExecutedCode(invocation.coverageDir)
+      : await executedCodeFromFlow(flowEvents);
     const result = {
       ...runningResult,
       status: parsed.status,
@@ -759,13 +845,16 @@ async function executeInvocation(invocation) {
       failures: parsed.failures,
       events: parsed.events,
       executedCode,
+      flowEvents,
+      flowCaptured: !!invocation.flowFile,
       coverageCaptured: !!invocation.coverageDir,
+      analysisMode: invocation.captureFlow ? 'flow' : (invocation.coverageDir ? 'report' : 'normal'),
       output: rawOutput,
       exitCode: code
     };
 
     await recordResult(result);
-    if (executedCode.length) await updateCoverageIndex(result);
+    if (result.coverageCaptured && executedCode.length) await updateCoverageIndex(result);
     showResultsView(result);
     latestResults.set(invocation.filter, result);
 
@@ -779,13 +868,29 @@ async function executeInvocation(invocation) {
   });
 }
 
+function dependencyResolutionSettings() {
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  return {
+    byteBuddyVersion: String(config.get('byteBuddyVersion', '1.18.7') || '1.18.7').trim(),
+    jacocoVersion: String(config.get('jacocoVersion', '0.8.14') || '0.8.14').trim(),
+    repository: String(config.get('dependencyRepository', '') || '').trim()
+  };
+}
+
+function gradleString(value) {
+  return JSON.stringify(String(value == null ? '' : value));
+}
+
 function ensureTestLoggingInitScript() {
+  const dependencySettings = dependencyResolutionSettings();
   if (!extensionContext) throw new Error('Extension context is unavailable.');
   const directory = extensionContext.globalStorageUri.fsPath;
   fs.mkdirSync(directory, { recursive: true });
   const scriptPath = path.join(directory, 'composite-test-logging.init.gradle');
   const contents = `
 def cgtlCoverageDir = System.getProperty("cgtl.coverageDir")
+def cgtlJacocoVersion = ${gradleString(dependencySettings.jacocoVersion)}
+def cgtlDependencyRepository = ${gradleString(dependencySettings.repository)}
 allprojects { project ->
     def cgtlReportProvider = null
 
@@ -793,7 +898,16 @@ allprojects { project ->
         // Plugin application and report-task registration must happen in the
         // normal project configuration context. Gradle forbids creating tasks
         // while a TaskCollection.configureEach callback is being executed.
+        if (cgtlDependencyRepository) {
+            project.repositories.maven { repository ->
+                repository.url = project.uri(cgtlDependencyRepository)
+            }
+        }
         project.pluginManager.apply("jacoco")
+        def jacocoPluginExtension = project.extensions.findByName("jacoco")
+        if (jacocoPluginExtension != null) {
+            jacocoPluginExtension.toolVersion = cgtlJacocoVersion
+        }
 
         def reportClass = Class.forName(
             "org.gradle.testing.jacoco.tasks.JacocoReport",
@@ -867,6 +981,231 @@ allprojects { project ->
   return scriptPath;
 }
 
+
+function ensureFlowInitScript() {
+  const dependencySettings = dependencyResolutionSettings();
+  const directory = extensionContext.globalStorageUri.fsPath;
+  fs.mkdirSync(directory, { recursive: true });
+  const scriptPath = path.join(directory, 'composite-test-flow.init.gradle');
+  const contents = `
+initscript {
+    repositories {
+        ${dependencySettings.repository ? `maven { url = uri(${gradleString(dependencySettings.repository)}) }` : 'mavenCentral()'}
+    }
+    dependencies { classpath "net.bytebuddy:byte-buddy:${dependencySettings.byteBuddyVersion}" }
+}
+def cgtlFlowOutput = System.getProperty("cgtl.flow.output")
+def cgtlFlowAgent = System.getProperty("cgtl.flow.agent")
+def cgtlFlowPackages = System.getProperty("cgtl.flow.packages", "")
+def cgtlByteBuddyJar = new File(net.bytebuddy.ByteBuddy.protectionDomain.codeSource.location.toURI()).absolutePath
+allprojects { project ->
+    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach { testTask ->
+        if (cgtlFlowOutput && cgtlFlowAgent) {
+            testTask.maxParallelForks = 1
+            testTask.jvmArgs("-javaagent:" + cgtlFlowAgent)
+            testTask.jvmArgs("-Xbootclasspath/a:" + cgtlByteBuddyJar)
+            testTask.systemProperty("cgtl.flow.output", cgtlFlowOutput)
+            testTask.systemProperty("cgtl.flow.maxEvents", "20000")
+            testTask.systemProperty("cgtl.flow.packages", cgtlFlowPackages)
+            testTask.systemProperty("cgtl.flow.byteBuddyJar", cgtlByteBuddyJar)
+        }
+    }
+}
+`;
+  if (!fs.existsSync(scriptPath) || fs.readFileSync(scriptPath, 'utf8') !== contents) fs.writeFileSync(scriptPath, contents, 'utf8');
+  return scriptPath;
+}
+
+function collectFlowEvents(flowFile) {
+  if (!flowFile || !fs.existsSync(flowFile)) return [];
+  try {
+    return fs.readFileSync(flowFile, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch (_) { return undefined; }
+    }).filter(Boolean).sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
+  } catch (_) { return []; }
+}
+
+
+async function enrichFlowEvents(events) {
+  const cache = new Map();
+  const enriched = [];
+  for (const event of events || []) {
+    if (!event.className || !event.methodName) { enriched.push(event); continue; }
+    const topLevelClass = String(event.className).split('$')[0];
+    let info = cache.get(`${topLevelClass}#${event.methodName}`);
+    if (info === undefined) {
+      const simple = topLevelClass.split('.').pop();
+      const candidates = await vscode.workspace.findFiles(`**/${simple}.java`, '**/{build,bin,.gradle}/**', 20);
+      info = null;
+      for (const uri of candidates) {
+        try {
+          const document = await vscode.workspace.openTextDocument(uri);
+          const parsed = await parseJavaDocument(document);
+          const method = parsed.methods.find(item => item.name === event.methodName);
+          if (method) {
+            info = {
+              sourcePath: uri.fsPath,
+              sourceFile: path.basename(uri.fsPath),
+              line: method.range.start.line + 1,
+              endLine: method.range.end.line + 1
+            };
+            break;
+          }
+        } catch (_) {}
+      }
+      cache.set(`${topLevelClass}#${event.methodName}`, info);
+    }
+    if (!info) {
+      enriched.push(event);
+    } else if (event.event === 'line') {
+      // Preserve the line emitted by the agent. Method metadata is used only
+      // to resolve the source file and preview bounds.
+      enriched.push({
+        ...event,
+        sourcePath: info.sourcePath,
+        sourceFile: event.sourceFile || info.sourceFile,
+        endLine: info.endLine,
+        locationKind: 'executed-line'
+      });
+    } else {
+      enriched.push({ ...event, ...info, locationKind: event.event === 'exit' ? 'method-exit' : 'method-entry' });
+    }
+  }
+  return enriched;
+}
+
+
+async function executedCodeFromFlow(events) {
+  const byFile = new Map();
+  for (const event of events || []) {
+    if (event.event !== 'line' || !event.line || !event.className) continue;
+    const simple = String(event.className).split('.').pop().split('$')[0];
+    const candidates = await vscode.workspace.findFiles(`**/${simple}.java`, '**/{build,bin,.gradle}/**', 20);
+    const sourcePath = candidates[0]?.fsPath;
+    const key = sourcePath || `${String(event.className).replace(/\./g, '/')}.java`;
+    const item = byFile.get(key) || { sourcePath, relativePath: event.sourceFile || `${simple}.java`, lines: new Set() };
+    item.lines.add(Number(event.line));
+    byFile.set(key, item);
+  }
+  return [...byFile.values()].map(item => ({ ...item, lines: [...item.lines].sort((a,b)=>a-b) }));
+}
+
+function showFlowReplayPanel(result) {
+  const lines = (result?.flowEvents || []).filter(event => event.event === 'line');
+  const methods = (result?.flowEvents || []).filter(event => event.event === 'enter');
+  if (!lines.length && !methods.length) {
+    vscode.window.showInformationMessage('No ordered flow events were captured for this run.');
+    return;
+  }
+  if (!flowReplayPanel) {
+    flowReplayPanel = vscode.window.createWebviewPanel('compositeGradleTests.flowReplay', 'Test Flow', vscode.ViewColumn.Beside, { enableScripts: true, retainContextWhenHidden: true });
+    flowReplayPanel.onDidDispose(() => { flowReplayPanel = undefined; });
+    flowReplayPanel.webview.onDidReceiveMessage(async message => {
+      if (message.command !== 'openLine' && message.command !== 'openMethod') return;
+      const simple = String(message.className || '').split('.').pop().split('$')[0];
+      const files = await vscode.workspace.findFiles(`**/${simple}.java`, '**/{build,bin,.gradle}/**', 20);
+      if (!files.length) return;
+      const document = await vscode.workspace.openTextDocument(files[0]);
+      if (message.command === 'openLine') {
+        const line = Math.max(0, Number(message.line || 1) - 1);
+        await showNavigationDocument(document, new vscode.Position(line, 0), files[0]);
+      } else {
+        const parsed = await parseJavaDocument(document);
+        const method = parsed.methods.find(item => item.name === message.methodName);
+        await showNavigationDocument(document, method?.range?.start || new vscode.Position(0, 0), files[0]);
+      }
+    });
+  }
+  flowReplayPanel.title = `Execution Replay — ${result.displayName || 'Test'}`;
+  flowReplayPanel.webview.html = renderFlowReplayHtml(result);
+  flowReplayPanel.reveal(vscode.ViewColumn.Beside, false);
+}
+
+function renderFlowReplayHtml(result) {
+  const allEvents = (result.flowEvents || []);
+  const lineEntries = allEvents.filter(event => event.event === 'line');
+  const methodEntries = allEvents.filter(event => event.event === 'enter');
+  // Once real line events exist, show the complete mixed trace so method
+  // boundaries and source-line execution can be followed together.
+  const entries = allEvents.filter(event => event.event === 'enter' || event.event === 'line' || event.event === 'exit');
+  const lineMode = lineEntries.length > 0;
+
+  // Pair entry and exit snapshots by the call id emitted by the agent. This lets
+  // an entry step show the eventual return value while preserving the ordered
+  // exit event in the timeline. Fall back to a per-thread call stack for older
+  // traces that did not include callId.
+  const entryByCallId = new Map();
+  const exitByCallId = new Map();
+  const openCallsByThread = new Map();
+  for (const event of entries) {
+    const callId = event.callId ?? event.call ?? event.invocationId;
+    const threadKey = String(event.thread ?? event.threadId ?? 'main');
+    if (event.event === 'enter') {
+      if (callId !== undefined && callId !== null) entryByCallId.set(String(callId), event);
+      const stack = openCallsByThread.get(threadKey) || [];
+      stack.push(event);
+      openCallsByThread.set(threadKey, stack);
+    } else if (event.event === 'exit') {
+      let entry;
+      if (callId !== undefined && callId !== null) {
+        exitByCallId.set(String(callId), event);
+        entry = entryByCallId.get(String(callId));
+      }
+      const stack = openCallsByThread.get(threadKey) || [];
+      if (!entry && stack.length) entry = stack[stack.length - 1];
+      if (entry) {
+        entry.__outcome = { returnValue: event.returnValue, thrown: event.thrown, exitSequence: event.sequence };
+        event.__entrySnapshot = { receiver: entry.receiver, arguments: entry.arguments };
+        const index = stack.lastIndexOf(entry);
+        if (index >= 0) stack.splice(index, 1);
+      }
+    }
+  }
+  for (const [callId, exit] of exitByCallId) {
+    const entry = entryByCallId.get(callId);
+    if (entry && !entry.__outcome) {
+      entry.__outcome = { returnValue: exit.returnValue, thrown: exit.thrown, exitSequence: exit.sequence };
+      exit.__entrySnapshot = { receiver: entry.receiver, arguments: entry.arguments };
+    }
+  }
+
+  const enrichedEntries = entries.map(event => {
+    const sourcePath = event.sourcePath;
+    const targetLine = Math.max(1, Number(event.line || 1));
+    let sourcePreview = [];
+    if (sourcePath && fs.existsSync(sourcePath)) {
+      try {
+        const sourceLines = fs.readFileSync(sourcePath, 'utf8').split(/\r?\n/);
+        const startLine = Math.max(1, targetLine - 5);
+        const endLine = Math.min(sourceLines.length, Math.max(targetLine + 7, Number(event.endLine || targetLine + 4)));
+        sourcePreview = sourceLines.slice(startLine - 1, endLine).map((text, offset) => ({
+          line: startLine + offset,
+          text,
+          active: startLine + offset === targetLine
+        }));
+      } catch (_) {}
+    }
+    return { ...event, sourcePreview };
+  });
+  const data = JSON.stringify(enrichedEntries).replace(/</g, '\\u003c');
+  return `<!doctype html><html><head><meta charset="UTF-8"><style>
+  *{box-sizing:border-box}body{margin:0;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family);overflow:hidden}.shell{height:100vh;display:grid;grid-template-columns:minmax(260px,320px) 1fr}.timeline{border-right:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background);overflow:auto}.head{position:sticky;top:0;background:var(--vscode-sideBar-background);padding:14px 14px 12px;border-bottom:1px solid var(--vscode-panel-border);z-index:2}.head strong{font-size:13px;letter-spacing:.02em}.head small{display:block;color:var(--vscode-descriptionForeground);margin-top:4px;line-height:1.35}.step{width:100%;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 70%,transparent);background:transparent;color:inherit;text-align:left;padding:10px 12px;display:grid;grid-template-columns:28px 1fr;cursor:pointer;position:relative}.step:hover{background:var(--vscode-list-hoverBackground)}.step.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.step.active:before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--vscode-focusBorder)}.seq{color:var(--vscode-textLink-foreground);font-variant-numeric:tabular-nums;padding-top:1px}.where{font-family:var(--vscode-editor-font-family);font-size:12px;min-width:0}.where b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.where small{display:block;opacity:.68;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.viewer{display:flex;flex-direction:column;min-width:0;overflow:hidden}.toolbar{display:flex;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}button{font:inherit}.toolbar button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:5px 11px;cursor:pointer}.toolbar button.primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}.toolbar button:disabled{opacity:.45;cursor:default}.position{margin-left:auto;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}.progress{height:2px;background:var(--vscode-panel-border)}.progress>span{display:block;height:100%;background:var(--vscode-progressBar-background);transition:width .12s ease}.content{padding:18px 22px 28px;overflow:auto}.current-head{display:flex;align-items:flex-start;gap:18px;margin-bottom:16px}.identity{min-width:0}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:10px;color:var(--vscode-descriptionForeground);margin-bottom:6px}.identity h1{font:600 19px/1.25 var(--vscode-editor-font-family);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.identity p{font:12px/1.4 var(--vscode-editor-font-family);color:var(--vscode-descriptionForeground);margin:5px 0 0}.meta{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{border:1px solid var(--vscode-panel-border);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}.code-card{border:1px solid var(--vscode-panel-border);background:var(--vscode-textCodeBlock-background);border-radius:4px;overflow:hidden}.code-title{display:flex;align-items:center;padding:9px 12px;border-bottom:1px solid var(--vscode-panel-border);font-size:11px;color:var(--vscode-descriptionForeground)}.code-title strong{color:var(--vscode-editor-foreground);font-family:var(--vscode-editor-font-family);font-size:12px}.code-title span{margin-left:auto}.code{font:13px/1.65 var(--vscode-editor-font-family);padding:6px 0;overflow:auto}.line{display:grid;grid-template-columns:56px 1fr;min-height:22px}.line .num{text-align:right;padding-right:14px;color:var(--vscode-editorLineNumber-foreground);user-select:none}.line .text{white-space:pre;padding-right:18px}.line.active{background:var(--vscode-editor-lineHighlightBackground);box-shadow:inset 3px 0 0 var(--vscode-focusBorder)}.line.active .num{color:var(--vscode-editorLineNumber-activeForeground);font-weight:700}.line.active .text{font-weight:600}.state-card{margin-top:14px;border:1px solid var(--vscode-panel-border);border-radius:4px;overflow:hidden}.state-title{padding:9px 12px;border-bottom:1px solid var(--vscode-panel-border);font-size:12px;font-weight:600}.state-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;background:var(--vscode-panel-border)}.state-section{background:var(--vscode-editor-background);padding:12px;min-height:90px}.state-section h3{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin:0 0 9px}.state-row{font:12px/1.45 var(--vscode-editor-font-family);display:grid;grid-template-columns:minmax(80px,auto) 1fr;gap:10px;padding:3px 0}.state-key{color:var(--vscode-symbolIcon-fieldForeground,var(--vscode-textLink-foreground));overflow:hidden;text-overflow:ellipsis}.state-value{white-space:pre-wrap;word-break:break-word}.state-type{display:block;color:var(--vscode-descriptionForeground);font-size:10px}.state-empty{color:var(--vscode-descriptionForeground);font-size:12px}.empty{border:1px dashed var(--vscode-panel-border);padding:28px;text-align:center;color:var(--vscode-descriptionForeground)}.hint{margin-top:12px;color:var(--vscode-descriptionForeground);font-size:11px}.hint kbd{border:1px solid var(--vscode-panel-border);border-radius:3px;padding:1px 5px;background:var(--vscode-keybindingLabel-background)}
+  </style></head><body><div class="shell"><aside class="timeline"><div class="head"><strong>${lineMode ? 'Execution replay' : 'Method call timeline'}</strong><small>${entries.length} ordered events · method boundaries and repeated lines preserved</small></div><div id="steps"></div></aside><main class="viewer"><div class="toolbar"><button id="prev">← Previous</button><button class="primary" id="next">Next →</button><button id="open">Open source</button><span class="position" id="position"></span></div><div class="progress"><span id="progress"></span></div><div class="content"><div class="current-head"><div class="identity"><div class="eyebrow" id="kind"></div><h1 id="method"></h1><p id="file"></p></div><div class="meta"><span class="pill" id="depth"></span><span class="pill" id="thread"></span></div></div><div class="code-card" id="codeCard"><div class="code-title"><strong id="codeFile"></strong><span id="codeLine"></span></div><div class="code" id="code"></div></div><div class="empty" id="empty">Source preview is unavailable for this event. Use Open source to navigate to the nearest method location.</div><div class="state-card"><div class="state-title">Frame snapshot</div><div class="state-grid"><section class="state-section"><h3>This</h3><div id="receiver"></div></section><section class="state-section"><h3>Arguments</h3><div id="arguments"></div></section><section class="state-section"><h3>Outcome</h3><div id="outcome"></div></section></div></div><div class="hint"><kbd>j</kbd>/<kbd>k</kbd> or arrow keys move through execution. <kbd>Enter</kbd> opens the current source location.</div></div></main></div><script>
+  const vscode=acquireVsCodeApi(),events=${data},lineMode=${lineMode};let index=0;const steps=document.getElementById('steps');
+  const simpleName=e=>String(e.className||'').split('.').pop();
+  const eventLabel=e=>e.event==='line'?'Line '+e.line:(e.event==='exit'?'Return':'Enter');
+  const eventSymbol=e=>e.event==='line'?'•':(e.event==='exit'?'↩':'▶');
+  events.forEach((e,i)=>{const b=document.createElement('button');b.className='step '+String(e.event||'');const loc=e.line?((e.sourceFile||simpleName(e)+'.java')+':'+e.line):eventLabel(e);const indent=Math.min(10,Number(e.depth||0))*12;b.innerHTML='<span class="seq">'+eventSymbol(e)+'</span><span class="where" style="padding-left:'+indent+'px"><b>'+simpleName(e)+'.'+e.methodName+'()</b><small>'+loc+'</small></span>';b.onclick=()=>{index=i;render()};steps.appendChild(b)});
+  function renderCode(e){const code=document.getElementById('code'),card=document.getElementById('codeCard'),empty=document.getElementById('empty');code.innerHTML='';if(!e.sourcePreview||!e.sourcePreview.length){card.style.display='none';empty.style.display='block';return}card.style.display='block';empty.style.display='none';document.getElementById('codeFile').textContent=e.sourceFile||simpleName(e)+'.java';document.getElementById('codeLine').textContent=e.line?'line '+e.line:'';e.sourcePreview.forEach(row=>{const div=document.createElement('div');div.className='line'+(row.active?' active':'');const n=document.createElement('span');n.className='num';n.textContent=row.line;const t=document.createElement('span');t.className='text';t.textContent=row.text||' ';div.append(n,t);div.onclick=()=>vscode.postMessage({command:'openLine',className:e.className,methodName:e.methodName,line:row.line});code.appendChild(div)});code.querySelector('.active')?.scrollIntoView({block:'center'});}
+  function valueText(v){if(v===null||v===undefined)return 'null';if(typeof v!=='object')return String(v);return v.value!==undefined?String(v.value):(v.type||'object');}
+  function renderObject(target,value,labelPrefix='field'){const root=document.getElementById(target);root.innerHTML='';if(value===null||value===undefined){root.innerHTML='<div class="state-empty">Not available</div>';return;}const add=(key,v)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent=key;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);root.appendChild(row);};if(value.fields&&Object.keys(value.fields).length){add('this',value);Object.entries(value.fields).forEach(([k,v])=>add(k,v));}else add(labelPrefix,value);}
+  function renderArguments(values){const root=document.getElementById('arguments');root.innerHTML='';if(!Array.isArray(values)||!values.length){root.innerHTML='<div class="state-empty">No arguments</div>';return;}values.forEach((v,i)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent='arg'+i;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);root.appendChild(row);});}
+  function renderState(e){const entrySnapshot=e.__entrySnapshot||{};renderObject('receiver',e.receiver!==undefined?e.receiver:entrySnapshot.receiver,'this');renderArguments(e.arguments!==undefined?e.arguments:entrySnapshot.arguments);const outcome=document.getElementById('outcome');outcome.innerHTML='';const add=(key,v)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent=key;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);outcome.appendChild(row);};const result=e.event==='exit'?e:e.__outcome;if(result){if(result.thrown)add('thrown',result.thrown);else add('return',result.returnValue);}else outcome.innerHTML='<div class="state-empty">Method has not returned in this trace</div>'; }
+  function render(){const e=events[index];document.querySelectorAll('.step').forEach((x,i)=>x.classList.toggle('active',i===index));document.querySelectorAll('.step')[index]?.scrollIntoView({block:'nearest'});document.getElementById('kind').textContent=e.event==='line'?'Executed source line':(e.event==='exit'?'Method return':'Method entry');document.getElementById('method').textContent=simpleName(e)+'.'+e.methodName+'()';document.getElementById('file').textContent=e.line?((e.sourceFile||e.className)+':'+e.line):(e.event==='exit'?'Returned from '+e.className:e.className);document.getElementById('depth').textContent='Depth '+Number(e.depth||0);document.getElementById('thread').textContent='Thread '+String(e.thread||e.threadId||'main');document.getElementById('position').textContent=(index+1)+' of '+events.length;document.getElementById('progress').style.width=(((index+1)/events.length)*100)+'%';document.getElementById('prev').disabled=index===0;document.getElementById('next').disabled=index===events.length-1;renderCode(e);renderState(e);}
+  const move=d=>{index=Math.max(0,Math.min(events.length-1,index+d));render()};document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.getElementById('open').onclick=()=>{const e=events[index];vscode.postMessage({command:e.line?'openLine':'openMethod',className:e.className,methodName:e.methodName,line:e.line})};window.addEventListener('keydown',e=>{if(e.key==='j'||e.key==='ArrowDown'||e.key==='ArrowRight'){move(1);e.preventDefault()}if(e.key==='k'||e.key==='ArrowUp'||e.key==='ArrowLeft'){move(-1);e.preventDefault()}if(e.key==='Enter'){document.getElementById('open').click()}});render();
+  </script></body></html>`;
+}
+
 async function collectExecutedCode(coverageDir) {
   if (!coverageDir || !fs.existsSync(coverageDir)) return [];
   const xmlFiles = fs.readdirSync(coverageDir).filter(name => name.endsWith('.xml')).map(name => path.join(coverageDir, name));
@@ -923,9 +1262,83 @@ async function updateCoverageIndex(result) {
   projectTestsProvider?.refreshStatuses();
 }
 
-function affectedCoverageEntries() {
-  if (!changedProductionPaths.size) return [];
-  return Object.values(coverageIndex).filter(entry => (entry.files || []).some(file => file.sourcePath && changedProductionPaths.has(normalizePath(file.sourcePath))));
+function javaMethodKey(method) {
+  return `${method.parentClass?.name || '<type>'}#${method.name}`;
+}
+
+async function recordModifiedMethods(event) {
+  const normalizedPath = normalizePath(event.document.uri.fsPath);
+  const parsed = await parseJavaDocument(event.document);
+  const methods = parsed.methods || [];
+  const modified = changedProductionMethods.get(normalizedPath) || new Set();
+
+  for (const change of event.contentChanges || []) {
+    const startLine = change.range.start.line;
+    // Include the newly inserted extent as well as the replaced original range.
+    const insertedLineCount = Math.max(0, String(change.text || '').split(/\r?\n/).length - 1);
+    const endLine = Math.max(change.range.end.line, startLine + insertedLineCount);
+    for (const method of methods) {
+      if (method.range.start.line <= endLine && method.range.end.line >= startLine) {
+        modified.add(javaMethodKey(method));
+      }
+    }
+  }
+
+  if (modified.size) changedProductionMethods.set(normalizedPath, modified);
+}
+
+async function executedMethodKeysForFile(file) {
+  if (Array.isArray(file.executedMethods) && file.executedMethods.length) {
+    return new Set(file.executedMethods);
+  }
+  if (!file.sourcePath || !fs.existsSync(file.sourcePath)) return new Set();
+  try {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file.sourcePath));
+    const parsed = await parseJavaDocument(document);
+    const executedLines = new Set((file.lines || []).filter(Number.isFinite));
+    return new Set(parsed.methods
+      .filter(method => {
+        const start = method.range.start.line + 1;
+        const end = method.range.end.line + 1;
+        for (const line of executedLines) if (line >= start && line <= end) return true;
+        return false;
+      })
+      .map(javaMethodKey));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+async function affectedCoverageEntries() {
+  if (!changedProductionMethods.size) return [];
+
+  const affected = [];
+  for (const entry of Object.values(coverageIndex)) {
+    let bestMatch;
+    for (const file of entry.files || []) {
+      if (!file.sourcePath) continue;
+      const normalizedPath = normalizePath(file.sourcePath);
+      const modifiedMethods = changedProductionMethods.get(normalizedPath);
+      if (!modifiedMethods?.size) continue;
+
+      const executedMethods = await executedMethodKeysForFile(file);
+      const matchedMethod = [...modifiedMethods].find(key => executedMethods.has(key));
+      if (!matchedMethod) continue;
+
+      const methodName = matchedMethod.split('#').pop();
+      bestMatch = {
+        kind: 'method',
+        methodKey: matchedMethod,
+        sourcePath: file.sourcePath,
+        relativePath: file.relativePath,
+        reason: `Executed production method ${methodName} was modified.`
+      };
+      break;
+    }
+    if (bestMatch) affected.push({ ...entry, affectedMatch: bestMatch });
+  }
+
+  return affected.sort((a, b) => String(a.displayName || a.filter).localeCompare(String(b.displayName || b.filter)));
 }
 
 async function openExecutedCodeLocation(result, sourcePath, line) {
@@ -942,8 +1355,9 @@ async function openExecutedCodeLocation(result, sourcePath, line) {
 }
 
 async function clearAffectedTests() {
-  const count = changedProductionPaths.size;
+  const count = changedProductionMethods.size;
   changedProductionPaths.clear();
+  changedProductionMethods.clear();
   projectTestsProvider?.refreshStatuses();
   if (count) {
     vscode.window.setStatusBarMessage(`Cleared affected-test tracking for ${count} changed ${count === 1 ? 'file' : 'files'}.`, 2500);
@@ -951,7 +1365,7 @@ async function clearAffectedTests() {
 }
 
 async function runAffectedTests() {
-  const affected = affectedCoverageEntries();
+  const affected = await affectedCoverageEntries();
   if (!affected.length) return vscode.window.showInformationMessage('No affected tests are known for the changed production files.');
   for (const entry of affected) {
     const base = entry.invocation;
@@ -1196,9 +1610,21 @@ class CompositeGradleResultsViewProvider {
         vscode.window.setStatusBarMessage('Composite Gradle command copied.', 2500);
       } else if (message.command === 'openExecuted') {
         await openExecutedCodeLocation(selected, message.file, message.line);
-      } else if (message.command === 'rerunFlow') {
+      } else if (message.command === 'expandExecuted') {
+        showExecutedCodePanel(selected);
+      } else if (message.command === 'openFlow') {
+        showFlowReplayPanel(selected);
+      } else if (message.command === 'rerunReport') {
         const next = invocationFromResult(selected, false);
         next.captureCoverage = true;
+        next.captureFlow = false;
+        next.analysisMode = 'report';
+        await executeInvocation(next);
+      } else if (message.command === 'rerunFlow') {
+        const next = invocationFromResult(selected, false);
+        next.captureCoverage = false;
+        next.captureFlow = true;
+        next.analysisMode = 'flow';
         await executeInvocation(next);
       } else if (message.command === 'openSource' || message.command === 'openLocation') {
         let sourcePath = selected.sourcePath;
@@ -1327,7 +1753,7 @@ function renderResultsHtml(current, history) {
     .status.passed{color:var(--vscode-testing-iconPassed)}.status.failed{color:var(--vscode-testing-iconFailed)}.status.skipped{color:var(--vscode-testing-iconSkipped)}.status.running{color:var(--vscode-progressBar-background)}.status.stopped{color:var(--vscode-descriptionForeground)}
     .section{margin-top:16px}.failure-section{margin-top:12px}.section-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section h3{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--vscode-descriptionForeground);margin:0}.console{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.55;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);border-radius:var(--radius);padding:9px 10px;margin:0;max-height:260px;overflow:auto}.failure-nav{display:flex;gap:5px;overflow-x:auto;padding:0 0 8px;margin-bottom:4px}.failure-nav button{flex:0 0 auto;max-width:220px;border:1px solid var(--vscode-panel-border);border-radius:999px;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:4px 8px;cursor:pointer;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.failure-nav button span{color:var(--vscode-testing-iconFailed);margin-right:5px}.failure-nav button:hover{background:var(--vscode-button-secondaryHoverBackground)}.failure-groups{display:flex;flex-direction:column;gap:16px}.failure-group{min-width:0}.failure-test{display:flex;align-items:center;gap:7px;margin:0 0 6px 1px;padding-top:2px;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600}.failure-test-mark{color:var(--vscode-testing-iconFailed);font-size:13px}.failure-card{scroll-margin-top:10px;border:1px solid color-mix(in srgb,var(--vscode-testing-iconFailed) 60%,var(--vscode-panel-border));border-left:3px solid var(--vscode-testing-iconFailed);border-radius:var(--radius);background:color-mix(in srgb,var(--vscode-testing-iconFailed) 5%,var(--vscode-textCodeBlock-background));overflow:hidden}.failure-head{padding:9px 10px;border-bottom:1px solid var(--vscode-panel-border)}.failure-type{font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:700}.failure-message{font-size:11px;margin-top:3px;color:var(--vscode-descriptionForeground)}.comparison{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--vscode-panel-border)}.comparison>div{padding:8px 10px;min-width:0}.comparison>div+div{border-left:1px solid var(--vscode-panel-border)}.comparison label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin-bottom:3px}.comparison code{font-family:var(--vscode-editor-font-family);font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.location{display:block;width:100%;border:0;background:transparent;text-align:left;color:var(--vscode-textLink-foreground);cursor:pointer;padding:7px 10px;font-family:var(--vscode-editor-font-family);font-size:11px}.location:hover{background:var(--vscode-toolbar-hoverBackground)}.frames{margin:0;padding:8px 10px;white-space:pre;overflow:auto;font-family:var(--vscode-editor-font-family);font-size:10px;line-height:1.55}.framework-toggle{width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer;text-align:left;padding:6px 10px;font-size:10px}.framework-toggle:hover{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-foreground)}.framework-frames{display:none;border-top:1px solid var(--vscode-panel-border)}.framework-frames.open{display:block}
     .event-list{display:flex;flex-direction:column;gap:3px}.event{width:100%;border:0;text-align:left;background:transparent;color:inherit;display:grid;grid-template-columns:14px minmax(0,1fr) auto;gap:6px;padding:5px 6px;border-radius:3px;font-family:var(--vscode-editor-font-family);font-size:11px}.event:hover{background:var(--vscode-list-hoverBackground)}.event .event-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-open{font-family:var(--vscode-font-family);font-size:9px;color:var(--vscode-textLink-foreground);opacity:0}.event.failed:hover .event-open,.event.failed:focus .event-open{opacity:1}.event.failed{cursor:pointer}.event.passed .event-mark{color:var(--vscode-testing-iconPassed)}.event.failed .event-mark{color:var(--vscode-testing-iconFailed)}.event.skipped .event-mark{color:var(--vscode-testing-iconSkipped)}
-    .coverage-files{display:flex;flex-direction:column;gap:10px}.coverage-file{border:1px solid var(--vscode-panel-border);border-radius:var(--radius);overflow:hidden;background:var(--vscode-editor-background)}.coverage-file-head{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-textCodeBlock-background) 82%,var(--vscode-sideBar-background))}.coverage-file-name{min-width:0;flex:1;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coverage-file-meta{font-size:9px;color:var(--vscode-descriptionForeground);white-space:nowrap}.coverage-open{border:0;background:transparent;color:var(--vscode-textLink-foreground);font-size:10px;padding:2px 4px;cursor:pointer}.coverage-open:hover{background:var(--vscode-toolbar-hoverBackground)}.coverage-code{font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.5;overflow-x:auto}.coverage-row{width:100%;display:grid;grid-template-columns:38px minmax(max-content,1fr);border:0;background:transparent;color:var(--vscode-foreground);padding:0;text-align:left;cursor:pointer}.coverage-row:hover{background:var(--vscode-list-hoverBackground)}.coverage-row.context{opacity:.42}.coverage-row.executed{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 7%,transparent)}.coverage-row.executed:hover{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 13%,var(--vscode-list-hoverBackground))}.coverage-number{padding:2px 8px 2px 4px;text-align:right;color:var(--vscode-editorLineNumber-foreground);border-right:1px solid var(--vscode-panel-border);font-variant-numeric:tabular-nums;user-select:none}.coverage-row.executed .coverage-number{color:var(--vscode-textLink-foreground);font-weight:600}.coverage-source{padding:2px 9px;white-space:pre}.coverage-gap{height:7px;border-top:1px dotted var(--vscode-panel-border);opacity:.6}.empty-output{padding:8px 10px;border:1px dashed var(--vscode-panel-border);border-radius:var(--radius);color:var(--vscode-descriptionForeground);font-size:11px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
+    .coverage-title-actions{display:flex;align-items:center;gap:8px}.coverage-expand{border:1px solid var(--vscode-panel-border);border-radius:3px;background:transparent;color:var(--vscode-textLink-foreground);font-size:10px;padding:2px 6px;cursor:pointer}.coverage-expand:hover{background:var(--vscode-toolbar-hoverBackground)}.coverage-files{display:flex;flex-direction:column;gap:10px}.coverage-file{border:1px solid var(--vscode-panel-border);border-radius:var(--radius);overflow:hidden;background:var(--vscode-editor-background)}.coverage-file-head{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-textCodeBlock-background) 82%,var(--vscode-sideBar-background))}.coverage-file-name{min-width:0;flex:1;font-family:var(--vscode-editor-font-family);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.coverage-file-meta{font-size:9px;color:var(--vscode-descriptionForeground);white-space:nowrap}.coverage-open{border:0;background:transparent;color:var(--vscode-textLink-foreground);font-size:10px;padding:2px 4px;cursor:pointer}.coverage-open:hover{background:var(--vscode-toolbar-hoverBackground)}.coverage-code{font-family:var(--vscode-editor-font-family);font-size:11px;line-height:1.5;overflow-x:auto}.coverage-row{width:100%;display:grid;grid-template-columns:38px minmax(max-content,1fr);border:0;background:transparent;color:var(--vscode-foreground);padding:0;text-align:left;cursor:pointer}.coverage-row:hover{background:var(--vscode-list-hoverBackground)}.coverage-row.context{opacity:.42}.coverage-row.executed{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 7%,transparent)}.coverage-row.executed:hover{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 13%,var(--vscode-list-hoverBackground))}.coverage-number{padding:2px 8px 2px 4px;text-align:right;color:var(--vscode-editorLineNumber-foreground);border-right:1px solid var(--vscode-panel-border);font-variant-numeric:tabular-nums;user-select:none}.coverage-row.executed .coverage-number{color:var(--vscode-textLink-foreground);font-weight:600}.coverage-source{padding:2px 9px;white-space:pre}.coverage-gap{height:7px;border-top:1px dotted var(--vscode-panel-border);opacity:.6}.empty-output{padding:8px 10px;border:1px dashed var(--vscode-panel-border);border-radius:var(--radius);color:var(--vscode-descriptionForeground);font-size:11px}.empty-state{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--vscode-descriptionForeground);gap:5px}.empty-state strong{color:var(--vscode-foreground);font-size:13px}.empty-icon{font-size:24px}
   </style></head><body><section class="history"><div class="header"><h3>Recent runs</h3><button data-command="clear">Clear</button></div><div class="history-list">${rows || '<div class="empty-history">No recent runs.</div>'}</div></section><section class="detail-wrap"><div class="detail-label">Selected run</div><main class="detail">${detail}</main></section>
   <script nonce="${nonce}">const vscode=acquireVsCodeApi();let selectedIndex=Math.max(0,[...document.querySelectorAll('.history-row')].findIndex(x=>x.classList.contains('selected')));function selectIndex(next){const rows=[...document.querySelectorAll('.history-row')];if(!rows.length)return;selectedIndex=Math.max(0,Math.min(next,rows.length-1));rows[selectedIndex].click();rows[selectedIndex].scrollIntoView({block:'nearest'});}document.addEventListener('click',event=>{const button=event.target.closest('button[data-command]');if(!button)return;if(button.dataset.command==='jumpFailure'){document.getElementById(button.dataset.target)?.scrollIntoView({behavior:'smooth',block:'start'});return;}if(button.dataset.command==='toggleFramework'){const target=document.getElementById(button.dataset.target);if(target){target.classList.toggle('open');button.textContent=target.classList.contains('open')?'Hide framework frames':button.dataset.label;}return;}const message={command:button.dataset.command,id:button.dataset.id};if(button.dataset.line)message.line=Number(button.dataset.line);if(button.dataset.file)message.file=button.dataset.file;if(button.dataset.class)message.className=button.dataset.class;vscode.postMessage(message);});document.addEventListener('keydown',event=>{if(['INPUT','TEXTAREA'].includes(event.target.tagName))return;const key=event.key.toLowerCase();if(key==='j'||event.key==='ArrowDown'){event.preventDefault();selectIndex(selectedIndex+1);}else if(key==='k'||event.key==='ArrowUp'){event.preventDefault();selectIndex(selectedIndex-1);}else if(key==='enter'||key==='o'){event.preventDefault();document.querySelector('[data-command="openSource"]')?.click();}else if(key==='r'){event.preventDefault();document.querySelector('[data-command="rerun"]')?.click();}else if(key==='d'){event.preventDefault();document.querySelector('[data-command="debug"]')?.click();}else if(key==='f'){event.preventDefault();document.querySelector('.failure-card')?.scrollIntoView({behavior:'smooth',block:'start'});}});document.body.tabIndex=0;document.body.focus();</script></body></html>`;
 }
@@ -1356,8 +1782,15 @@ function renderResultDetail(result) {
   const showResults = isClass || eventLines.length > 1;
   const executedFileCount = Array.isArray(result.executedCode) ? result.executedCode.length : 0;
   const executedLineCount = Array.isArray(result.executedCode) ? result.executedCode.reduce((total, file) => total + (Array.isArray(file.lines) ? file.lines.length : 0), 0) : 0;
+  const canExpandExecuted = executedLineCount >= 8 || executedFileCount >= 2;
+  const flowLineCount = Array.isArray(result.flowEvents) ? result.flowEvents.filter(event => event.event === 'line').length : 0;
+  const flowMethodCount = Array.isArray(result.flowEvents) ? result.flowEvents.filter(event => event.event === 'enter').length : 0;
+  const flowEntryCount = flowLineCount || flowMethodCount;
+  const flowSection = flowEntryCount
+    ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3><button class="coverage-expand" data-command="openFlow" data-id="${escapeHtml(result.id)}">Open replay</button></div><div class="empty-output">${flowLineCount ? `${flowLineCount} ordered source-line events` : `${flowMethodCount} ordered method calls with source locations`} captured. Open replay to walk through the execution.</div></div>`
+    : (result.flowCaptured ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3></div><div class="empty-output">Flow capture completed, but no flow events were recorded.</div></div>` : '');
   const executedSection = executedFileCount
-    ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
+    ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><div class="coverage-title-actions"><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span>${canExpandExecuted ? `<button class="coverage-expand" data-command="expandExecuted" data-id="${escapeHtml(result.id)}">Open expanded</button>` : ''}</div></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
     : (result.coverageCaptured ? `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>` : '');
   const resultSection = showResults && eventLines.length
     ? `<div class="section"><div class="section-title"><h3>Results · ${eventLines.length}</h3></div><div class="event-list">${eventLines.map(line => {
@@ -1372,8 +1805,85 @@ function renderResultDetail(result) {
       }).join('')}</div></div>` : '';
 
   return `<div class="hero"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div><h1>${escapeHtml(simpleName)}</h1><div class="subtitle" title="${escapeHtml(result.filter)}">${escapeHtml([className && className !== simpleName ? className : '', result.task].filter(Boolean).join(' · '))}</div></div><span class="hero-duration">${formatDuration(result.durationMs)}</span></div>
-    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open test</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button data-command="rerunFlow" data-id="${escapeHtml(result.id)}">Capture flow</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
-    ${failureSection}${consoleSection}${executedSection}${resultSection}`;
+    <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open test</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button data-command="rerunReport" data-id="${escapeHtml(result.id)}">Code report</button><button data-command="rerunFlow" data-id="${escapeHtml(result.id)}">Code flow</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
+    ${failureSection}${consoleSection}${flowSection}${executedSection}${resultSection}`;
+}
+
+
+function showExecutedCodePanel(result) {
+  if (!result || !Array.isArray(result.executedCode) || !result.executedCode.length) {
+    vscode.window.showInformationMessage('No executed code is available for this test run.');
+    return;
+  }
+  if (executedCodePanel) {
+    executedCodePanel.reveal(vscode.ViewColumn.Beside, false);
+  } else {
+    executedCodePanel = vscode.window.createWebviewPanel(
+      'compositeGradleTests.executedCode',
+      'Executed Code',
+      vscode.ViewColumn.Beside,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    executedCodePanel.onDidDispose(() => { executedCodePanel = undefined; });
+    executedCodePanel.webview.onDidReceiveMessage(async message => {
+      try {
+        if (message.command === 'openExecuted') {
+          const selected = testHistory.find(item => item.id === message.id) || result;
+          await openExecutedCodeLocation(selected, message.file, Number(message.line));
+        }
+      } catch (error) {
+        vscode.window.showErrorMessage(`Composite Gradle Tests: ${error.message || error}`);
+      }
+    });
+  }
+  executedCodePanel.title = `Executed Code — ${result.displayName || 'Test'}`;
+  executedCodePanel.webview.html = renderExecutedCodeWorkspaceHtml(result);
+}
+
+function renderExecutedCodeWorkspaceHtml(result) {
+  const nonce = Math.random().toString(36).slice(2);
+  const files = Array.isArray(result.executedCode) ? result.executedCode : [];
+  const totalLines = files.reduce((total, file) => total + (Array.isArray(file.lines) ? file.lines.length : 0), 0);
+  const nav = files.map((file, index) => {
+    const sourcePath = String(file.sourcePath || '');
+    const name = path.basename(sourcePath || file.relativePath || `Source ${index + 1}`);
+    const count = Array.isArray(file.lines) ? file.lines.length : 0;
+    return `<button class="file-nav ${index === 0 ? 'active' : ''}" data-target="coverage-file-${index}"><span>${escapeHtml(name)}</span><small>${count} lines</small></button>`;
+  }).join('');
+  const content = files.map((file, index) => renderExpandedExecutedFile(file, result, index)).join('');
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';"><style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0;overflow:hidden}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background)}button{font:inherit}.shell{height:100%;display:grid;grid-template-columns:220px minmax(0,1fr)}.sidebar{border-right:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background);display:flex;flex-direction:column;min-width:0}.summary{padding:16px 14px 12px;border-bottom:1px solid var(--vscode-panel-border)}.summary h1{font-size:14px;margin:0 0 3px}.summary p{font-size:11px;color:var(--vscode-descriptionForeground);margin:0}.file-list{padding:8px;overflow:auto}.file-nav{width:100%;display:flex;justify-content:space-between;gap:8px;border:0;border-radius:4px;background:transparent;color:inherit;text-align:left;padding:7px 8px;cursor:pointer}.file-nav:hover{background:var(--vscode-list-hoverBackground)}.file-nav.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.file-nav span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--vscode-editor-font-family);font-size:11px}.file-nav small{flex:0 0 auto;font-size:9px;opacity:.7}.workspace{overflow:auto;scroll-behavior:smooth;padding:18px 22px 70px}.file-section{scroll-margin-top:18px;margin:0 0 24px;border:1px solid var(--vscode-panel-border);border-radius:6px;overflow:hidden;background:var(--vscode-textCodeBlock-background)}.file-header{position:sticky;top:-18px;z-index:2;display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}.file-header strong{font-family:var(--vscode-editor-font-family);font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-header .meta{margin-left:auto;font-size:10px;color:var(--vscode-descriptionForeground)}.open-file{border:0;border-radius:3px;background:transparent;color:var(--vscode-textLink-foreground);padding:3px 6px;cursor:pointer}.open-file:hover{background:var(--vscode-toolbar-hoverBackground)}.code{overflow:auto;font-family:var(--vscode-editor-font-family);font-size:13px;line-height:1.65}.row{width:100%;display:grid;grid-template-columns:52px minmax(max-content,1fr);border:0;background:transparent;color:inherit;padding:0;text-align:left;cursor:pointer}.row:hover{background:var(--vscode-list-hoverBackground)}.row.context{opacity:.5}.row.executed{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 8%,transparent)}.number{padding:3px 12px 3px 4px;text-align:right;color:var(--vscode-editorLineNumber-foreground);border-right:1px solid var(--vscode-panel-border);font-variant-numeric:tabular-nums;user-select:none}.row.executed .number{color:var(--vscode-textLink-foreground);font-weight:700}.source{padding:3px 14px;white-space:pre}.gap{height:14px;border-top:1px dotted var(--vscode-panel-border);opacity:.65}.empty{padding:18px;color:var(--vscode-descriptionForeground)}@media(max-width:700px){.shell{grid-template-columns:1fr}.sidebar{display:none}.workspace{padding:12px}.file-header{top:-12px}}
+  </style></head><body><div class="shell"><aside class="sidebar"><div class="summary"><h1>${escapeHtml(result.displayName || 'Executed code')}</h1><p>${files.length} ${files.length === 1 ? 'file' : 'files'} · ${totalLines} executed ${totalLines === 1 ? 'line' : 'lines'}</p></div><nav class="file-list">${nav}</nav></aside><main class="workspace">${content || '<div class="empty">No executed code was captured.</div>'}</main></div><script nonce="${nonce}">const vscode=acquireVsCodeApi();document.addEventListener('click',event=>{const nav=event.target.closest('.file-nav');if(nav){document.querySelectorAll('.file-nav').forEach(x=>x.classList.remove('active'));nav.classList.add('active');document.getElementById(nav.dataset.target)?.scrollIntoView({behavior:'smooth',block:'start'});return;}const button=event.target.closest('button[data-command]');if(!button)return;vscode.postMessage({command:button.dataset.command,id:button.dataset.id,file:button.dataset.file,line:Number(button.dataset.line)});});const observer=new IntersectionObserver(entries=>{const visible=entries.filter(x=>x.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(!visible)return;document.querySelectorAll('.file-nav').forEach(x=>x.classList.toggle('active',x.dataset.target===visible.target.id));},{root:document.querySelector('.workspace'),threshold:[.2,.5,.8]});document.querySelectorAll('.file-section').forEach(x=>observer.observe(x));</script></body></html>`;
+}
+
+function renderExpandedExecutedFile(file, result, index) {
+  const sourcePath = String(file.sourcePath || '');
+  const displayPath = sourcePath || file.relativePath || 'Source';
+  const executed = [...new Set((file.lines || []).map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+  const firstLine = executed[0] || 1;
+  let sourceLines = [];
+  try {
+    if (sourcePath && fs.existsSync(sourcePath)) sourceLines = fs.readFileSync(sourcePath, 'utf8').split(/\r?\n/);
+  } catch (_) {}
+  if (!sourceLines.length) {
+    const rows = executed.map(line => `<button class="row executed" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${line}" data-file="${escapeHtml(sourcePath)}"><span class="number">${line}</span><span class="source">Executed line</span></button>`).join('');
+    return `<section id="coverage-file-${index}" class="file-section"><header class="file-header"><strong title="${escapeHtml(displayPath)}">${escapeHtml(path.basename(displayPath))}</strong><span class="meta">${executed.length} executed lines</span><button class="open-file" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${firstLine}" data-file="${escapeHtml(sourcePath)}">Open file</button></header><div class="code">${rows}</div></section>`;
+  }
+  const executedSet = new Set(executed);
+  const visible = new Set();
+  for (const line of executed) {
+    for (let candidate = Math.max(1, line - 4); candidate <= Math.min(sourceLines.length, line + 4); candidate++) visible.add(candidate);
+  }
+  const visibleLines = [...visible].sort((a, b) => a - b).slice(0, 600);
+  let previous = 0;
+  const rows = visibleLines.map(line => {
+    const gap = previous && line > previous + 1 ? '<div class="gap"></div>' : '';
+    previous = line;
+    const state = executedSet.has(line) ? 'executed' : 'context';
+    return `${gap}<button class="row ${state}" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${line}" data-file="${escapeHtml(sourcePath)}"><span class="number">${line}</span><span class="source">${escapeHtml(sourceLines[line - 1] || '')}</span></button>`;
+  }).join('');
+  const capped = visible.size > visibleLines.length ? ` · showing first ${visibleLines.length}` : '';
+  return `<section id="coverage-file-${index}" class="file-section"><header class="file-header"><strong title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</strong><span class="meta">${executed.length} executed lines${capped}</span><button class="open-file" data-command="openExecuted" data-id="${escapeHtml(result.id)}" data-line="${firstLine}" data-file="${escapeHtml(sourcePath)}">Open file</button></header><div class="code">${rows}</div></section>`;
 }
 
 function renderExecutedFile(file, result) {
@@ -1663,13 +2173,12 @@ function parseJavaSourceFallback(document, annotations) {
   }
 
   const annotationNames = [...annotations].map(escapeRegExp).join('|');
-  if (!annotationNames) return { classes, methods };
 
-  // This intentionally targets annotated test methods rather than attempting
-  // to parse the complete Java grammar. It supports modifiers, generics,
-  // arrays, throws clauses, and annotations on the same or previous lines.
+  // Lightweight fallback for ordinary Java methods. This is used both for
+  // test discovery and production-method impact tracking when the Java
+  // language server is temporarily unavailable.
   const methodPattern = new RegExp(
-    `((?:\\s*@(?:${annotationNames})\\b(?:\\s*\\([^)]*\\))?\\s*)+)` +
+    `((?:\\s*@[A-Za-z_$][\\w$]*(?:\\s*\\([^)]*\\))?\\s*)*)` +
     `(?:public|protected|private|static|final|synchronized|abstract|native|strictfp|default|\\s)*` +
     `(?:<[^>{};]+>\\s*)?` +
     `[A-Za-z_$][\\w$<>,.?\\[\\] ]*?\\s+` +
@@ -1694,7 +2203,9 @@ function parseJavaSourceFallback(document, annotations) {
       range: new vscode.Range(document.positionAt(match.index), document.positionAt(closeOffset + 1)),
       selectionRange: new vscode.Range(document.positionAt(nameOffset), document.positionAt(nameOffset + methodName.length)),
       parentClass,
-      isTest: true
+      isTest: annotationNames
+        ? [...match[1].matchAll(/@([A-Za-z_$][\w$]*)/g)].some(annotation => annotations.has(annotation[1]))
+        : false
     });
   }
 
@@ -2032,19 +2543,31 @@ class ProjectTestsProvider {
       if (this.discovering && !this.tasks.length) {
         return [new ProjectTestItem('message', 'Discovering Java tests…', { id:'discovering', status:'running' }, vscode.TreeItemCollapsibleState.None)];
       }
-      const affected = affectedCoverageEntries();
+      const affected = await affectedCoverageEntries();
       const roots = this.tasks.map(task => this.taskItem(task));
       if (affected.length) roots.unshift(new ProjectTestItem('affectedRoot', 'Affected Tests', {
         id:'affected',
         status:'stale',
         description:`${affected.length} ${affected.length === 1 ? 'test' : 'tests'}`,
         affected,
-        tooltip:'Tests whose previously captured executed code includes a production file edited during this VS Code session. This is based on JaCoCo run history, not a new source scan.'
+        tooltip:'Tests that previously executed a production method modified during this VS Code session. Saving does not clear the affected state; use the clear action when you are done.'
       }, vscode.TreeItemCollapsibleState.Collapsed));
       return roots;
     }
     if (element.kind === 'affectedRoot') {
-      return element.data.affected.map(entry => new ProjectTestItem('affectedMethod', entry.displayName || entry.filter, { id:`affected:${entry.filter}`, status:'stale', description:entry.task, coverageEntry:entry, sourcePath:entry.sourcePath, line:entry.invocation?.targetLine || 0, tooltip:`Previously executed changed production code\n${entry.filter}` }, vscode.TreeItemCollapsibleState.None));
+      return element.data.affected.map(entry => {
+        const match = entry.affectedMatch || {};
+        const badge = 'method';
+        return new ProjectTestItem('affectedMethod', entry.displayName || entry.filter, {
+          id:`affected:${entry.filter}`,
+          status:'stale',
+          description:`${badge} · ${entry.task}`,
+          coverageEntry:entry,
+          sourcePath:entry.sourcePath,
+          line:entry.invocation?.targetLine || 0,
+          tooltip:`${match.reason || 'Previously executed changed production code.'}\n${entry.filter}`
+        }, vscode.TreeItemCollapsibleState.None);
+      });
     }
     if (element.kind === 'task') {
       return [...element.data.taskData.classes.values()]

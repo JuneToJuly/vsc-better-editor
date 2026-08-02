@@ -279,3 +279,33 @@ Executed-code capture uses Gradle's JaCoCo plugin and may require the build envi
 ## Affected tests
 
 Affected Tests uses previously captured JaCoCo execution data. A test appears when a production file it previously executed is edited during the current VS Code session. Use the inline clear action on the Affected Tests row to dismiss the pending affected-test list without deleting coverage history.
+
+
+## 0.1.47 Flow capture foundation
+
+Capture Flow injects a packaged Byte Buddy Java agent into the forked test JVM, records ordered method entry/exit events, and exposes an ordered replay panel. Byte Buddy is resolved only for opt-in flow runs.
+
+
+## 0.1.49
+
+Flow capture now uses Byte Buddy 1.17.7, which supports Java 25, matching the API used by the packaged agent.
+
+## Dependency versions and offline repositories
+
+Code Flow and Code Report resolve their instrumentation dependencies through Gradle. The versions are configurable:
+
+```json
+{
+  "compositeGradleTests.byteBuddyVersion": "1.18.7",
+  "compositeGradleTests.jacocoVersion": "0.8.14",
+  "compositeGradleTests.dependencyRepository": "file:///opt/offline-maven"
+}
+```
+
+`dependencyRepository` may be a Maven repository URL or a local repository path. When it is set, the generated Gradle init scripts add that repository before resolving Byte Buddy and JaCoCo. The repository must use normal Maven coordinates:
+
+- `net.bytebuddy:byte-buddy:<byteBuddyVersion>`
+- `org.jacoco:org.jacoco.agent:<jacocoVersion>`
+- `org.jacoco:org.jacoco.ant:<jacocoVersion>`
+
+The complete flow-agent source is included under `flow-agent/`. The runtime JAR remains a thin agent JAR; Byte Buddy is resolved separately using the configured version.
