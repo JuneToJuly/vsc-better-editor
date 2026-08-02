@@ -319,3 +319,12 @@ Code Flow records the live JVM caller stack frame for every method entry. The re
 ## Flow snapshots after return
 
 Code Flow captures the instrumented receiver (`this`) both when a method is entered and when it exits. Return and caller-resume replay steps display the post-method receiver snapshot together with the return value or thrown exception. This makes mutations performed by the method visible after control returns.
+
+
+## Replay readability (0.1.81)
+
+- Coverage uses subtle gutter emphasis instead of full-width green blocks.
+- Unexecuted context is dimmed so the active path is easier to scan.
+- Call-tree boundaries have clearer hierarchy and reduced visual weight.
+- State comparison becomes responsive at narrower editor widths.
+- Changed values receive stronger, localized emphasis.
