@@ -112,12 +112,13 @@ public final class FlowAgent {
     public static long enter(String className, String methodName, String descriptor, Object receiver, Object[] arguments) {
       long callId = sequence.incrementAndGet();
       int currentDepth = depth.get();
-      calls.get().push(new Call(callId, className, methodName, descriptor));
+      StackTraceElement caller = findCaller(className, methodName);
+      calls.get().push(new Call(callId, className, methodName, descriptor, caller));
       depth.set(currentDepth + 1);
       write("{\"sequence\":" + callId + ",\"event\":\"enter\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() +
-        ",\"threadName\":" + quote(Thread.currentThread().getName()) + ",\"receiver\":" + snapshot(receiver, 0, new IdentityHashMap<>()) +
+        ",\"threadName\":" + quote(Thread.currentThread().getName()) + callerJson(caller) + ",\"receiver\":" + snapshot(receiver, 0, new IdentityHashMap<>()) +
         ",\"arguments\":" + snapshotArray(arguments, new IdentityHashMap<>()) + "}");
       return callId;
     }
@@ -130,7 +131,26 @@ public final class FlowAgent {
       write("{\"sequence\":" + eventId + ",\"event\":\"exit\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() + ",\"threadName\":" + quote(Thread.currentThread().getName()) +
-        ",\"returnValue\":" + snapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + "}");
+        ",\"returnValue\":" + snapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + callerJson(call == null ? null : call.caller) + "}");
+    }
+
+    private static StackTraceElement findCaller(String className, String methodName) {
+      StackTraceElement[] frames = Thread.currentThread().getStackTrace();
+      for (int i = 0; i < frames.length - 1; i++) {
+        StackTraceElement frame = frames[i];
+        if (className.equals(frame.getClassName()) && methodName.equals(frame.getMethodName())) {
+          return frames[i + 1];
+        }
+      }
+      return null;
+    }
+
+    private static String callerJson(StackTraceElement caller) {
+      if (caller == null) return "";
+      return ",\"callerClassName\":" + quote(caller.getClassName()) +
+        ",\"callerMethodName\":" + quote(caller.getMethodName()) +
+        ",\"callerSourceFile\":" + quote(caller.getFileName()) +
+        ",\"callerLine\":" + caller.getLineNumber();
     }
 
     private static synchronized void write(String json) {
@@ -171,6 +191,6 @@ public final class FlowAgent {
     private static String safeText(Object value) { try { return limit(String.valueOf(value), 500); } catch (Throwable ignored) { return "<toString failed>"; } }
     private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max) + "…"; }
     private static String quote(String value) { if (value == null) return "null"; return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n") + "\""; }
-    private static final class Call { final long id; final String className, methodName, descriptor; Call(long id,String c,String m,String d){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;} }
+    private static final class Call { final long id; final String className, methodName, descriptor; final StackTraceElement caller; Call(long id,String c,String m,String d,StackTraceElement caller){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;this.caller=caller;} }
   }
 }

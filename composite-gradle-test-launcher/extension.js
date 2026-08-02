@@ -1111,7 +1111,9 @@ async function resolveFlowSource(className, preferredSourcePath) {
   const exclude = '**/{build,bin,.gradle,node_modules,out,target}/**';
   const candidates = [
     ...await vscode.workspace.findFiles(`**/src/main/java/${relativeJava}`, exclude, 100),
-    ...await vscode.workspace.findFiles(`**/src/main/kotlin/${relativeKotlin}`, exclude, 100)
+    ...await vscode.workspace.findFiles(`**/src/main/kotlin/${relativeKotlin}`, exclude, 100),
+    ...await vscode.workspace.findFiles(`**/src/test/java/${relativeJava}`, exclude, 100),
+    ...await vscode.workspace.findFiles(`**/src/test/kotlin/${relativeKotlin}`, exclude, 100)
   ];
   if (!candidates.length) return undefined;
 
@@ -1127,6 +1129,7 @@ async function resolveFlowSource(className, preferredSourcePath) {
       if (normalizedProject && (file === normalizedProject || file.startsWith(`${normalizedProject}/`))) value += 1000;
       if (normalizedWorkspace && (file === normalizedWorkspace || file.startsWith(`${normalizedWorkspace}/`))) value += 100;
       if (file.endsWith(`/src/main/java/${relativeJava}`) || file.endsWith(`/src/main/kotlin/${relativeKotlin}`)) value += 10;
+      if (file.endsWith(`/src/test/java/${relativeJava}`) || file.endsWith(`/src/test/kotlin/${relativeKotlin}`)) value += 8;
       return value;
     };
     return score(b) - score(a) || a.fsPath.localeCompare(b.fsPath);
@@ -1180,6 +1183,24 @@ async function enrichFlowEvents(events, preferredSourcePath) {
       });
     } else {
       enriched.push({ ...event, ...info, locationKind: event.event === 'exit' ? 'method-exit' : 'method-entry' });
+    }
+  }
+  // Resolve the exact caller source independently from the callee source. The
+  // agent captures the JVM caller frame at method entry, including its line.
+  // Keeping both paths on the event lets replay show call-site and resume steps
+  // even when projects contain duplicate source filenames.
+  const callerClassCache = new Map();
+  for (const event of enriched) {
+    if (!event.callerClassName || Number(event.callerLine || 0) <= 0) continue;
+    const callerTopLevel = String(event.callerClassName).split('$')[0];
+    let callerUri = callerClassCache.get(callerTopLevel);
+    if (callerUri === undefined) {
+      callerUri = await resolveFlowSource(callerTopLevel, preferredSourcePath) || null;
+      callerClassCache.set(callerTopLevel, callerUri);
+    }
+    if (callerUri) {
+      event.callerSourcePath = callerUri.fsPath;
+      event.callerSourceFile = event.callerSourceFile || path.basename(callerUri.fsPath);
     }
   }
   return enriched;
@@ -1242,10 +1263,53 @@ function renderFlowReplayHtml(result) {
   const allEvents = (result.flowEvents || []);
   const lineEntries = allEvents.filter(event => event.event === 'line');
   const methodEntries = allEvents.filter(event => event.event === 'enter');
-  // Once real line events exist, show the complete mixed trace so method
-  // boundaries and source-line execution can be followed together.
-  const entries = allEvents.filter(event => event.event === 'enter' || event.event === 'line' || event.event === 'exit');
+  const rawEntries = allEvents.filter(event => event.event === 'enter' || event.event === 'line' || event.event === 'exit');
   const lineMode = lineEntries.length > 0;
+
+  // Expand each method call into an explicit call-site -> callee -> return ->
+  // resume sequence. The caller line comes from the live JVM stack frame
+  // captured by the agent, not from filename or source-text guessing.
+  const entries = [];
+  for (const event of rawEntries) {
+    const hasCaller = event.callerClassName && Number(event.callerLine || 0) > 0 && event.callerSourcePath;
+    if (event.event === 'enter' && hasCaller) {
+      entries.push({
+        ...event,
+        event: 'callsite',
+        sequence: Number(event.sequence || 0) - 0.2,
+        className: event.callerClassName,
+        methodName: event.callerMethodName,
+        sourceFile: event.callerSourceFile,
+        sourcePath: event.callerSourcePath,
+        line: Number(event.callerLine),
+        depth: Math.max(0, Number(event.depth || 0)),
+        calleeClassName: event.className,
+        calleeMethodName: event.methodName,
+        receiver: undefined,
+        arguments: undefined,
+        __synthetic: true
+      });
+    }
+    entries.push(event);
+    if (event.event === 'exit' && hasCaller) {
+      entries.push({
+        ...event,
+        event: 'resume',
+        sequence: Number(event.sequence || 0) + 0.2,
+        className: event.callerClassName,
+        methodName: event.callerMethodName,
+        sourceFile: event.callerSourceFile,
+        sourcePath: event.callerSourcePath,
+        line: Number(event.callerLine),
+        depth: Math.max(0, Number(event.depth || 0)),
+        calleeClassName: event.className,
+        calleeMethodName: event.methodName,
+        returnValue: undefined,
+        thrown: undefined,
+        __synthetic: true
+      });
+    }
+  }
 
   // Pair entry and exit snapshots by the call id emitted by the agent. This lets
   // an entry step show the eventual return value while preserving the ordered
@@ -1310,7 +1374,7 @@ function renderFlowReplayHtml(result) {
   const data = JSON.stringify(enrichedEntries).replace(/</g, '\\u003c');
   return `<!doctype html><html><head><meta charset="UTF-8"><style>
   *{box-sizing:border-box}body{margin:0;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family);overflow:hidden}.shell{height:100vh;display:grid;grid-template-columns:minmax(260px,320px) 1fr}.timeline{border-right:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background);overflow:auto}.head{position:sticky;top:0;background:var(--vscode-sideBar-background);padding:14px 14px 12px;border-bottom:1px solid var(--vscode-panel-border);z-index:2}.head strong{font-size:13px;letter-spacing:.02em}.head small{display:block;color:var(--vscode-descriptionForeground);margin-top:4px;line-height:1.35}.step{width:100%;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 70%,transparent);background:transparent;color:inherit;text-align:left;padding:10px 12px;display:grid;grid-template-columns:28px 1fr;cursor:pointer;position:relative}.step:hover{background:var(--vscode-list-hoverBackground)}.step.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.step.active:before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--vscode-focusBorder)}.seq{color:var(--vscode-textLink-foreground);font-variant-numeric:tabular-nums;padding-top:1px}.where{font-family:var(--vscode-editor-font-family);font-size:12px;min-width:0}.where b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.where small{display:block;opacity:.68;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.viewer{display:flex;flex-direction:column;min-width:0;overflow:hidden}.toolbar{display:flex;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}button{font:inherit}.toolbar button{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);padding:5px 11px;cursor:pointer}.toolbar button.primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}.toolbar button:disabled{opacity:.45;cursor:default}.position{margin-left:auto;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}.progress{height:2px;background:var(--vscode-panel-border)}.progress>span{display:block;height:100%;background:var(--vscode-progressBar-background);transition:width .12s ease}.content{padding:18px 22px 28px;overflow:auto}.current-head{display:flex;align-items:flex-start;gap:18px;margin-bottom:16px}.identity{min-width:0}.eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:10px;color:var(--vscode-descriptionForeground);margin-bottom:6px}.identity h1{font:600 19px/1.25 var(--vscode-editor-font-family);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.identity p{font:12px/1.4 var(--vscode-editor-font-family);color:var(--vscode-descriptionForeground);margin:5px 0 0}.meta{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{border:1px solid var(--vscode-panel-border);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}.code-card{border:1px solid var(--vscode-panel-border);background:var(--vscode-textCodeBlock-background);border-radius:4px;overflow:hidden}.code-title{display:flex;align-items:center;padding:9px 12px;border-bottom:1px solid var(--vscode-panel-border);font-size:11px;color:var(--vscode-descriptionForeground)}.code-title strong{color:var(--vscode-editor-foreground);font-family:var(--vscode-editor-font-family);font-size:12px}.code-title span{margin-left:auto}.code{font:13px/1.65 var(--vscode-editor-font-family);padding:6px 0;overflow:auto}.line{display:grid;grid-template-columns:56px 1fr;min-height:22px}.line .num{text-align:right;padding-right:14px;color:var(--vscode-editorLineNumber-foreground);user-select:none}.line .text{white-space:pre;padding-right:18px}.line.covered{background:color-mix(in srgb,var(--vscode-testing-iconPassed) 9%,transparent)}.line.covered .num{color:var(--vscode-testing-iconPassed);font-weight:700}.line.active{background:var(--vscode-editor-lineHighlightBackground);box-shadow:inset 3px 0 0 var(--vscode-focusBorder)}.line.active .num{color:var(--vscode-editorLineNumber-activeForeground);font-weight:700}.line.active .text{font-weight:600}.state-card{margin-top:14px;border:1px solid var(--vscode-panel-border);border-radius:4px;overflow:hidden}.state-title{padding:9px 12px;border-bottom:1px solid var(--vscode-panel-border);font-size:12px;font-weight:600}.state-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;background:var(--vscode-panel-border)}.state-section{background:var(--vscode-editor-background);padding:12px;min-height:90px}.state-section h3{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--vscode-descriptionForeground);margin:0 0 9px}.state-row{font:12px/1.45 var(--vscode-editor-font-family);display:grid;grid-template-columns:minmax(80px,auto) 1fr;gap:10px;padding:3px 0}.state-key{color:var(--vscode-symbolIcon-fieldForeground,var(--vscode-textLink-foreground));overflow:hidden;text-overflow:ellipsis}.state-value{white-space:pre-wrap;word-break:break-word}.state-type{display:block;color:var(--vscode-descriptionForeground);font-size:10px}.state-empty{color:var(--vscode-descriptionForeground);font-size:12px}.empty{border:1px dashed var(--vscode-panel-border);padding:28px;text-align:center;color:var(--vscode-descriptionForeground)}.hint{margin-top:12px;color:var(--vscode-descriptionForeground);font-size:11px}.hint kbd{border:1px solid var(--vscode-panel-border);border-radius:3px;padding:1px 5px;background:var(--vscode-keybindingLabel-background)}
-  </style></head><body><div class="shell"><aside class="timeline"><div class="head"><strong>${lineMode ? 'Execution replay' : 'Method call timeline'}</strong><small>${entries.length} ordered events · method boundaries and repeated lines preserved</small></div><div id="steps"></div></aside><main class="viewer"><div class="toolbar"><button id="prev">← Previous</button><button class="primary" id="next">Next →</button><button id="open">Open source</button><span class="position" id="position"></span></div><div class="progress"><span id="progress"></span></div><div class="content"><div class="current-head"><div class="identity"><div class="eyebrow" id="kind"></div><h1 id="method"></h1><p id="file"></p></div><div class="meta"><span class="pill" id="depth"></span><span class="pill" id="thread"></span></div></div><div class="code-card" id="codeCard"><div class="code-title"><strong id="codeFile"></strong><span id="codeLine"></span></div><div class="code" id="code"></div></div><div class="empty" id="empty">Source preview is unavailable for this event. Use Open source to navigate to the nearest method location.</div><div class="state-card"><div class="state-title">Frame snapshot</div><div class="state-grid"><section class="state-section"><h3>This</h3><div id="receiver"></div></section><section class="state-section"><h3>Arguments</h3><div id="arguments"></div></section><section class="state-section"><h3>Outcome</h3><div id="outcome"></div></section></div></div><div class="hint"><kbd>j</kbd>/<kbd>k</kbd> or arrow keys move through execution. <kbd>Enter</kbd> opens the current source location.</div></div></main></div><script>
+  </style></head><body><div class="shell"><aside class="timeline"><div class="head"><strong>${lineMode ? 'Execution replay' : 'Method call timeline'}</strong><small>${entries.length} replay steps · call sites, method boundaries, and returns preserved</small></div><div id="steps"></div></aside><main class="viewer"><div class="toolbar"><button id="prev">← Previous</button><button class="primary" id="next">Next →</button><button id="open">Open source</button><span class="position" id="position"></span></div><div class="progress"><span id="progress"></span></div><div class="content"><div class="current-head"><div class="identity"><div class="eyebrow" id="kind"></div><h1 id="method"></h1><p id="file"></p></div><div class="meta"><span class="pill" id="depth"></span><span class="pill" id="thread"></span></div></div><div class="code-card" id="codeCard"><div class="code-title"><strong id="codeFile"></strong><span id="codeLine"></span></div><div class="code" id="code"></div></div><div class="empty" id="empty">Source preview is unavailable for this event. Use Open source to navigate to the nearest method location.</div><div class="state-card"><div class="state-title">Frame snapshot</div><div class="state-grid"><section class="state-section"><h3>This</h3><div id="receiver"></div></section><section class="state-section"><h3>Arguments</h3><div id="arguments"></div></section><section class="state-section"><h3>Outcome</h3><div id="outcome"></div></section></div></div><div class="hint"><kbd>j</kbd>/<kbd>k</kbd> or arrow keys move through execution. <kbd>Enter</kbd> opens the current source location.</div></div></main></div><script>
   const vscode=acquireVsCodeApi(),events=${data},lineMode=${lineMode};let index=0;const steps=document.getElementById('steps');
   const simpleName=e=>String(e.className||'').split('.').pop();
   const eventLabel=e=>e.event==='line'?'Line '+e.line:(e.event==='exit'?'Return':'Enter');
@@ -1320,8 +1384,8 @@ function renderFlowReplayHtml(result) {
   function valueText(v){if(v===null||v===undefined)return 'null';if(typeof v!=='object')return String(v);return v.value!==undefined?String(v.value):(v.type||'object');}
   function renderObject(target,value,labelPrefix='field'){const root=document.getElementById(target);root.innerHTML='';if(value===null||value===undefined){root.innerHTML='<div class="state-empty">Not available</div>';return;}const add=(key,v)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent=key;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);root.appendChild(row);};if(value.fields&&Object.keys(value.fields).length){add('this',value);Object.entries(value.fields).forEach(([k,v])=>add(k,v));}else add(labelPrefix,value);}
   function renderArguments(values){const root=document.getElementById('arguments');root.innerHTML='';if(!Array.isArray(values)||!values.length){root.innerHTML='<div class="state-empty">No arguments</div>';return;}values.forEach((v,i)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent='arg'+i;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);root.appendChild(row);});}
-  function renderState(e){const entrySnapshot=e.__entrySnapshot||{};renderObject('receiver',e.receiver!==undefined?e.receiver:entrySnapshot.receiver,'this');renderArguments(e.arguments!==undefined?e.arguments:entrySnapshot.arguments);const outcome=document.getElementById('outcome');outcome.innerHTML='';const add=(key,v)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent=key;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);outcome.appendChild(row);};const result=e.event==='exit'?e:e.__outcome;if(result){if(result.thrown)add('thrown',result.thrown);else add('return',result.returnValue);}else outcome.innerHTML='<div class="state-empty">Method has not returned in this trace</div>'; }
-  function render(){const e=events[index];document.querySelectorAll('.step').forEach((x,i)=>x.classList.toggle('active',i===index));document.querySelectorAll('.step')[index]?.scrollIntoView({block:'nearest'});document.getElementById('kind').textContent=e.event==='line'?'Executed source line':(e.event==='exit'?'Method return':'Method entry');document.getElementById('method').textContent=simpleName(e)+'.'+e.methodName+'()';document.getElementById('file').textContent=e.line?((e.sourceFile||e.className)+':'+e.line):(e.event==='exit'?'Returned from '+e.className:e.className);document.getElementById('depth').textContent='Depth '+Number(e.depth||0);document.getElementById('thread').textContent='Thread '+String(e.thread||e.threadId||'main');document.getElementById('position').textContent=(index+1)+' of '+events.length;document.getElementById('progress').style.width=(((index+1)/events.length)*100)+'%';document.getElementById('prev').disabled=index===0;document.getElementById('next').disabled=index===events.length-1;renderCode(e);renderState(e);}
+  function renderState(e){const entrySnapshot=e.__entrySnapshot||{};if(e.__synthetic){document.getElementById('receiver').innerHTML='<div class="state-empty">Caller state is not captured at this boundary</div>';document.getElementById('arguments').innerHTML='<div class="state-empty">Select the method entry to inspect arguments</div>';document.getElementById('outcome').innerHTML='<div class="state-empty">'+(e.event==='callsite'?'Invocation leaves this line':'Execution returns to this line')+'</div>';return;}renderObject('receiver',e.receiver!==undefined?e.receiver:entrySnapshot.receiver,'this');renderArguments(e.arguments!==undefined?e.arguments:entrySnapshot.arguments);const outcome=document.getElementById('outcome');outcome.innerHTML='';const add=(key,v)=>{const row=document.createElement('div');row.className='state-row';const k=document.createElement('span');k.className='state-key';k.textContent=key;const val=document.createElement('span');val.className='state-value';val.textContent=valueText(v);if(v&&v.type){const type=document.createElement('span');type.className='state-type';type.textContent=v.type;val.appendChild(type);}row.append(k,val);outcome.appendChild(row);};const result=e.event==='exit'?e:e.__outcome;if(result){if(result.thrown)add('thrown',result.thrown);else add('return',result.returnValue);}else outcome.innerHTML='<div class="state-empty">Method has not returned in this trace</div>'; }
+  function render(){const e=events[index];document.querySelectorAll('.step').forEach((x,i)=>x.classList.toggle('active',i===index));document.querySelectorAll('.step')[index]?.scrollIntoView({block:'nearest'});document.getElementById('kind').textContent=e.event==='line'?'Executed source line':(e.event==='exit'?'Method return':(e.event==='callsite'?'Call site':(e.event==='resume'?'Caller resumes':'Method entry')));document.getElementById('method').textContent=e.event==='callsite'?'Calls '+simpleName({className:e.calleeClassName})+'.'+e.calleeMethodName+'()':(e.event==='resume'?'Returns to '+simpleName(e)+'.'+e.methodName+'()':simpleName(e)+'.'+e.methodName+'()');document.getElementById('file').textContent=e.line?((e.sourceFile||e.className)+':'+e.line):(e.event==='exit'?'Returned from '+e.className:e.className);document.getElementById('depth').textContent='Depth '+Number(e.depth||0);document.getElementById('thread').textContent='Thread '+String(e.thread||e.threadId||'main');document.getElementById('position').textContent=(index+1)+' of '+events.length;document.getElementById('progress').style.width=(((index+1)/events.length)*100)+'%';document.getElementById('prev').disabled=index===0;document.getElementById('next').disabled=index===events.length-1;renderCode(e);renderState(e);}
   const move=d=>{index=Math.max(0,Math.min(events.length-1,index+d));render()};document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.getElementById('open').onclick=()=>{const e=events[index];vscode.postMessage({command:e.line?'openLine':'openMethod',className:e.className,methodName:e.methodName,line:e.line,sourcePath:e.sourcePath})};window.addEventListener('keydown',e=>{if(e.key==='j'||e.key==='ArrowDown'||e.key==='ArrowRight'){move(1);e.preventDefault()}if(e.key==='k'||e.key==='ArrowUp'||e.key==='ArrowLeft'){move(-1);e.preventDefault()}if(e.key==='Enter'){document.getElementById('open').click()}});render();
   </script></body></html>`;
 }

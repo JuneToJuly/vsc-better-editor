@@ -309,3 +309,7 @@ Code Flow and Code Report resolve their instrumentation dependencies through Gra
 - `org.jacoco:org.jacoco.ant:<jacocoVersion>`
 
 The complete flow-agent source is included under `flow-agent/`. The runtime JAR remains a thin agent JAR; Byte Buddy is resolved separately using the configured version.
+
+## Call-site replay
+
+Code Flow records the live JVM caller stack frame for every method entry. The replay expands nested calls into explicit call-site, method entry, method return, and caller-resume steps. Caller source is resolved from the fully qualified class name, including `src/test` for the initiating test method.
