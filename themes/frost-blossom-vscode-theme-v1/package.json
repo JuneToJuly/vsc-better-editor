@@ -1,0 +1,27 @@
+{
+  "name": "frost-blossom-theme-v1",
+  "displayName": "Frost Blossom Theme v1",
+  "description": "Light and dark VS Code themes using ice blue, snow white, cherry blossom pink, and lavender mist.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Frost Blossom Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/frost-blossom-day-v1-color-theme.json"
+      },
+      {
+        "label": "Frost Blossom Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/frost-blossom-night-v1-color-theme.json"
+      }
+    ]
+  }
+}
