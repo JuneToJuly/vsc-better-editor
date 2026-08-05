@@ -1,0 +1,27 @@
+{
+  "name": "sunset-synth-theme-v1",
+  "displayName": "Sunset Synth Theme v1",
+  "description": "A polished light and dark VS Code theme based on indigo, magenta, crimson pink, and sunset orange.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunset Synth Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/sunset-synth-day-v1-color-theme.json"
+      },
+      {
+        "label": "Sunset Synth Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/sunset-synth-night-v1-color-theme.json"
+      }
+    ]
+  }
+}

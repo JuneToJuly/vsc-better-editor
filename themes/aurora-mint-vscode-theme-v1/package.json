@@ -1,0 +1,27 @@
+{
+  "name": "aurora-mint-theme-v1",
+  "displayName": "Aurora Mint Theme v1",
+  "description": "A polished light and dark VS Code theme built from electric blue, sky cyan, mint, and soft green.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Aurora Mint Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/aurora-mint-day-v1-color-theme.json"
+      },
+      {
+        "label": "Aurora Mint Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/aurora-mint-night-v1-color-theme.json"
+      }
+    ]
+  }
+}

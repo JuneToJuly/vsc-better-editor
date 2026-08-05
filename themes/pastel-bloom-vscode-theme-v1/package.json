@@ -1,0 +1,20 @@
+{
+  "name": "pastel-bloom-theme-v1",
+  "displayName": "Pastel Bloom Theme v1",
+  "description": "A warm paper-light VS Code theme built from butter yellow and vivid pink pastels.",
+  "version": "1.0.0",
+  "publisher": "custom-theme-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Themes"],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Pastel Bloom Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/pastel-bloom-day-v1-color-theme.json"
+      }
+    ]
+  }
+}

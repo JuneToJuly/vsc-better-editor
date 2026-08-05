@@ -1,0 +1,27 @@
+{
+  "name": "sunset-synth-refined-v2",
+  "displayName": "Sunset Synth Refined v2",
+  "description": "A refined light and dark VS Code theme using indigo, magenta, crimson, and sunset orange with stronger contrast and calmer surfaces.",
+  "version": "2.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Sunset Synth Refined Day v2",
+        "uiTheme": "vs",
+        "path": "./themes/sunset-synth-refined-day-v2-color-theme.json"
+      },
+      {
+        "label": "Sunset Synth Refined Night v2",
+        "uiTheme": "vs-dark",
+        "path": "./themes/sunset-synth-refined-night-v2-color-theme.json"
+      }
+    ]
+  }
+}
