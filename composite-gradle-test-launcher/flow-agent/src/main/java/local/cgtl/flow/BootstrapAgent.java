@@ -35,6 +35,7 @@ public final class BootstrapAgent {
   private static volatile Field callIdField;
   private static volatile boolean consoleLines;
   private static final AtomicLong lineStateFailures = new AtomicLong();
+  public static final Object UNSET_LOCAL = new Object();
   private static final IdentityHashMap<Object, SnapshotCacheEntry> snapshotCache = new IdentityHashMap<>();
   private static final AtomicLong snapshotIds = new AtomicLong();
   private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
@@ -134,13 +135,17 @@ public final class BootstrapAgent {
   }
 
   private static String localsJson(String[] names, Object[] values) {
-    if (names == null || values == null) return "{}";
+    if (values == null) return "{}";
     StringBuilder out = new StringBuilder("{");
-    int length = Math.min(names.length, values.length);
-    for (int i = 0; i < length; i++) {
-      if (i > 0) out.append(',');
-      out.append(quote(names[i])).append(':')
-          .append(snapshotForLine(values[i]));
+    int emitted = 0;
+    for (int i = 0; i < values.length; i++) {
+      Object value = values[i];
+      if (value == UNSET_LOCAL) continue;
+      if (emitted++ > 0) out.append(',');
+      String name = names != null && i < names.length && names[i] != null && !names[i].isBlank()
+          ? names[i]
+          : "slot" + i;
+      out.append(quote(name)).append(':').append(snapshotForLine(value));
     }
     return out.append('}').toString();
   }
@@ -369,6 +374,7 @@ public final class BootstrapAgent {
       import net.bytebuddy.jar.asm.MethodVisitor;
       import net.bytebuddy.jar.asm.Opcodes;
       import net.bytebuddy.jar.asm.Type;
+      import java.util.Arrays;
       import net.bytebuddy.matcher.ElementMatcher;
       import net.bytebuddy.matcher.ElementMatchers;
       import net.bytebuddy.pool.TypePool;
@@ -420,20 +426,69 @@ public final class BootstrapAgent {
                     (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0) return downstream;
                 boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
                 return new MethodVisitor(Opcodes.ASM9, downstream) {
+                  private static final int LOCAL_STATE_SLOT = 1000;
+                  private static final int LOCAL_STATE_SIZE = 256;
                   private int injected;
+
+                  @Override public void visitCode() {
+                    super.visitCode();
+                    pushInt(this, LOCAL_STATE_SIZE);
+                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                    super.visitInsn(Opcodes.DUP);
+                    super.visitFieldInsn(Opcodes.GETSTATIC, "local/cgtl/flow/BootstrapAgent", "UNSET_LOCAL", "Ljava/lang/Object;");
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "fill", "([Ljava/lang/Object;Ljava/lang/Object;)V", false);
+                    super.visitVarInsn(Opcodes.ASTORE, LOCAL_STATE_SLOT);
+                  }
+
+                  @Override public void visitVarInsn(int opcode, int variable) {
+                    super.visitVarInsn(opcode, variable);
+                    if (variable == LOCAL_STATE_SLOT) return;
+                    switch (opcode) {
+                      case Opcodes.ISTORE -> recordLocal(variable, Opcodes.ILOAD, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;");
+                      case Opcodes.LSTORE -> recordLocal(variable, Opcodes.LLOAD, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;");
+                      case Opcodes.FSTORE -> recordLocal(variable, Opcodes.FLOAD, "java/lang/Float", "valueOf", "(F)Ljava/lang/Float;");
+                      case Opcodes.DSTORE -> recordLocal(variable, Opcodes.DLOAD, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;");
+                      case Opcodes.ASTORE -> recordReferenceLocal(variable);
+                      default -> { }
+                    }
+                  }
+
+                  @Override public void visitIincInsn(int variable, int increment) {
+                    super.visitIincInsn(variable, increment);
+                    super.visitVarInsn(Opcodes.ALOAD, LOCAL_STATE_SLOT);
+                    pushInt(this, variable);
+                    super.visitVarInsn(Opcodes.ILOAD, variable);
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+                    super.visitInsn(Opcodes.AASTORE);
+                  }
+
+                  private void recordLocal(int variable, int loadOpcode, String owner, String method, String methodDescriptor) {
+                    super.visitVarInsn(Opcodes.ALOAD, LOCAL_STATE_SLOT);
+                    pushInt(this, variable);
+                    super.visitVarInsn(loadOpcode, variable);
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, owner, method, methodDescriptor, false);
+                    super.visitInsn(Opcodes.AASTORE);
+                  }
+
+                  private void recordReferenceLocal(int variable) {
+                    super.visitVarInsn(Opcodes.ALOAD, LOCAL_STATE_SLOT);
+                    pushInt(this, variable);
+                    super.visitVarInsn(Opcodes.ALOAD, variable);
+                    super.visitInsn(Opcodes.AASTORE);
+                  }
+
                   @Override public void visitLineNumber(int line, Label start) {
                     super.visitLineNumber(line, start);
                     if (line <= 0) return;
-                    visitLdcInsn(className);
-                    visitLdcInsn(name);
-                    visitLdcInsn(descriptor);
+                    super.visitLdcInsn(className);
+                    super.visitLdcInsn(name);
+                    super.visitLdcInsn(descriptor);
                     pushInt(this, line);
-                    if (isStatic) visitInsn(Opcodes.ACONST_NULL); else visitVarInsn(Opcodes.ALOAD, 0);
+                    if (isStatic) super.visitInsn(Opcodes.ACONST_NULL); else super.visitVarInsn(Opcodes.ALOAD, 0);
                     pushInt(this, 0);
-                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/String");
-                    pushInt(this, 0);
-                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
-                    visitMethodInsn(Opcodes.INVOKESTATIC, "local/cgtl/flow/BootstrapAgent", "lineState",
+                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/String");
+                    super.visitVarInsn(Opcodes.ALOAD, LOCAL_STATE_SLOT);
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "local/cgtl/flow/BootstrapAgent", "lineState",
                         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;[Ljava/lang/String;[Ljava/lang/Object;)V", false);
                     injected++;
                   }
