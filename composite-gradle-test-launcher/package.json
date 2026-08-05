@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.1.90",
+  "version": "0.3.4",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -337,7 +337,7 @@
         "compositeGradleTests.projects": {
           "type": "array",
           "default": [],
-          "description": "Maps test source roots to Gradle tasks. The longest matching sourceRoot wins.",
+          "description": "Maps source roots to Gradle tasks and, optionally, Java debugger project names. The longest matching sourceRoot wins.",
           "items": {
             "type": "object",
             "required": [
@@ -352,6 +352,11 @@
               "task": {
                 "type": "string",
                 "description": "Root-build task path, for example :includedBuild:service:test."
+              },
+              "javaProjectName": {
+                "type": "string",
+                "default": "",
+                "description": "Optional exact Java project name for debugger attach when a source file is under this sourceRoot. This uses the same longest-prefix matching as task resolution."
               }
             }
           }
@@ -425,7 +430,7 @@
         "compositeGradleTests.javaProjectName": {
           "type": "string",
           "default": "",
-          "description": "Optional exact Java project name used by the Java debugger attach configuration. Leave empty to use only a project name positively resolved by the Java language server; otherwise the debugger attaches without projectName."
+          "description": "Legacy global Java project name used by debugger attach when no source-root project mapping matches. Leave empty to resolve from compositeGradleTests.projects or the Java language server."
         },
         "compositeGradleTests.navigationOpenMode": {
           "type": "string",
@@ -441,6 +446,14 @@
           "type": "boolean",
           "default": false,
           "description": "Capture per-run executed production lines with JaCoCo. This may require Gradle to resolve JaCoCo artifacts. Use the Run with Executed Code commands for one-off capture."
+        },
+        "compositeGradleTests.flowPackagePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional fully qualified class or package prefixes traced by Code Flow and Analyze. Prefixes are matched against every class loaded by the test JVM, including classes from dependency JARs. Examples: org.myorganization or org.myorganization.shared. A trailing .* is optional."
         },
         "compositeGradleTests.byteBuddyVersion": {
           "type": "string",

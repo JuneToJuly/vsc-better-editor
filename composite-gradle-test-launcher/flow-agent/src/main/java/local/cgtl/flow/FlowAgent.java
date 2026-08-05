@@ -78,8 +78,8 @@ public final class FlowAgent {
       matcher = call(matcher, "or", staticCall(matchers, "nameStartsWith", pkg + "."));
       matcher = call(matcher, "or", staticCall(matchers, "named", pkg));
     }
-    Object tests = staticCall(matchers, "nameMatches", ".*(?:Test|Tests|IT|ITCase)$");
-    matcher = call(matcher, "and", staticCall(matchers, "not", tests));
+    // Test classes within the selected package are intentionally included.
+    // This lets ordered replay begin at the actual test line that initiates the call.
     matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isInterface")));
     matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAnnotation")));
     matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isEnum")));

@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'local.cgtl'
-version = '0.1.79'
+version = '0.3.4'
 
 def byteBuddyVersion = providers.gradleProperty('byteBuddyVersion').getOrElse('1.18.7')
 def dependencyRepository = providers.gradleProperty('dependencyRepository').orNull
@@ -33,8 +33,8 @@ jar {
     archiveFileName = 'cgtl-flow-agent.jar'
     manifest {
         attributes(
-            'Premain-Class': 'local.cgtl.flow.FlowAgent',
-            'Agent-Class': 'local.cgtl.flow.FlowAgent',
+            'Premain-Class': 'local.cgtl.flow.BootstrapAgent',
+            'Agent-Class': 'local.cgtl.flow.BootstrapAgent',
             'Can-Redefine-Classes': 'true',
             'Can-Retransform-Classes': 'true'
         )

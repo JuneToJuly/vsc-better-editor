@@ -17,3 +17,9 @@ gradle clean jar \
 ```
 
 Copy `build/libs/cgtl-flow-agent.jar` to the extension's `resources/` directory when rebuilding the agent. The configured Byte Buddy version must match the API used to compile this source.
+
+## Ordered line replay
+
+The packaged agent starts through `BootstrapAgent`. It installs the existing method snapshot agent, then compiles a small line-number transformer against the exact Byte Buddy jar selected by the extension (`cgtl.flow.byteBuddyJar`). This preserves offline/version configurability while avoiding a Byte Buddy binary mismatch.
+
+Line events intentionally contain metadata only in phase one. Receiver/argument/outcome snapshots remain at method and call boundaries.

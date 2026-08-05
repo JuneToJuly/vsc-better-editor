@@ -337,3 +337,72 @@ Code Flow captures the instrumented receiver (`this`) both when a method is ente
 - Added concise return/exception summaries to invocation rows.
 - Tightened tree indentation and visually separated boundary types.
 - Simple calls start collapsed; changed and exceptional paths expand automatically.
+
+
+## Tracing additional package prefixes
+
+Code Flow automatically traces the package containing the selected test target. To include organization packages or classes supplied by dependency JARs, configure additional fully qualified prefixes:
+
+```json
+{
+  "compositeGradleTests.flowPackagePrefixes": [
+    "org.myorganization",
+    "org.myorganization.shared"
+  ]
+}
+```
+
+A trailing `.*` is accepted but not required. Matching is prefix-based, so `org.myorganization` includes `org.myorganization.service`, `org.myorganization.shared`, and classes loaded from external dependency JARs. Source previews for dependency classes require their source to be present in the workspace or otherwise resolvable by VS Code; tracing and snapshots still work without source.
+
+## Per-source Java debugger project mapping
+
+Debug attach can resolve the Java project from the same source-root mapping used to resolve the Gradle task. This avoids changing one global `javaProjectName` whenever you debug a test in another included build or subproject.
+
+```json
+{
+  "compositeGradleTests.projects": [
+    {
+      "sourceRoot": "services/order-service/app/src/test/java",
+      "task": ":order-service:app:test",
+      "javaProjectName": "order-service-app"
+    },
+    {
+      "sourceRoot": "services/inventory-service/app/src/test/java",
+      "task": ":inventory-service:app:test",
+      "javaProjectName": "inventory-service-app"
+    }
+  ]
+}
+```
+
+The longest matching `sourceRoot` wins. Resolution priority is:
+
+1. `javaProjectName` on the matching `compositeGradleTests.projects` entry.
+2. Legacy global `compositeGradleTests.javaProjectName`.
+3. Automatic lookup through the Red Hat Java language server.
+4. Attach without `projectName` when none can be resolved safely.
+
+The project name must match the exact name reported by the VS Code Java project system.
+
+
+## Ordered line replay (0.2.7)
+
+Flow analysis now instruments JVM source-line boundaries and writes ordered `line` events into the same replay stream as method entry and exit events. Each line event contains the global sequence, thread, invocation ID, class, method, descriptor, source file, line number, and call depth. JaCoCo remains responsible for coverage; the flow agent provides ordering. Per-line deep object snapshots are intentionally not captured in this first phase.
+
+
+## Ordered line replay verifier fix (0.2.8)
+
+The generated ASM line transformer now requests `COMPUTE_FRAMES`, `COMPUTE_MAXS`, and `EXPAND_FRAMES`. This prevents stale stack-map frames after line callbacks are injected into methods containing switches, branches, and exception handlers.
+
+
+## 0.2.9 ordered-line validation
+
+Ordered line events are temporarily printed to the Gradle test console as `[CGTL FLOW] #<sequence> ... Class.method():line`. Set the test JVM system property `cgtl.flow.consoleLines=false` to disable the validation output.
+
+## Ordered line replay (0.3.1)
+
+The Execution Replay panel now includes a **Replay** tab backed by ordered flow-agent line events. Use Left/Right or `h`/`l` to step, Space to play/pause, and the speed selector for automatic playback. The source pane follows the current event, the left pane shows nearby ordered steps, and the right pane combines the current line with its call stack and the existing method-boundary snapshots.
+
+## Test-line replay
+
+Code Flow now instruments the selected test package as well as application packages. Ordered replay therefore begins on the test source line that initiates the traced call, instead of starting inside the first production method.
