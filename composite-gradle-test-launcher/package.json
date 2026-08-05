@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.3.8",
+  "version": "0.3.11",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -480,6 +480,27 @@
           "type": "string",
           "default": "",
           "description": "Optional Maven repository URL or local repository path used to resolve Byte Buddy and JaCoCo, for example file:///opt/offline-maven or C:/offline-maven. Leave empty to use Maven Central for Byte Buddy and the project repositories for JaCoCo."
+        },
+        "compositeGradleTests.flowLineStateMaxDepth": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Maximum recursive depth for per-line object snapshots."
+        },
+        "compositeGradleTests.flowLineStateMaxFields": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum fields captured for each object checkpoint."
+        },
+        "compositeGradleTests.flowLineStateMaxCollectionItems": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum collection, map, or array items captured in each checkpoint."
         }
       }
     },

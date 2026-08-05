@@ -131,6 +131,9 @@ public final class FlowAgent {
     private static final ThreadLocal<Deque<Call>> calls = ThreadLocal.withInitial(ArrayDeque::new);
     private static Writer output;
     private static int maxEvents;
+    private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
+    private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
+    private static final int snapshotMaxItems = Integer.getInteger("cgtl.flow.lineState.maxCollectionItems", 20);
 
     public static synchronized void initialize() throws Exception {
       String outputPath = System.getProperty("cgtl.flow.output");
@@ -217,27 +220,30 @@ public final class FlowAgent {
       if (value instanceof String || value instanceof Character || value instanceof Enum<?>) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
       if (value instanceof Number || value instanceof Boolean) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(String.valueOf(value)) + "}";
       Class<?> type = value.getClass();
-      if (type.isArray()) { int length = Math.min(Array.getLength(value), 20); StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"items\":["); for (int i=0;i<length;i++){if(i>0)out.append(',');out.append(snapshot(Array.get(value,i),level+1,seen));} return out.append("]}").toString(); }
+      if (type.isArray()) { int length = Math.min(Array.getLength(value), snapshotMaxItems); StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"items\":["); for (int i=0;i<length;i++){if(i>0)out.append(',');out.append(snapshot(Array.get(value,i),level+1,seen));} return out.append("]}").toString(); }
       if (seen.put(value, Boolean.TRUE) != null) return "{\"type\":" + quote(type.getName()) + ",\"value\":\"<cycle>\"}";
-      if (level >= 2) return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + "}";
+      if (level >= snapshotMaxDepth) return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + "}";
       StringBuilder fields = new StringBuilder(); int count = 0;
-      for (Class<?> current = type; current != null && current != Object.class && count < 30; current = current.getSuperclass()) {
+      for (Class<?> current = type; current != null && current != Object.class && count < snapshotMaxFields; current = current.getSuperclass()) {
         for (Field field : current.getDeclaredFields()) {
-          if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic() || count >= 30) continue;
+          if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic() || count >= snapshotMaxFields) continue;
           if (count++ > 0) fields.append(',');
           fields.append(quote(field.getName())).append(':');
           try { field.setAccessible(true); fields.append(snapshot(field.get(value), level + 1, seen)); }
           catch (Throwable error) { fields.append("{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"); }
         }
       }
-      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + ",\"fields\":{" + fields + "}}";
+      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + ",\"fields\":{" + fields + "}}";
     }
 
     private static String throwableSnapshot(Throwable thrown) {
       if (thrown == null) return "null";
       return "{\"type\":" + quote(thrown.getClass().getName()) + ",\"message\":" + quote(limit(thrown.getMessage(), 1000)) + "}";
     }
-    private static String safeText(Object value) { try { return limit(String.valueOf(value), 500); } catch (Throwable ignored) { return "<toString failed>"; } }
+    private static String identityText(Object value) {
+      if (value == null) return "null";
+      return value.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(value));
+    }
     private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max) + "…"; }
     private static String quote(String value) { if (value == null) return "null"; return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n") + "\""; }
     private static final class Call { final long id; final String className, methodName, descriptor; final StackTraceElement caller; final Object receiver; final Object[] arguments; Call(long id,String c,String m,String d,StackTraceElement caller,Object receiver,Object[] arguments){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;this.caller=caller;this.receiver=receiver;this.arguments=arguments == null ? new Object[0] : arguments.clone();} }

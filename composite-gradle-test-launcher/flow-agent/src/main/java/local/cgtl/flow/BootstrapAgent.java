@@ -14,6 +14,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Deque;
 import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Collection;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -33,6 +35,18 @@ public final class BootstrapAgent {
   private static volatile Field callIdField;
   private static volatile boolean consoleLines;
   private static final AtomicLong lineStateFailures = new AtomicLong();
+  private static final IdentityHashMap<Object, SnapshotCacheEntry> snapshotCache = new IdentityHashMap<>();
+  private static final AtomicLong snapshotIds = new AtomicLong();
+  private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
+  private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
+  private static final int snapshotMaxItems = Integer.getInteger("cgtl.flow.lineState.maxCollectionItems", 20);
+
+  private static final class SnapshotCacheEntry {
+    final String id;
+    String fingerprint;
+    long checkpointSequence;
+    SnapshotCacheEntry(String id) { this.id = id; }
+  }
 
   private BootstrapAgent() {}
 
@@ -43,7 +57,10 @@ public final class BootstrapAgent {
       premain.invoke(null, args, instrumentation);
       bindRecorder(flowAgent);
       consoleLines = Boolean.parseBoolean(System.getProperty("cgtl.flow.consoleLines", "true"));
-      System.err.println("[CGTL FLOW] Line state validation mode=" + System.getProperty("cgtl.flow.lineState", "receiver"));
+      System.err.println("[CGTL FLOW] Line state validation mode=" + System.getProperty("cgtl.flow.lineState", "receiver")
+          + " maxDepth=" + snapshotMaxDepth
+          + " maxFields=" + snapshotMaxFields
+          + " maxItems=" + snapshotMaxItems);
       installLineTransformer(instrumentation);
     } catch (Throwable error) {
       System.err.println("[CGTL FLOW] Ordered line replay disabled: " + error);
@@ -129,34 +146,148 @@ public final class BootstrapAgent {
   }
 
   private static String snapshotForLine(Object value) {
-    try { return snapshot(value, 0, new IdentityHashMap<>()); }
+    try { return snapshot(value, 0, new IdentityHashMap<>(), true); }
     catch (Throwable error) { return "{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"; }
   }
 
-  private static String snapshot(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+  /**
+   * Root receivers are always emitted with their direct fields. Referenced objects
+   * are checkpointed by identity and a bounded structural fingerprint. If the
+   * referenced object did not change, only a snapshotRef is written.
+   */
+  private static String snapshot(Object value, int level, IdentityHashMap<Object, Boolean> seen, boolean forceRoot) {
     if (value == null) return "null";
-    if (value instanceof String || value instanceof Character || value instanceof Enum<?>) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
-    if (value instanceof Number || value instanceof Boolean) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(String.valueOf(value)) + "}";
+    if (isScalar(value)) return scalarSnapshot(value);
     Class<?> type = value.getClass();
-    if (type.isArray()) {
-      int length = Math.min(Array.getLength(value), 20); StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"items\":[");
-      for (int i=0;i<length;i++){if(i>0)out.append(',');out.append(snapshot(Array.get(value,i),level+1,seen));}
-      return out.append("]}").toString();
+    if (seen.put(value, Boolean.TRUE) != null) {
+      SnapshotCacheEntry cached = cacheEntry(value, type);
+      return refSnapshot(cached, type, "cycle");
     }
-    if (seen.put(value, Boolean.TRUE) != null) return "{\"type\":" + quote(type.getName()) + ",\"value\":\"<cycle>\"}";
-    if (level >= 1) return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + "}";
-    StringBuilder fields = new StringBuilder(); int count = 0;
-    for (Class<?> current = type; current != null && current != Object.class && count < 25; current = current.getSuperclass()) {
-      for (Field field : current.getDeclaredFields()) {
-        if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic() || count >= 25) continue;
-        if (count++ > 0) fields.append(','); fields.append(quote(field.getName())).append(':');
-        try { field.setAccessible(true); fields.append(snapshot(field.get(value), level + 1, seen)); }
-        catch (Throwable error) { fields.append("{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"); }
+
+    SnapshotCacheEntry cache = cacheEntry(value, type);
+    String fingerprint = fingerprint(value, level, new IdentityHashMap<>());
+    boolean unchanged = !forceRoot && fingerprint.equals(cache.fingerprint);
+    if (unchanged) return refSnapshot(cache, type, "unchanged");
+
+    cache.fingerprint = fingerprint;
+    cache.checkpointSequence = sharedSequence == null ? 0 : sharedSequence.get();
+    String body;
+    if (type.isArray()) {
+      int length = Math.min(Array.getLength(value), snapshotMaxItems);
+      StringBuilder out = new StringBuilder("[" );
+      for (int i = 0; i < length; i++) {
+        if (i > 0) out.append(',');
+        out.append(level >= snapshotMaxDepth ? summary(Array.get(value, i)) : snapshot(Array.get(value, i), level + 1, seen, false));
+      }
+      body = "\"items\":" + out.append(']').toString() + ",\"size\":" + Array.getLength(value);
+    } else if (value instanceof Map<?,?> map) {
+      StringBuilder out = new StringBuilder("["); int i = 0;
+      for (Map.Entry<?,?> entry : map.entrySet()) {
+        if (i++ >= snapshotMaxItems) break;
+        if (i > 1) out.append(',');
+        out.append("{\"key\":").append(level >= snapshotMaxDepth ? summary(entry.getKey()) : snapshot(entry.getKey(), level + 1, seen, false));
+        out.append(",\"value\":").append(level >= snapshotMaxDepth ? summary(entry.getValue()) : snapshot(entry.getValue(), level + 1, seen, false)).append('}');
+      }
+      body = "\"entries\":" + out.append(']').toString() + ",\"size\":" + map.size();
+    } else if (value instanceof Collection<?> collection) {
+      StringBuilder out = new StringBuilder("["); int i = 0;
+      for (Object item : collection) {
+        if (i++ >= snapshotMaxItems) break;
+        if (i > 1) out.append(',');
+        out.append(level >= snapshotMaxDepth ? summary(item) : snapshot(item, level + 1, seen, false));
+      }
+      body = "\"items\":" + out.append(']').toString() + ",\"size\":" + collection.size();
+    } else if (level >= snapshotMaxDepth || type.getName().startsWith("java.")) {
+      body = "\"value\":" + quote(identityText(value));
+    } else {
+      StringBuilder fields = new StringBuilder(); int count = 0;
+      for (Class<?> current = type; current != null && current != Object.class && count < snapshotMaxFields; current = current.getSuperclass()) {
+        for (Field field : current.getDeclaredFields()) {
+          if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic() || count >= snapshotMaxFields) continue;
+          if (count++ > 0) fields.append(',');
+          fields.append(quote(field.getName())).append(':');
+          try {
+            field.setAccessible(true);
+            Object child = field.get(value);
+            fields.append(level + 1 > snapshotMaxDepth ? summary(child) : snapshot(child, level + 1, seen, false));
+          } catch (Throwable error) {
+            fields.append("{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}");
+          }
+        }
+      }
+      body = "\"value\":" + quote(identityText(value)) + ",\"fields\":{" + fields + "}";
+    }
+    return "{\"snapshotId\":" + quote(cache.id) + ",\"checkpointSequence\":" + cache.checkpointSequence + ",\"type\":" + quote(type.getName()) + "," + body + "}";
+  }
+
+  private static boolean isScalar(Object value) {
+    return value instanceof String || value instanceof Character || value instanceof Enum<?> || value instanceof Number || value instanceof Boolean;
+  }
+  private static String scalarSnapshot(Object value) {
+    return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
+  }
+  private static SnapshotCacheEntry cacheEntry(Object value, Class<?> type) {
+    synchronized (snapshotCache) {
+      SnapshotCacheEntry entry = snapshotCache.get(value);
+      if (entry == null) {
+        entry = new SnapshotCacheEntry(type.getName() + "@" + Integer.toHexString(System.identityHashCode(value)) + "#" + snapshotIds.incrementAndGet());
+        snapshotCache.put(value, entry);
+      }
+      return entry;
+    }
+  }
+  private static String refSnapshot(SnapshotCacheEntry entry, Class<?> type, String reason) {
+    return "{\"snapshotRef\":" + quote(entry.id) + ",\"checkpointSequence\":" + entry.checkpointSequence + ",\"type\":" + quote(type.getName()) + ",\"reason\":" + quote(reason) + "}";
+  }
+  private static String summary(Object value) {
+    if (value == null) return "null";
+    if (isScalar(value)) return scalarSnapshot(value);
+    SnapshotCacheEntry entry = cacheEntry(value, value.getClass());
+    return "{\"snapshotRef\":" + quote(entry.id) + ",\"checkpointSequence\":" + entry.checkpointSequence + ",\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(identityText(value)) + "}";
+  }
+  private static String fingerprint(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+    if (value == null) return "null";
+    if (isScalar(value)) return value.getClass().getName() + ":" + String.valueOf(value);
+    if (seen.put(value, Boolean.TRUE) != null) return "cycle@" + System.identityHashCode(value);
+    Class<?> type = value.getClass();
+    StringBuilder out = new StringBuilder(type.getName()).append('@').append(System.identityHashCode(value));
+    if (type.isArray()) {
+      int n = Math.min(Array.getLength(value), snapshotMaxItems); out.append('[').append(Array.getLength(value)).append(']');
+      for (int i=0;i<n;i++) out.append('|').append(level >= snapshotMaxDepth ? identityFingerprint(Array.get(value,i)) : fingerprint(Array.get(value,i), level+1, seen));
+      return out.toString();
+    }
+    if (value instanceof Map<?,?> map) {
+      out.append("|size=").append(map.size()); int i=0;
+      for (Map.Entry<?,?> e:map.entrySet()){if(i++>=snapshotMaxItems)break;out.append('|').append(identityFingerprint(e.getKey())).append('=').append(level>=snapshotMaxDepth?identityFingerprint(e.getValue()):fingerprint(e.getValue(),level+1,seen));}
+      return out.toString();
+    }
+    if (value instanceof Collection<?> collection) {
+      out.append("|size=").append(collection.size()); int i=0;
+      for(Object item:collection){if(i++>=snapshotMaxItems)break;out.append('|').append(level>=snapshotMaxDepth?identityFingerprint(item):fingerprint(item,level+1,seen));}
+      return out.toString();
+    }
+    if (level >= snapshotMaxDepth || type.getName().startsWith("java.")) return out.append('|').append(identityText(value)).toString();
+    int count=0;
+    for(Class<?> current=type;current!=null&&current!=Object.class&&count<snapshotMaxFields;current=current.getSuperclass()){
+      for(Field field:current.getDeclaredFields()){
+        if(Modifier.isStatic(field.getModifiers())||field.isSynthetic()||count++>=snapshotMaxFields)continue;
+        out.append('|').append(field.getName()).append('=');
+        try{field.setAccessible(true);Object child=field.get(value);out.append(level+1>snapshotMaxDepth?identityFingerprint(child):fingerprint(child,level+1,seen));}
+        catch(Throwable error){out.append('<').append(error.getClass().getSimpleName()).append('>');}
       }
     }
-    return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + ",\"fields\":{" + fields + "}}";
+    return out.toString();
   }
-  private static String safeText(Object value) { try { return limit(String.valueOf(value), 500); } catch (Throwable ignored) { return "<toString failed>"; } }
+  private static String identityFingerprint(Object value) {
+    if (value == null) return "null";
+    if (isScalar(value)) return value.getClass().getName() + ':' + String.valueOf(value);
+    return value.getClass().getName() + '@' + System.identityHashCode(value);
+  }
+  /** Never invokes application toString(); doing so can recursively generate trace events. */
+  private static String identityText(Object value) {
+    if (value == null) return "null";
+    return value.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(value));
+  }
   private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max) + "…"; }
 
   private static long currentCallId() throws Exception {
@@ -285,7 +416,7 @@ public final class BootstrapAgent {
             return new ClassVisitor(Opcodes.ASM9, visitor) {
               @Override public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
                 MethodVisitor downstream = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (downstream == null || name.startsWith("<") ||
+                if (downstream == null || name.startsWith("<") || isObjectUtility(name, descriptor) ||
                     (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0) return downstream;
                 boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
                 return new MethodVisitor(Opcodes.ASM9, downstream) {
@@ -313,6 +444,12 @@ public final class BootstrapAgent {
                 };
               }
             };
+          }
+
+          private static boolean isObjectUtility(String name, String descriptor) {
+            return (name.equals("toString") && descriptor.equals("()Ljava/lang/String;"))
+                || (name.equals("hashCode") && descriptor.equals("()I"))
+                || (name.equals("equals") && descriptor.equals("(Ljava/lang/Object;)Z"));
           }
 
           private static void pushInt(MethodVisitor visitor, int value) {
