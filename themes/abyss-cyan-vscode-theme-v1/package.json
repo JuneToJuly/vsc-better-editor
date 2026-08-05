@@ -1,0 +1,27 @@
+{
+  "name": "abyss-cyan-theme-v1",
+  "displayName": "Abyss Cyan Theme v1",
+  "description": "A polished light and dark VS Code theme built from cyan, steel blue, indigo, and deep violet.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Abyss Cyan Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/abyss-cyan-day-v1-color-theme.json"
+      },
+      {
+        "label": "Abyss Cyan Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/abyss-cyan-night-v1-color-theme.json"
+      }
+    ]
+  }
+}

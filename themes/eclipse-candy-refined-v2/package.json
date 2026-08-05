@@ -1,0 +1,27 @@
+{
+  "name": "eclipse-candy-refined-v2",
+  "displayName": "Eclipse Candy Refined v2",
+  "description": "Refined light and dark VS Code themes using black, electric violet, orchid, and warm butter yellow.",
+  "version": "2.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Eclipse Candy Refined Day v2",
+        "uiTheme": "vs",
+        "path": "./themes/eclipse-candy-refined-day-v2-color-theme.json"
+      },
+      {
+        "label": "Eclipse Candy Refined Night v2",
+        "uiTheme": "vs-dark",
+        "path": "./themes/eclipse-candy-refined-night-v2-color-theme.json"
+      }
+    ]
+  }
+}

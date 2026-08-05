@@ -1,0 +1,27 @@
+{
+  "name": "verdant-noir-theme-v1",
+  "displayName": "Verdant Noir Theme v1",
+  "description": "A polished light and dark VS Code theme built from black, forest olive, moss green, and electric lime.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Verdant Noir Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/verdant-noir-day-v1-color-theme.json"
+      },
+      {
+        "label": "Verdant Noir Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/verdant-noir-night-v1-color-theme.json"
+      }
+    ]
+  }
+}

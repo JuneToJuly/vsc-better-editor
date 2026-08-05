@@ -1,0 +1,27 @@
+{
+  "name": "eclipse-candy-theme-v1",
+  "displayName": "Eclipse Candy Theme v1",
+  "description": "Light and dark VS Code themes built from black, electric violet, orchid, and warm butter yellow.",
+  "version": "1.0.0",
+  "publisher": "custom-themes",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Eclipse Candy Day v1",
+        "uiTheme": "vs",
+        "path": "./themes/eclipse-candy-day-v1-color-theme.json"
+      },
+      {
+        "label": "Eclipse Candy Night v1",
+        "uiTheme": "vs-dark",
+        "path": "./themes/eclipse-candy-night-v1-color-theme.json"
+      }
+    ]
+  }
+}
