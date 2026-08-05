@@ -22,6 +22,7 @@ let debugEvaluateSession;
 let debugEvaluateFrameId;
 let debugEvaluateOutput;
 let debugEvaluateResultPanel;
+let debugEvaluatePanelProvider;
 let debugEvaluateStoppedThreadId;
 let debugEvaluateCurrentFrame;
 let debugEvaluateHistory = [];
@@ -64,6 +65,13 @@ async function activate(context) {
   register(context, 'compositeGradleTests.addTest', addTestCase);
   register(context, 'compositeGradleTests.evaluateExpression', () => showDebugEvaluateWindow());
   register(context, 'compositeGradleTests.evaluateCurrentExpression', evaluateCurrentExpression);
+
+  debugEvaluatePanelProvider = new DebugEvaluatePanelProvider();
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(
+    'compositeGradleTests.evaluateView',
+    debugEvaluatePanelProvider,
+    { webviewOptions: { retainContextWhenHidden: true } }
+  ));
 
   resultsViewProvider = new CompositeGradleResultsViewProvider(context.extensionUri);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(
@@ -3285,6 +3293,34 @@ async function runFailedProjectTests() {
 }
 
 
+async function openDebugEvaluatePanel() {
+  const viewId = 'compositeGradleTests.evaluateView';
+  const focusCommand = `${viewId}.focus`;
+
+  // A contributed WebviewView in the Panel is revealed by its generated
+  // `<viewId>.focus` command. `workbench.action.openView` may resolve without
+  // revealing panel-hosted views, so do not use it as the primary path.
+  await vscode.commands.executeCommand('workbench.action.focusPanel');
+
+  const commands = await vscode.commands.getCommands(true);
+  if (!commands.includes(focusCommand)) {
+    throw new Error(`Evaluate panel view command '${focusCommand}' was not registered by VS Code.`);
+  }
+
+  await vscode.commands.executeCommand(focusCommand);
+
+  // Wait for VS Code to resolve the provider. Failing loudly here is better
+  // than leaving the command looking like it did nothing.
+  const deadline = Date.now() + 2000;
+  while (!debugEvaluatePanelProvider?.view && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (!debugEvaluatePanelProvider?.view) {
+    throw new Error('Evaluate panel was focused, but its webview provider was not resolved. Reload the VS Code window and try again.');
+  }
+  debugEvaluatePanelProvider.view.show?.(true);
+}
+
 async function showDebugEvaluateWindow() {
   const session = vscode.debug.activeDebugSession;
   if (!session) throw new Error('Start a Java debug session first.');
@@ -3296,30 +3332,9 @@ async function showDebugEvaluateWindow() {
   debugEvaluateSession = session;
   debugEvaluateFrameId = frame.id;
   debugEvaluateCurrentFrame = frame;
-
-  let document;
-  if (debugEvaluateScratchUri) {
-    document = vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === debugEvaluateScratchUri.toString());
-  }
-  if (!document) {
-    document = await vscode.workspace.openTextDocument({
-      language: 'java',
-      content: '// Ctrl+Enter evaluates the selection or document in the paused frame.\n\n'
-    });
-    debugEvaluateScratchUri = document.uri;
-  }
-
-  const editor = await vscode.window.showTextDocument(document, {
-    viewColumn: vscode.ViewColumn.Beside,
-    preserveFocus: false,
-    preview: false
-  });
-  await vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', true);
-  const end = document.lineAt(document.lineCount - 1).range.end;
-  editor.selection = new vscode.Selection(end, end);
-  editor.revealRange(new vscode.Range(end, end));
+  await openDebugEvaluatePanel();
   await ensureDebugEvaluateResultPanel();
-  renderDebugEvaluateResult({ status: 'idle', message: 'Ready to evaluate.', frame });
+  renderDebugEvaluateResult(debugEvaluateCurrentModel || { status: 'idle', message: 'Enter an expression and press Ctrl+Enter.', frame });
   vscode.window.setStatusBarMessage(`Evaluate Expression — ${frame.name || 'paused frame'}`, 3500);
 }
 
@@ -3355,29 +3370,47 @@ async function resolveCurrentDebugFrame(session) {
 }
 
 async function ensureDebugEvaluateResultPanel() {
-  if (debugEvaluateResultPanel) {
-    debugEvaluateResultPanel.reveal(undefined, true);
+  if (debugEvaluatePanelProvider?.view) {
+    debugEvaluateResultPanel = debugEvaluatePanelProvider.view;
     return debugEvaluateResultPanel;
   }
+  await openDebugEvaluatePanel();
+  return debugEvaluatePanelProvider?.view;
+}
 
-  // Keep the expression editor above the result view, matching an IDE-style
-  // evaluate window. The scratch editor is active when this is called.
-  await vscode.commands.executeCommand('workbench.action.newGroupBelow');
-  debugEvaluateResultPanel = vscode.window.createWebviewPanel(
-    'compositeGradleTests.evaluateResult',
-    'Evaluate',
-    { viewColumn: vscode.ViewColumn.Active, preserveFocus: true },
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
-  debugEvaluateResultPanel.webview.onDidReceiveMessage(handleDebugEvaluateMessage);
-  debugEvaluateResultPanel.onDidDispose(() => { debugEvaluateResultPanel = undefined; });
-  renderDebugEvaluateResult({ status: 'idle', message: 'Press Ctrl+Enter in the Evaluate editor.', frame: debugEvaluateCurrentFrame });
-  await vscode.commands.executeCommand('workbench.action.navigateUp');
-  return debugEvaluateResultPanel;
+class DebugEvaluatePanelProvider {
+  resolveWebviewView(view) {
+    this.view = view;
+    debugEvaluateResultPanel = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.onDidReceiveMessage(handleDebugEvaluateMessage);
+    view.onDidDispose(() => {
+      if (debugEvaluateResultPanel === view) debugEvaluateResultPanel = undefined;
+      this.view = undefined;
+    });
+    renderDebugEvaluateResult(debugEvaluateCurrentModel || {
+      status: 'idle',
+      message: 'Pause a Java debug session, enter an expression, and press Ctrl+Enter.',
+      frame: debugEvaluateCurrentFrame
+    });
+  }
 }
 
 async function handleDebugEvaluateMessage(message) {
   try {
+    if (message.command === 'evaluate') {
+      await evaluateCurrentExpression(String(message.expression || ''));
+      return;
+    }
+    if (message.command === 'complete') {
+      const requestId = Number(message.requestId || 0);
+      const completions = await requestDebugEvaluateCompletions(
+        String(message.expression || ''),
+        Number(message.cursor || 0)
+      );
+      debugEvaluateResultPanel?.webview.postMessage({ command: 'completions', requestId, completions });
+      return;
+    }
     if (message.command === 'expand' && Number.isInteger(message.variablesReference)) {
       const session = vscode.debug.activeDebugSession || debugEvaluateSession;
       if (!session) return;
@@ -3391,20 +3424,15 @@ async function handleDebugEvaluateMessage(message) {
     }
     if (message.command === 'history' && Number.isInteger(message.index)) {
       const item = debugEvaluateHistory[message.index];
-      if (!item || !debugEvaluateScratchUri) return;
-      const document = vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === debugEvaluateScratchUri.toString());
-      if (!document) return;
-      const edit = new vscode.WorkspaceEdit();
-      const full = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
-      edit.replace(document.uri, full, `// Ctrl+Enter evaluates the selection or document in the paused frame.\n\n${item.expression}`);
-      await vscode.workspace.applyEdit(edit);
-      const editor = vscode.window.visibleTextEditors.find(candidate => candidate.document.uri.toString() === document.uri.toString());
-      if (editor) {
-        const end = document.lineAt(document.lineCount - 1).range.end;
-        editor.selection = new vscode.Selection(end, end);
-        editor.revealRange(new vscode.Range(end, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-      }
+      if (!item) return;
+      debugEvaluateResultPanel?.webview.postMessage({ command: 'setExpression', expression: item.expression });
       renderDebugEvaluateResult(item.model || { status: 'idle', message: 'Expression restored.', frame: debugEvaluateCurrentFrame });
+      return;
+    }
+    if (message.command === 'clearHistory') {
+      debugEvaluateHistory = [];
+      if (extensionContext) await extensionContext.workspaceState.update('debugEvaluateHistory', debugEvaluateHistory);
+      renderDebugEvaluateResult(debugEvaluateCurrentModel || { status: 'idle', message: 'History cleared.', frame: debugEvaluateCurrentFrame });
     }
   } catch (error) {
     vscode.window.showErrorMessage(`Evaluate: ${error instanceof Error ? error.message : String(error)}`);
@@ -3422,9 +3450,11 @@ function renderDebugEvaluateResult(model) {
   const frameLabel = frame
     ? `${escape(frame.name || 'stack frame')} · ${escape(frame.source?.name || frame.source?.path || '')}${frame.line ? `:${frame.line}` : ''}`
     : 'No paused frame';
-  const history = debugEvaluateHistory.map((item, index) =>
-    `<button class="history-item" data-history="${index}" title="${escape(item.expression)}">${escape(item.expression.replace(/\s+/g, ' ').slice(0, 80))}</button>`
-  ).join('');
+  const history = debugEvaluateHistory.map((item, index) => {
+    const summary = escape(item.expression.replace(/\s+/g, ' ').slice(0, 110));
+    const value = item.model?.status === 'success' ? escape(formatDebugValue(item.model.result)) : item.model?.status === 'error' ? 'Error' : '';
+    return `<button class="history-item" data-history="${index}" title="${escape(item.expression)}"><span class="history-expression">${summary}</span><span class="history-value">${value}</span></button>`;
+  }).join('');
   const vars = Array.isArray(model?.variables) ? model.variables : [];
   const rootRows = vars.map((v, index) => renderEvaluateVariable(v, `root-${index}`, 0, escape)).join('');
   const resultLine = status === 'success'
@@ -3434,34 +3464,48 @@ function renderDebugEvaluateResult(model) {
       : status === 'running'
         ? `<div class="running">Evaluating…</div>`
         : `<div class="idle">${escape(model.message || 'Ready')}</div>`;
-  const expression = model?.expression ? `<div class="expression">${escape(model.expression)}</div>` : '';
   const nonce = Math.random().toString(36).slice(2);
+  const initialExpression = escape(model?.expression || '');
   debugEvaluateResultPanel.webview.html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';"><style>
-    *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);display:flex;flex-direction:column;font-size:12px}
-    .context{padding:8px 12px;border-bottom:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.context strong{color:var(--vscode-foreground);font-weight:600}
-    .main{display:grid;grid-template-columns:minmax(0,1fr) 155px;min-height:0;flex:1}.result-pane{min-width:0;overflow:auto;padding:10px 12px 24px}.history{border-left:1px solid var(--vscode-panel-border);min-width:0;overflow:auto;background:var(--vscode-sideBar-background)}
-    .section-label{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--vscode-descriptionForeground);font-weight:700;padding:8px 9px 5px}.history-item{display:block;width:100%;border:0;border-top:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-foreground);text-align:left;padding:7px 8px;font:inherit;font-family:var(--vscode-editor-font-family);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}.history-item:hover{background:var(--vscode-list-hoverBackground)}
-    .expression{font-family:var(--vscode-editor-font-family);font-size:11px;color:var(--vscode-descriptionForeground);padding:0 0 8px;white-space:pre-wrap}.root-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:7px 8px;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);margin-bottom:8px}.value{font-family:var(--vscode-editor-font-family);font-size:13px;overflow-wrap:anywhere}.type{color:var(--vscode-descriptionForeground);font-size:10px}.error{border-left:3px solid var(--vscode-testing-iconFailed);background:var(--vscode-inputValidation-errorBackground);padding:9px;white-space:pre-wrap}.running,.idle{color:var(--vscode-descriptionForeground);padding:8px 0}
-    .tree{border:1px solid var(--vscode-panel-border)}.var-row{display:grid;grid-template-columns:minmax(110px,.8fr) minmax(100px,1.2fr) minmax(70px,.55fr);align-items:center;min-height:26px;border-top:1px solid var(--vscode-panel-border);font-family:var(--vscode-editor-font-family);font-size:11px}.var-row:first-child{border-top:0}.cell{padding:4px 7px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.name{display:flex;align-items:center;gap:3px}.toggle{width:16px;height:18px;padding:0;border:0;background:transparent;color:var(--vscode-foreground);cursor:pointer;font-size:11px}.toggle.empty{visibility:hidden}.var-value{color:var(--vscode-debugTokenExpression-value)}.var-type{color:var(--vscode-descriptionForeground);font-size:10px}.children{grid-column:1/-1}.children:empty{display:none}.child-wrap .var-row{border-left:1px solid var(--vscode-panel-border)}
-    @media(max-width:520px){.main{grid-template-columns:1fr}.history{display:none}.var-row{grid-template-columns:minmax(95px,.9fr) minmax(95px,1.1fr)}.var-type{display:none}}
-  </style></head><body><div class="context"><strong>Paused:</strong> ${frameLabel}</div><div class="main"><div class="result-pane">${expression}${resultLine}${rootRows ? `<div class="section-label">Fields</div><div class="tree">${rootRows}</div>` : ''}</div><aside class="history"><div class="section-label">History</div>${history || '<div class="idle" style="padding:8px">No evaluations</div>'}</aside></div><script nonce="${nonce}">
-    const vscode=acquireVsCodeApi();
-    document.addEventListener('click',event=>{
-      const history=event.target.closest('[data-history]');
-      if(history){vscode.postMessage({command:'history',index:Number(history.dataset.history)});return;}
-      const button=event.target.closest('[data-ref]');
-      if(!button)return;
-      const id=button.dataset.node;const target=document.getElementById(id);if(!target)return;
-      if(target.dataset.loaded==='true'){target.hidden=!target.hidden;button.textContent=target.hidden?'▸':'▾';return;}
-      button.textContent='…';vscode.postMessage({command:'expand',nodeId:id,variablesReference:Number(button.dataset.ref)});
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-panel-background,var(--vscode-editor-background));font-size:12px;overflow:hidden}
+    .shell{height:100%;display:flex;flex-direction:column}.context{height:30px;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.context strong{color:var(--vscode-foreground);margin-right:5px}
+    .main{min-height:0;flex:1;display:grid;grid-template-columns:minmax(260px,42%) minmax(360px,58%)}.expressions{min-width:0;border-right:1px solid var(--vscode-panel-border);display:flex;flex-direction:column}.output{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) 220px}
+    .pane-title{height:29px;display:flex;align-items:center;justify-content:space-between;padding:0 9px;border-bottom:1px solid var(--vscode-panel-border);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.hint{font-weight:400;letter-spacing:0;text-transform:none;color:var(--vscode-descriptionForeground)}
+    .editor-wrap{position:relative;flex:1;min-height:0;display:flex}textarea{flex:1;min-height:0;width:100%;resize:none;border:0;outline:0;padding:10px 11px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font:13px/1.5 var(--vscode-editor-font-family);tab-size:2}.suggestions{position:absolute;z-index:20;left:10px;right:10px;top:34px;max-height:190px;overflow:auto;border:1px solid var(--vscode-widget-border,var(--vscode-panel-border));background:var(--vscode-editorSuggestWidget-background,var(--vscode-editor-background));box-shadow:0 4px 14px var(--vscode-widget-shadow,rgba(0,0,0,.28))}.suggestions[hidden]{display:none}.suggestion{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;width:100%;border:0;background:transparent;color:var(--vscode-editorSuggestWidget-foreground,var(--vscode-foreground));padding:5px 8px;text-align:left;cursor:pointer;font-family:var(--vscode-editor-font-family)}.suggestion:hover,.suggestion.selected{background:var(--vscode-editorSuggestWidget-selectedBackground,var(--vscode-list-activeSelectionBackground));color:var(--vscode-editorSuggestWidget-selectedForeground,var(--vscode-list-activeSelectionForeground))}.suggestion-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.suggestion-detail{color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}.actions{height:34px;display:flex;align-items:center;gap:6px;padding:4px 7px;border-top:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background)}
+    button{font:inherit}.primary{border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:4px 12px;cursor:pointer}.primary:hover{background:var(--vscode-button-hoverBackground)}.secondary{border:1px solid var(--vscode-button-secondaryBackground);background:transparent;color:var(--vscode-foreground);padding:3px 8px;cursor:pointer}
+    .result-pane{min-width:0;overflow:auto;padding:9px 10px 22px}.history{min-width:0;overflow:auto;border-left:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background)}.history-head{height:29px;display:flex;align-items:center;justify-content:space-between;padding:0 8px;border-bottom:1px solid var(--vscode-panel-border);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}.clear{border:0;background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer}.clear:hover{color:var(--vscode-foreground)}
+    .history-item{display:grid;width:100%;grid-template-columns:minmax(0,1fr) auto;gap:8px;border:0;border-bottom:1px solid var(--vscode-panel-border);background:transparent;color:var(--vscode-foreground);text-align:left;padding:7px 8px;cursor:pointer}.history-item:hover{background:var(--vscode-list-hoverBackground)}.history-expression{font-family:var(--vscode-editor-font-family);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.history-value{color:var(--vscode-descriptionForeground);max-width:70px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .root-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:8px;background:var(--vscode-textCodeBlock-background);border:1px solid var(--vscode-panel-border);margin-bottom:8px}.value{font:13px var(--vscode-editor-font-family);overflow-wrap:anywhere}.type{color:var(--vscode-descriptionForeground);font-size:10px}.error{border-left:3px solid var(--vscode-testing-iconFailed);background:var(--vscode-inputValidation-errorBackground);padding:9px;white-space:pre-wrap}.running,.idle{color:var(--vscode-descriptionForeground);padding:8px 0}.section-label{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--vscode-descriptionForeground);font-weight:700;padding:8px 0 5px}
+    .tree{border:1px solid var(--vscode-panel-border)}.var-row{display:grid;grid-template-columns:minmax(120px,.9fr) minmax(140px,1.1fr) minmax(80px,.55fr);border-top:1px solid var(--vscode-panel-border);position:relative}.child-wrap:first-child>.var-row{border-top:0}.cell{min-width:0;padding:5px 7px;font-family:var(--vscode-editor-font-family);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.name{display:flex;align-items:center;gap:3px;color:var(--vscode-symbolIcon-variableForeground,var(--vscode-foreground))}.var-value{border-left:1px solid var(--vscode-panel-border)}.var-type{border-left:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:10px}.toggle{width:15px;padding:0;border:0;background:transparent;color:var(--vscode-foreground);cursor:pointer}.toggle.empty{visibility:hidden}.children{grid-column:1/-1}
+    @media(max-width:800px){.main{grid-template-columns:1fr}.expressions{border-right:0;border-bottom:1px solid var(--vscode-panel-border);min-height:130px}.output{grid-template-columns:minmax(0,1fr) 180px}}
+  </style></head><body><div class="shell"><div class="context"><strong>Paused:</strong>${frameLabel}</div><div class="main"><section class="expressions"><div class="pane-title"><span>Expressions</span><span class="hint">Ctrl+Enter to evaluate</span></div><div class="editor-wrap"><textarea id="expression" spellcheck="false" placeholder="Enter a Java expression…">${initialExpression}</textarea><div id="suggestions" class="suggestions" hidden></div></div><div class="actions"><button id="evaluate" class="primary">Evaluate</button><button id="clearExpression" class="secondary">Clear</button></div></section><section class="output"><div class="result-pane"><div class="pane-title" style="margin:-9px -10px 9px"><span>Output</span></div>${resultLine}${rootRows ? `<div class="section-label">Fields</div><div class="tree">${rootRows}</div>` : ''}</div><aside class="history"><div class="history-head"><span>History</span><button id="clearHistory" class="clear">Clear</button></div>${history || '<div class="idle" style="padding:10px">No evaluations</div>'}</aside></section></div></div><script nonce="${nonce}">
+    const vscode=acquireVsCodeApi();const input=document.getElementById('expression');const suggestions=document.getElementById('suggestions');let completionTimer;let completionRequest=0;let activeCompletionRequest=0;let completionItems=[];let selectedCompletion=0;
+    document.getElementById('evaluate').addEventListener('click',()=>vscode.postMessage({command:'evaluate',expression:input.value}));
+    document.getElementById('clearExpression').addEventListener('click',()=>{input.value='';hideSuggestions();input.focus();});
+    document.getElementById('clearHistory').addEventListener('click',()=>vscode.postMessage({command:'clearHistory'}));
+    input.addEventListener('input',()=>scheduleCompletions(false));
+    input.addEventListener('click',()=>scheduleCompletions(false));
+    input.addEventListener('keydown',event=>{
+      if(!suggestions.hidden&&completionItems.length){
+        if(event.key==='ArrowDown'){event.preventDefault();selectedCompletion=(selectedCompletion+1)%completionItems.length;renderSuggestions();return;}
+        if(event.key==='ArrowUp'){event.preventDefault();selectedCompletion=(selectedCompletion-1+completionItems.length)%completionItems.length;renderSuggestions();return;}
+        if(event.key==='Escape'){event.preventDefault();hideSuggestions();return;}
+        if(event.key==='Tab'||event.key==='Enter'&&!(event.ctrlKey||event.metaKey)){event.preventDefault();applyCompletion(completionItems[selectedCompletion]);return;}
+      }
+      if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();hideSuggestions();vscode.postMessage({command:'evaluate',expression:input.value});return;}
+      if(event.ctrlKey&&event.code==='Space'){event.preventDefault();scheduleCompletions(true);}
     });
-    window.addEventListener('message',event=>{
-      const message=event.data;if(message.command!=='expanded')return;
-      const target=document.getElementById(message.nodeId);const button=document.querySelector('[data-node="'+message.nodeId+'"]');if(!target)return;
-      target.innerHTML=(message.variables||[]).map((v,i)=>renderVar(v,message.nodeId+'-'+i,Number(target.dataset.depth||0)+1)).join('');target.dataset.loaded='true';target.hidden=false;if(button)button.textContent='▾';
-    });
+    function scheduleCompletions(force){clearTimeout(completionTimer);completionTimer=setTimeout(()=>requestCompletions(force),force?0:140);}
+    function requestCompletions(force){const cursor=input.selectionStart||0;const before=input.value.slice(0,cursor);if(!force&&!/[A-Za-z0-9_$.)]$/.test(before)){hideSuggestions();return;}const requestId=++completionRequest;activeCompletionRequest=requestId;vscode.postMessage({command:'complete',requestId,expression:input.value,cursor});}
+    function renderSuggestions(){if(!completionItems.length){hideSuggestions();return;}suggestions.innerHTML=completionItems.map((item,index)=>'<button class="suggestion '+(index===selectedCompletion?'selected':'')+'" data-completion="'+index+'"><span class="suggestion-label">'+esc(item.label||item.text||'')+'</span><span class="suggestion-detail">'+esc(item.detail||item.type||'')+'</span></button>').join('');suggestions.hidden=false;suggestions.querySelector('.selected')?.scrollIntoView({block:'nearest'});}
+    function hideSuggestions(){completionItems=[];selectedCompletion=0;suggestions.hidden=true;suggestions.innerHTML='';}
+    function applyCompletion(item){if(!item)return;const cursor=input.selectionStart||0;const start=Number.isInteger(item.start)?item.start:cursor;const end=Number.isInteger(item.end)?item.end:cursor;const text=item.text||item.label||'';input.setRangeText(text,start,end,'end');hideSuggestions();input.focus();scheduleCompletions(false);}
+    suggestions.addEventListener('mousedown',event=>{event.preventDefault();const button=event.target.closest('[data-completion]');if(button)applyCompletion(completionItems[Number(button.dataset.completion)]);});
+    document.addEventListener('click',event=>{const h=event.target.closest('[data-history]');if(h){vscode.postMessage({command:'history',index:Number(h.dataset.history)});return;}const b=event.target.closest('[data-ref]');if(!b)return;const id=b.dataset.node;const target=document.getElementById(id);if(!target)return;if(target.dataset.loaded==='true'){target.hidden=!target.hidden;b.textContent=target.hidden?'▸':'▾';return;}b.textContent='…';vscode.postMessage({command:'expand',nodeId:id,variablesReference:Number(b.dataset.ref)});});
+    window.addEventListener('message',event=>{const m=event.data;if(m.command==='setExpression'){input.value=m.expression||'';hideSuggestions();input.focus();return;}if(m.command==='completions'){if(Number(m.requestId)!==activeCompletionRequest)return;completionItems=Array.isArray(m.completions)?m.completions:[];selectedCompletion=0;renderSuggestions();return;}if(m.command!=='expanded')return;const target=document.getElementById(m.nodeId);const button=document.querySelector('[data-node="'+m.nodeId+'"]');if(!target)return;target.innerHTML=(m.variables||[]).map((v,i)=>renderVar(v,m.nodeId+'-'+i,Number(target.dataset.depth||0)+1)).join('');target.dataset.loaded='true';target.hidden=false;if(button)button.textContent='▾';});
     function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-    function renderVar(v,id,depth){const ref=Number(v.variablesReference||0);const pad=depth*14;return '<div class="child-wrap"><div class="var-row"><div class="cell name" style="padding-left:'+(7+pad)+'px"><button class="toggle '+(ref?'':'empty')+'" data-ref="'+ref+'" data-node="'+id+'">▸</button><span title="'+esc(v.name)+'">'+esc(v.name)+'</span></div><div class="cell var-value" title="'+esc(v.value)+'">'+esc(v.value)+'</div><div class="cell var-type" title="'+esc(v.type||'')+'">'+esc(v.type||'')+'</div><div id="'+id+'" class="children" data-depth="'+depth+'" hidden></div></div></div>';}
+    function renderVar(v,id,depth){const ref=Number(v.variablesReference||0);const pad=depth*12;return '<div class="child-wrap"><div class="var-row"><div class="cell name" style="padding-left:'+(7+pad)+'px"><button class="toggle '+(ref?'':'empty')+'" data-ref="'+ref+'" data-node="'+id+'">▸</button><span title="'+esc(v.name)+'">'+esc(v.name)+'</span></div><div class="cell var-value" title="'+esc(v.value)+'">'+esc(v.value)+'</div><div class="cell var-type" title="'+esc(v.type||'')+'">'+esc(v.type||'')+'</div><div id="'+id+'" class="children" data-depth="'+depth+'" hidden></div></div></div>';}
+    input.focus();
   </script></body></html>`;
 }
 
@@ -3477,11 +3521,21 @@ function formatDebugValue(value) {
   return text;
 }
 
-async function evaluateCurrentExpression() {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || !debugEvaluateScratchUri || editor.document.uri.toString() !== debugEvaluateScratchUri.toString()) {
-    throw new Error('Open the Evaluate Expression editor first with Alt+F8.');
+async function evaluateCurrentExpression(expressionOverride) {
+  let expression = typeof expressionOverride === 'string' ? expressionOverride : '';
+  if (!expression) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && debugEvaluateScratchUri && editor.document.uri.toString() === debugEvaluateScratchUri.toString()) {
+      const selection = editor.selection;
+      expression = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
+    }
   }
+  expression = expression
+    .split(/\r?\n/)
+    .filter(line => !/^\s*\/\//.test(line) && !/^\s*import\s+/.test(line))
+    .join('\n')
+    .trim();
+  if (!expression) throw new Error('Enter an expression to evaluate.');
 
   const session = vscode.debug.activeDebugSession || debugEvaluateSession;
   if (!session || session.type !== 'java') throw new Error('The Java debug session has ended.');
@@ -3490,15 +3544,6 @@ async function evaluateCurrentExpression() {
   debugEvaluateSession = session;
   debugEvaluateFrameId = frame.id;
   debugEvaluateCurrentFrame = frame;
-
-  const selection = editor.selection;
-  let expression = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
-  expression = expression
-    .split(/\r?\n/)
-    .filter(line => !/^\s*\/\//.test(line) && !/^\s*import\s+/.test(line))
-    .join('\n')
-    .trim();
-  if (!expression) throw new Error('Enter or select an expression to evaluate.');
 
   await ensureDebugEvaluateResultPanel();
   renderDebugEvaluateResult({ status: 'running', expression, frame });
@@ -3521,7 +3566,7 @@ async function evaluateCurrentExpression() {
       status: 'success', expression, frame,
       result: String(result?.result ?? ''), type: result?.type || '', variables
     };
-    debugEvaluateHistory = [{ expression, model: successModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 20);
+    debugEvaluateHistory = [{ expression, model: successModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 30);
     if (extensionContext) await extensionContext.workspaceState.update('debugEvaluateHistory', debugEvaluateHistory);
     renderDebugEvaluateResult(successModel);
     vscode.window.setStatusBarMessage(`$(check) ${String(result?.result ?? '').slice(0, 120) || '(no value)'}`, 5000);
@@ -3529,11 +3574,56 @@ async function evaluateCurrentExpression() {
     const message = error instanceof Error ? error.message : String(error);
     debugEvaluateOutput.appendLine(`ERROR: ${message}`);
     const errorModel = { status: 'error', expression, message, frame };
-    debugEvaluateHistory = [{ expression, model: errorModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 20);
+    debugEvaluateHistory = [{ expression, model: errorModel }, ...debugEvaluateHistory.filter(item => item.expression !== expression)].slice(0, 30);
     if (extensionContext) await extensionContext.workspaceState.update('debugEvaluateHistory', debugEvaluateHistory);
     renderDebugEvaluateResult(errorModel);
     vscode.window.showErrorMessage(`Evaluate failed: ${message}`);
   }
+}
+
+async function requestDebugEvaluateCompletions(text, cursor) {
+  const session = vscode.debug.activeDebugSession || debugEvaluateSession;
+  if (!session || session.type !== 'java') return [];
+  const frame = await resolveCurrentDebugFrame(session);
+  if (!frame) return [];
+  debugEvaluateSession = session;
+  debugEvaluateFrameId = frame.id;
+
+  const safeCursor = Math.max(0, Math.min(Number(cursor) || 0, text.length));
+  const before = text.slice(0, safeCursor);
+  const lines = before.split(/\r?\n/);
+  const line = lines.length;
+  const column = (lines[lines.length - 1] || '').length + 1;
+  let response;
+  try {
+    response = await session.customRequest('completions', {
+      frameId: debugEvaluateFrameId,
+      text,
+      line,
+      column
+    });
+  } catch (_) {
+    return [];
+  }
+
+  const identifier = /[A-Za-z_$][\w$]*$/.exec(before);
+  const fallbackStart = identifier ? safeCursor - identifier[0].length : safeCursor;
+  return (response?.targets || []).slice(0, 250).map(target => {
+    let start = fallbackStart;
+    let end = safeCursor;
+    if (Number.isInteger(target.start) && Number.isInteger(target.length)) {
+      start = Math.max(0, Math.min(target.start, text.length));
+      end = Math.max(start, Math.min(start + target.length, text.length));
+    }
+    return {
+      label: String(target.label || target.text || ''),
+      text: String(target.text || target.label || ''),
+      detail: String(target.detail || target.type || ''),
+      type: String(target.type || ''),
+      start,
+      end
+    };
+  }).filter(item => item.label);
 }
 
 class DebugEvaluateCompletionProvider {
@@ -3621,7 +3711,7 @@ function collectJavaProjects(value, results = []) {
 function deactivate() {
   if (runningProcess) terminateProcessTree(runningProcess);
   debugEvaluatePanel?.panel?.dispose();
-  debugEvaluateResultPanel?.dispose();
+  debugEvaluateResultPanel = undefined;
   vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', false);
 }
 

@@ -1,6 +1,6 @@
 # Composite Gradle Test Launcher
 
-Current version: **0.1.73**
+Current version: **0.3.25**
 
 Run and debug Java tests through a **root Gradle composite build**, even when the standard VS Code Java test runner cannot model the build correctly.
 

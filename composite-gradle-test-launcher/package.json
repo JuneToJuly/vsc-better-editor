@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.3.21",
+  "version": "0.3.25",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -35,6 +35,7 @@
     "onView:compositeGradleTests.resultsView",
     "onCommand:compositeGradleTests.addTest",
     "onCommand:compositeGradleTests.openLastTest",
+    "onView:compositeGradleTests.evaluateView",
     "onCommand:compositeGradleTests.evaluateExpression",
     "onCommand:compositeGradleTests.evaluateCurrentExpression",
     "onCommand:compositeGradleTests.runMethodWithReport",
@@ -511,6 +512,13 @@
           "title": "Gradle Tests",
           "icon": "resources/gradle-tests.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "compositeGradleTests.evaluatePanel",
+          "title": "Evaluate",
+          "icon": "resources/gradle-tests.svg"
+        }
       ]
     },
     "views": {
@@ -523,6 +531,13 @@
           "type": "webview",
           "id": "compositeGradleTests.resultsView",
           "name": "Test Results"
+        }
+      ],
+      "compositeGradleTests.evaluatePanel": [
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.evaluateView",
+          "name": "Expressions"
         }
       ]
     }
