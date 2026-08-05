@@ -16,6 +16,9 @@ import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Collection;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -41,6 +44,14 @@ public final class BootstrapAgent {
   private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
   private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
   private static final int snapshotMaxItems = Integer.getInteger("cgtl.flow.lineState.maxCollectionItems", 20);
+  private static final ConcurrentHashMap<String, List<LocalScope>> localScopes = new ConcurrentHashMap<>();
+
+  private static final class LocalScope {
+    final String name; final int slot; final int startLine; final int endLine;
+    LocalScope(String name, int slot, int startLine, int endLine) {
+      this.name = name; this.slot = slot; this.startLine = startLine; this.endLine = endLine;
+    }
+  }
 
   private static final class SnapshotCacheEntry {
     final String id;
@@ -110,7 +121,7 @@ public final class BootstrapAgent {
           ",\"threadId\":" + Thread.currentThread().getId() +
           ",\"threadName\":" + quote(Thread.currentThread().getName()) +
           ",\"frameReceiver\":" + snapshotForLine(receiver) +
-          ",\"frameLocals\":" + localsJson(localNames, localValues) + "}";
+          ",\"frameLocals\":" + localsJson(className, methodName, descriptor, line, localNames, localValues) + "}";
       synchronized (Class.forName("local.cgtl.flow.FlowAgent$Recorder")) {
         output.write(json);
         output.write("\n");
@@ -134,17 +145,50 @@ public final class BootstrapAgent {
     }
   }
 
-  private static String localsJson(String[] names, Object[] values) {
+  public static void registerLocalNames(String className, String methodName, String descriptor,
+      String[] names, int[] slots, int[] startLines, int[] endLines) {
+    if (names == null || slots == null) return;
+    List<LocalScope> scopes = new ArrayList<>();
+    for (int i = 0; i < names.length && i < slots.length; i++) {
+      String name = names[i];
+      if (name == null || name.isBlank() || "this".equals(name)) continue;
+      int start = startLines != null && i < startLines.length ? startLines[i] : 0;
+      int end = endLines != null && i < endLines.length ? endLines[i] : Integer.MAX_VALUE;
+      scopes.add(new LocalScope(name, slots[i], start, end));
+    }
+    localScopes.put(methodKey(className, methodName, descriptor), scopes);
+  }
+
+  private static String localName(String className, String methodName, String descriptor, int line, int slot) {
+    List<LocalScope> scopes = localScopes.get(methodKey(className, methodName, descriptor));
+    if (scopes == null) return null;
+    LocalScope best = null;
+    for (LocalScope scope : scopes) {
+      if (scope.slot != slot || line < scope.startLine || line >= scope.endLine) continue;
+      if (best == null || scope.startLine >= best.startLine) best = scope;
+    }
+    return best == null ? null : best.name;
+  }
+
+  private static String methodKey(String className, String methodName, String descriptor) {
+    return className + "#" + methodName + descriptor;
+  }
+
+  private static String localsJson(String className, String methodName, String descriptor, int line,
+      String[] names, Object[] values) {
     if (values == null) return "{}";
     StringBuilder out = new StringBuilder("{");
     int emitted = 0;
     for (int i = 0; i < values.length; i++) {
       Object value = values[i];
       if (value == UNSET_LOCAL) continue;
-      if (emitted++ > 0) out.append(',');
       String name = names != null && i < names.length && names[i] != null && !names[i].isBlank()
           ? names[i]
-          : "slot" + i;
+          : localName(className, methodName, descriptor, line, i);
+      // Never expose compiler/JVM slots as source locals. If debug metadata cannot
+      // prove the source name and scope, omit the value rather than mislabel it.
+      if (name == null || name.isBlank()) continue;
+      if (emitted++ > 0) out.append(',');
       out.append(quote(name)).append(':').append(snapshotForLine(value));
     }
     return out.append('}').toString();
@@ -375,6 +419,10 @@ public final class BootstrapAgent {
       import net.bytebuddy.jar.asm.Opcodes;
       import net.bytebuddy.jar.asm.Type;
       import java.util.Arrays;
+      import java.util.ArrayList;
+      import java.util.IdentityHashMap;
+      import java.util.List;
+      import java.util.Map;
       import net.bytebuddy.matcher.ElementMatcher;
       import net.bytebuddy.matcher.ElementMatchers;
       import net.bytebuddy.pool.TypePool;
@@ -429,6 +477,8 @@ public final class BootstrapAgent {
                   private static final int LOCAL_STATE_SLOT = 1000;
                   private static final int LOCAL_STATE_SIZE = 256;
                   private int injected;
+                  private final Map<Label, Integer> labelLines = new IdentityHashMap<>();
+                  private final List<LocalMeta> localMetadata = new ArrayList<>();
 
                   @Override public void visitCode() {
                     super.visitCode();
@@ -479,6 +529,7 @@ public final class BootstrapAgent {
 
                   @Override public void visitLineNumber(int line, Label start) {
                     super.visitLineNumber(line, start);
+                    if (line > 0) labelLines.put(start, line);
                     if (line <= 0) return;
                     super.visitLdcInsn(className);
                     super.visitLdcInsn(name);
@@ -492,9 +543,35 @@ public final class BootstrapAgent {
                         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;[Ljava/lang/String;[Ljava/lang/Object;)V", false);
                     injected++;
                   }
+                  @Override public void visitLocalVariable(String localName, String localDescriptor, String localSignature,
+                      Label start, Label end, int index) {
+                    localMetadata.add(new LocalMeta(localName, index, start, end));
+                    super.visitLocalVariable(localName, localDescriptor, localSignature, start, end, index);
+                  }
+
                   @Override public void visitEnd() {
+                    if (!localMetadata.isEmpty()) {
+                      String[] names = new String[localMetadata.size()];
+                      int[] slots = new int[localMetadata.size()];
+                      int[] starts = new int[localMetadata.size()];
+                      int[] ends = new int[localMetadata.size()];
+                      for (int i = 0; i < localMetadata.size(); i++) {
+                        LocalMeta local = localMetadata.get(i);
+                        names[i] = local.name; slots[i] = local.slot;
+                        starts[i] = labelLines.getOrDefault(local.start, 0);
+                        ends[i] = labelLines.getOrDefault(local.end, Integer.MAX_VALUE);
+                      }
+                      local.cgtl.flow.BootstrapAgent.registerLocalNames(className, name, descriptor, names, slots, starts, ends);
+                    }
                     if (injected > 0) System.err.println("[CGTL FLOW] Line state instrumented " + className + "." + name + "() - " + injected + " lines");
                     super.visitEnd();
+                  }
+
+                  private final class LocalMeta {
+                    final String name; final int slot; final Label start; final Label end;
+                    LocalMeta(String name, int slot, Label start, Label end) {
+                      this.name = name; this.slot = slot; this.start = start; this.end = end;
+                    }
                   }
                 };
               }

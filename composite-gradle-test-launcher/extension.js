@@ -1686,11 +1686,19 @@ function renderFlowReplayHtml(result) {
       unavailable.insertAdjacentHTML('beforeend','<div class="state-empty">Receiver state was not captured for this line.</div>');
     }
 
-    if(e.frameLocals&&Object.keys(e.frameLocals).length){
-      const locals=section(context,'Visible locals',Object.keys(e.frameLocals).length+' captured');
+    const namedLocals=e.frameLocals&&typeof e.frameLocals==='object'
+      ?Object.fromEntries(Object.entries(e.frameLocals).filter(([name])=>{
+        const text=String(name||'');
+        if(!text.startsWith('slot'))return true;
+        const suffix=text.slice(4);
+        return !suffix||String(Number(suffix))!==suffix;
+      }))
+      :{};
+    if(Object.keys(namedLocals).length){
+      const locals=section(context,'Visible locals',Object.keys(namedLocals).length+' captured');
       const card=document.createElement('div');card.className='state-card';
       const fields=document.createElement('div');fields.className='state-fields';
-      for(const[k,v]of Object.entries(e.frameLocals))kv(fields,k,v);
+      for(const[k,v]of Object.entries(namedLocals))kv(fields,k,v);
       card.appendChild(fields);locals.appendChild(card);
     }
 
