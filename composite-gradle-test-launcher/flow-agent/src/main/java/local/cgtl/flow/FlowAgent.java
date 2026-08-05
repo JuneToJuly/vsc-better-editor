@@ -201,6 +201,11 @@ public final class FlowAgent {
       try { if (output != null && sequence.get() <= maxEvents) { output.write(json); output.write("\n"); output.flush(); } } catch (Exception ignored) {}
     }
 
+    public static String snapshotForLine(Object value) {
+      try { return snapshot(value, 0, new IdentityHashMap<>()); }
+      catch (Throwable error) { return "{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"; }
+    }
+
     private static String snapshotArray(Object[] values, IdentityHashMap<Object, Boolean> seen) {
       if (values == null) return "[]"; StringBuilder result = new StringBuilder("[");
       for (int i = 0; i < values.length; i++) { if (i > 0) result.append(','); result.append(snapshot(values[i], 0, seen)); }

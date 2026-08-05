@@ -3,14 +3,17 @@ package local.cgtl.flow;
 import java.io.File;
 import java.io.Writer;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -29,6 +32,7 @@ public final class BootstrapAgent {
   private static volatile int sharedMaxEvents;
   private static volatile Field callIdField;
   private static volatile boolean consoleLines;
+  private static final AtomicLong lineStateFailures = new AtomicLong();
 
   private BootstrapAgent() {}
 
@@ -39,6 +43,7 @@ public final class BootstrapAgent {
       premain.invoke(null, args, instrumentation);
       bindRecorder(flowAgent);
       consoleLines = Boolean.parseBoolean(System.getProperty("cgtl.flow.consoleLines", "true"));
+      System.err.println("[CGTL FLOW] Line state validation mode=" + System.getProperty("cgtl.flow.lineState", "receiver"));
       installLineTransformer(instrumentation);
     } catch (Throwable error) {
       System.err.println("[CGTL FLOW] Ordered line replay disabled: " + error);
@@ -62,7 +67,8 @@ public final class BootstrapAgent {
   }
 
   /** Called from injected bytecode at each source line-number boundary. */
-  public static void line(String className, String methodName, String descriptor, int line) {
+  public static void lineState(String className, String methodName, String descriptor, int line,
+      Object receiver, String[] localNames, Object[] localValues) {
     try {
       AtomicLong sequence = sharedSequence;
       Writer output = sharedOutput;
@@ -84,7 +90,9 @@ public final class BootstrapAgent {
           ",\"line\":" + line +
           ",\"depth\":" + depth +
           ",\"threadId\":" + Thread.currentThread().getId() +
-          ",\"threadName\":" + quote(Thread.currentThread().getName()) + "}";
+          ",\"threadName\":" + quote(Thread.currentThread().getName()) +
+          ",\"frameReceiver\":" + snapshotForLine(receiver) +
+          ",\"frameLocals\":" + localsJson(localNames, localValues) + "}";
       synchronized (Class.forName("local.cgtl.flow.FlowAgent$Recorder")) {
         output.write(json);
         output.write("\n");
@@ -97,10 +105,59 @@ public final class BootstrapAgent {
             + " depth=" + depth + "] "
             + className + "." + methodName + "():" + line);
       }
-    } catch (Throwable ignored) {
-      // A trace must never change application behavior.
+    } catch (Throwable error) {
+      // A trace must never change application behavior, but validation builds
+      // must make capture failures visible. Limit output to avoid flooding.
+      long failures = lineStateFailures.incrementAndGet();
+      if (failures <= 20) {
+        System.err.println("[CGTL FLOW] Line state callback failed for " + className + "." + methodName + "():" + line + " - " + error);
+        error.printStackTrace(System.err);
+      }
     }
   }
+
+  private static String localsJson(String[] names, Object[] values) {
+    if (names == null || values == null) return "{}";
+    StringBuilder out = new StringBuilder("{");
+    int length = Math.min(names.length, values.length);
+    for (int i = 0; i < length; i++) {
+      if (i > 0) out.append(',');
+      out.append(quote(names[i])).append(':')
+          .append(snapshotForLine(values[i]));
+    }
+    return out.append('}').toString();
+  }
+
+  private static String snapshotForLine(Object value) {
+    try { return snapshot(value, 0, new IdentityHashMap<>()); }
+    catch (Throwable error) { return "{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"; }
+  }
+
+  private static String snapshot(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+    if (value == null) return "null";
+    if (value instanceof String || value instanceof Character || value instanceof Enum<?>) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
+    if (value instanceof Number || value instanceof Boolean) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(String.valueOf(value)) + "}";
+    Class<?> type = value.getClass();
+    if (type.isArray()) {
+      int length = Math.min(Array.getLength(value), 20); StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"items\":[");
+      for (int i=0;i<length;i++){if(i>0)out.append(',');out.append(snapshot(Array.get(value,i),level+1,seen));}
+      return out.append("]}").toString();
+    }
+    if (seen.put(value, Boolean.TRUE) != null) return "{\"type\":" + quote(type.getName()) + ",\"value\":\"<cycle>\"}";
+    if (level >= 1) return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + "}";
+    StringBuilder fields = new StringBuilder(); int count = 0;
+    for (Class<?> current = type; current != null && current != Object.class && count < 25; current = current.getSuperclass()) {
+      for (Field field : current.getDeclaredFields()) {
+        if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic() || count >= 25) continue;
+        if (count++ > 0) fields.append(','); fields.append(quote(field.getName())).append(':');
+        try { field.setAccessible(true); fields.append(snapshot(field.get(value), level + 1, seen)); }
+        catch (Throwable error) { fields.append("{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}"); }
+      }
+    }
+    return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(safeText(value)) + ",\"fields\":{" + fields + "}}";
+  }
+  private static String safeText(Object value) { try { return limit(String.valueOf(value), 500); } catch (Throwable ignored) { return "<toString failed>"; } }
+  private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max) + "…"; }
 
   private static long currentCallId() throws Exception {
     Object value = sharedCalls == null ? null : sharedCalls.get();
@@ -180,6 +237,7 @@ public final class BootstrapAgent {
       import net.bytebuddy.jar.asm.Label;
       import net.bytebuddy.jar.asm.MethodVisitor;
       import net.bytebuddy.jar.asm.Opcodes;
+      import net.bytebuddy.jar.asm.Type;
       import net.bytebuddy.matcher.ElementMatcher;
       import net.bytebuddy.matcher.ElementMatchers;
       import net.bytebuddy.pool.TypePool;
@@ -216,15 +274,8 @@ public final class BootstrapAgent {
         }
 
         private static final class Lines extends AsmVisitorWrapper.AbstractBase {
-          @Override
-          public int mergeWriter(int flags) {
-            return flags | ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
-          }
-
-          @Override
-          public int mergeReader(int flags) {
-            return flags | ClassReader.EXPAND_FRAMES;
-          }
+          @Override public int mergeWriter(int flags) { return flags | ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS; }
+          @Override public int mergeReader(int flags) { return flags | ClassReader.EXPAND_FRAMES; }
 
           @Override
           public ClassVisitor wrap(TypeDescription type, ClassVisitor visitor, Implementation.Context context,
@@ -232,23 +283,43 @@ public final class BootstrapAgent {
               MethodList<?> methods, int writerFlags, int readerFlags) {
             String className = type.getName();
             return new ClassVisitor(Opcodes.ASM9, visitor) {
-              @Override
-              public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-                MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (method == null || name.startsWith("<") || (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0) return method;
-                return new MethodVisitor(Opcodes.ASM9, method) {
+              @Override public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+                MethodVisitor downstream = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (downstream == null || name.startsWith("<") ||
+                    (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0) return downstream;
+                boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+                return new MethodVisitor(Opcodes.ASM9, downstream) {
+                  private int injected;
                   @Override public void visitLineNumber(int line, Label start) {
                     super.visitLineNumber(line, start);
-                    super.visitLdcInsn(className);
-                    super.visitLdcInsn(name);
-                    super.visitLdcInsn(descriptor);
-                    super.visitLdcInsn(line);
-                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "local/cgtl/flow/BootstrapAgent", "line",
-                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V", false);
+                    if (line <= 0) return;
+                    visitLdcInsn(className);
+                    visitLdcInsn(name);
+                    visitLdcInsn(descriptor);
+                    pushInt(this, line);
+                    if (isStatic) visitInsn(Opcodes.ACONST_NULL); else visitVarInsn(Opcodes.ALOAD, 0);
+                    pushInt(this, 0);
+                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/String");
+                    pushInt(this, 0);
+                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                    visitMethodInsn(Opcodes.INVOKESTATIC, "local/cgtl/flow/BootstrapAgent", "lineState",
+                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;[Ljava/lang/String;[Ljava/lang/Object;)V", false);
+                    injected++;
+                  }
+                  @Override public void visitEnd() {
+                    if (injected > 0) System.err.println("[CGTL FLOW] Line state instrumented " + className + "." + name + "() - " + injected + " lines");
+                    super.visitEnd();
                   }
                 };
               }
             };
+          }
+
+          private static void pushInt(MethodVisitor visitor, int value) {
+            if (value >= -1 && value <= 5) visitor.visitInsn(Opcodes.ICONST_0 + value);
+            else if (value <= Byte.MAX_VALUE) visitor.visitIntInsn(Opcodes.BIPUSH, value);
+            else if (value <= Short.MAX_VALUE) visitor.visitIntInsn(Opcodes.SIPUSH, value);
+            else visitor.visitLdcInsn(value);
           }
         }
       }

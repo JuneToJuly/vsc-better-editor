@@ -406,3 +406,8 @@ The Execution Replay panel now includes a **Replay** tab backed by ordered flow-
 ## Test-line replay
 
 Code Flow now instruments the selected test package as well as application packages. Ordered replay therefore begins on the test source line that initiates the traced call, instead of starting inside the first production method.
+
+
+### Per-line replay state
+
+Configure `compositeGradleTests.flowLineState` as `off`, `receiver`, `shallow`, or `changes`. The default `shallow` mode records the receiver, arguments, and live named locals at each ordered source-line boundary. Local names require Java local-variable debug metadata.

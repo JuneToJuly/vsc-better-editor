@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.3.4",
+  "version": "0.3.8",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -454,6 +454,17 @@
           },
           "default": [],
           "description": "Additional fully qualified class or package prefixes traced by Code Flow and Analyze. Prefixes are matched against every class loaded by the test JVM, including classes from dependency JARs. Examples: org.myorganization or org.myorganization.shared. A trailing .* is optional."
+        },
+        "compositeGradleTests.flowLineState": {
+          "type": "string",
+          "enum": [
+            "off",
+            "receiver",
+            "shallow",
+            "changes"
+          ],
+          "default": "receiver",
+          "description": "Historical state captured at each ordered replay line. off records location only; receiver safely captures this and initialized method arguments. shallow and changes are experimental because JVM local-variable debug scopes may begin before a local slot is initialized."
         },
         "compositeGradleTests.byteBuddyVersion": {
           "type": "string",
