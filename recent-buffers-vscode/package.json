@@ -1,0 +1,111 @@
+{
+  "name": "recent-buffers",
+  "displayName": "Recent Buffers",
+  "description": "JetBrains-style recent buffer navigation for VS Code with cursor restoration and on-demand bounded file search.",
+  "version": "0.2.8",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "recent files",
+    "buffers",
+    "navigation",
+    "jetbrains",
+    "cursor"
+  ],
+  "activationEvents": [
+    "onCommand:recentBuffers.show",
+    "onCommand:recentBuffers.applySingleViewportSettings"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "recentBuffers.show",
+        "title": "Recent Buffers: Show"
+      },
+      {
+        "command": "recentBuffers.applySingleViewportSettings",
+        "title": "Recent Buffers: Apply Single-Viewport Settings"
+      },
+      {
+        "command": "recentBuffers.clearHistory",
+        "title": "Recent Buffers: Clear History"
+      },
+      {
+        "command": "recentBuffers.moveDown",
+        "title": "Recent Buffers: Move Down",
+        "enablement": "recentBuffers.active"
+      },
+      {
+        "command": "recentBuffers.moveUp",
+        "title": "Recent Buffers: Move Up",
+        "enablement": "recentBuffers.active"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "recentBuffers.show",
+        "key": "ctrl+e",
+        "mac": "cmd+e",
+        "when": "editorTextFocus && !recentBuffers.active"
+      },
+      {
+        "command": "recentBuffers.moveDown",
+        "key": "ctrl+j",
+        "mac": "cmd+j",
+        "when": "recentBuffers.active"
+      },
+      {
+        "command": "recentBuffers.moveUp",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "recentBuffers.active"
+      }
+    ],
+    "configuration": {
+      "title": "Recent Buffers",
+      "properties": {
+        "recentBuffers.maxHistory": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 10,
+          "maximum": 10000,
+          "description": "Maximum number of recent file buffers remembered per workspace."
+        },
+        "recentBuffers.restoreSelection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Restore the last cursor/selection when reopening a recent buffer."
+        },
+        "recentBuffers.exclude": {
+          "type": "string",
+          "default": "{**/.git/**,**/.gradle/**,**/build/**,**/bin/**,**/node_modules/**,**/.idea/**,**/.vscode/**}",
+          "description": "Glob used to exclude generated or metadata files from project/workspace fallback search."
+        },
+        "recentBuffers.fileSearchMinChars": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Minimum typed characters before Recent Buffers searches workspace files."
+        },
+        "recentBuffers.fileSearchResultLimit": {
+          "type": "number",
+          "default": 200,
+          "minimum": 25,
+          "maximum": 2000,
+          "description": "Maximum file results requested for each on-demand workspace search."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --check extension.js && node test.js"
+  }
+}

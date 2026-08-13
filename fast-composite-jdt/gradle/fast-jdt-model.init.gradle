@@ -1,0 +1,150 @@
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.tasks.SourceSetContainer
+
+// Applied to the root build and every included build participating in the invocation.
+def outputDir = System.getProperty('fastCompositeJdt.outputDir')
+if (!outputDir) {
+    throw new GradleException('Missing -DfastCompositeJdt.outputDir')
+}
+
+def safeBuildPath = { g ->
+    try { return g.buildPath ?: ':' } catch (Throwable ignored) { return ':' }
+}
+
+def safeProjectTreePath = { p ->
+    try { return p.buildTreePath } catch (Throwable ignored) {
+        def bp = safeBuildPath(p.gradle)
+        if (bp == ':') return p.path
+        if (p.path == ':') return bp
+        return bp + p.path
+    }
+}
+
+def projectDependency = { id ->
+    def treePath
+    def buildPath
+    try { treePath = id.buildTreePath } catch (Throwable ignored) { treePath = null }
+    try { buildPath = id.build.buildPath } catch (Throwable ignored) { buildPath = null }
+    if (!treePath) {
+        treePath = (buildPath && buildPath != ':') ? (id.projectPath == ':' ? buildPath : buildPath + id.projectPath) : id.projectPath
+    }
+    return [
+        buildTreePath: treePath,
+        buildPath: buildPath,
+        projectPath: id.projectPath,
+        projectName: id.projectName,
+        displayName: id.displayName
+    ]
+}
+
+def exportBuild = { Gradle g ->
+    def root = g.rootProject
+    def projects = []
+
+    root.allprojects.each { p ->
+        def sourceSets = p.extensions.findByType(SourceSetContainer)
+        if (sourceSets == null) return
+
+        def sources = []
+        def libraries = new LinkedHashSet<String>()
+        def projectDeps = new LinkedHashMap<String, Map>()
+        def defaultOutput = null
+        def javaVersion = null
+
+        try {
+            def javaExt = p.extensions.findByName('java')
+            if (javaExt != null && javaExt.hasProperty('toolchain')) {
+                def lv = javaExt.toolchain.languageVersion.orNull
+                if (lv != null) javaVersion = lv.asInt()
+            }
+        } catch (Throwable ignored) {}
+
+        sourceSets.each { ss ->
+            def outputDirs = []
+            try { outputDirs.addAll(ss.output.classesDirs.files.collect { it.absolutePath }) } catch (Throwable ignored) {}
+            def ssOutput = outputDirs ? outputDirs[0] : null
+            if (defaultOutput == null && ss.name == 'main' && ssOutput != null) defaultOutput = ssOutput
+
+            try {
+                ss.allJava.srcDirs.each { dir ->
+                    sources << [
+                        name: ss.name,
+                        path: dir.absolutePath,
+                        output: ssOutput,
+                        test: ss.name.toLowerCase().contains('test')
+                    ]
+                }
+            } catch (Throwable ignored) {}
+
+            def configNames = []
+            try { if (ss.compileClasspathConfigurationName) configNames << ss.compileClasspathConfigurationName } catch (Throwable ignored) {}
+            try { if (ss.runtimeClasspathConfigurationName) configNames << ss.runtimeClasspathConfigurationName } catch (Throwable ignored) {}
+            try { if (ss.annotationProcessorConfigurationName) configNames << ss.annotationProcessorConfigurationName } catch (Throwable ignored) {}
+
+            configNames.unique().each { configName ->
+                def c = p.configurations.findByName(configName)
+                if (c == null || !c.canBeResolved) return
+                try {
+                    c.files.each { f -> libraries << f.absolutePath }
+                } catch (Throwable ignored) {}
+                try {
+                    c.incoming.resolutionResult.allComponents.each { comp ->
+                        if (comp.id instanceof ProjectComponentIdentifier) {
+                            def d = projectDependency(comp.id)
+                            projectDeps[d.buildTreePath] = d
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        projects << [
+            name: p.name,
+            gradlePath: p.path,
+            buildPath: safeBuildPath(g),
+            buildTreePath: safeProjectTreePath(p),
+            directory: p.projectDir.absolutePath,
+            defaultOutput: defaultOutput,
+            javaVersion: javaVersion,
+            sources: sources,
+            libraries: libraries as List,
+            projectDependencies: projectDeps.values() as List
+        ]
+    }
+
+    def data = [
+        schema: 1,
+        buildPath: safeBuildPath(g),
+        rootDir: root.projectDir.absolutePath,
+        rootName: root.name,
+        projects: projects
+    ]
+    def key = java.security.MessageDigest.getInstance('SHA-1')
+        .digest(root.projectDir.canonicalPath.bytes)
+        .encodeHex().toString()
+    def out = new File(outputDir, key + '.json')
+    out.parentFile.mkdirs()
+    out.text = JsonOutput.prettyPrint(JsonOutput.toJson(data))
+}
+
+gradle.rootProject { root ->
+    if (root.tasks.findByName('__fastCompositeJdtExport') == null) {
+        root.tasks.register('__fastCompositeJdtExport') {
+            group = 'ide'
+            description = 'Exports the minimal Java project model for Fast Composite JDT.'
+            doLast { exportBuild(root.gradle) }
+        }
+    }
+}
+
+gradle.projectsEvaluated { g ->
+    def task = g.rootProject.tasks.findByName('__fastCompositeJdtExport')
+    if (task != null) {
+        // The same init script is applied to included builds. Depending on their export task
+        // gives us the complete transitive composite in one Gradle invocation.
+        g.includedBuilds.each { included ->
+            try { task.dependsOn(included.task(':__fastCompositeJdtExport')) } catch (Throwable ignored) {}
+        }
+    }
+}

@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.3.25",
+  "version": "0.3.29",
   "publisher": "local",
   "license": "MIT",
   "engines": {

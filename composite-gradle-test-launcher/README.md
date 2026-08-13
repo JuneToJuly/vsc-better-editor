@@ -1,6 +1,6 @@
 # Composite Gradle Test Launcher
 
-Current version: **0.3.25**
+Current version: **0.3.26**
 
 Run and debug Java tests through a **root Gradle composite build**, even when the standard VS Code Java test runner cannot model the build correctly.
 
@@ -411,3 +411,12 @@ Code Flow now instruments the selected test package as well as application packa
 ### Per-line replay state
 
 Configure `compositeGradleTests.flowLineState` as `off`, `receiver`, `shallow`, or `changes`. The default `shallow` mode records the receiver, arguments, and live named locals at each ordered source-line boundary. Local names require Java local-variable debug metadata.
+
+
+## 0.3.26 Navigation phase
+
+- Replay Step Into, Step Over, and Step Out controls.
+- Search ordered replay by source, method, location, exceptions, outcomes, and captured state.
+- Clicking an executed source line opens Replay at its first occurrence.
+- Source gutter shows execution occurrence counts.
+- Previous/next occurrence navigation for repeated source lines.

@@ -1,0 +1,87 @@
+{
+  "name": "fast-composite-jdt",
+  "displayName": "Fast Composite JDT",
+  "description": "Fast Gradle composite-build to JDT adapter with cached named composite roots and instant model switching.",
+  "version": "0.2.2",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:settings.gradle",
+    "workspaceContains:settings.gradle.kts",
+    "onCommand:fastCompositeJdt.resync",
+    "onCommand:fastCompositeJdt.showStatus",
+    "onCommand:fastCompositeJdt.addRoot",
+    "onCommand:fastCompositeJdt.switchRoot",
+    "onCommand:fastCompositeJdt.removeRoot"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "fastCompositeJdt.resync",
+        "title": "Fast Composite JDT: Resync Java Model"
+      },
+      {
+        "command": "fastCompositeJdt.addRoot",
+        "title": "Fast Composite JDT: Add Composite Root"
+      },
+      {
+        "command": "fastCompositeJdt.switchRoot",
+        "title": "Fast Composite JDT: Switch Composite Root"
+      },
+      {
+        "command": "fastCompositeJdt.removeRoot",
+        "title": "Fast Composite JDT: Remove Composite Root"
+      },
+      {
+        "command": "fastCompositeJdt.showStatus",
+        "title": "Fast Composite JDT: Show Model Status"
+      },
+      {
+        "command": "fastCompositeJdt.clearModel",
+        "title": "Fast Composite JDT: Clear Cached Model"
+      }
+    ],
+    "configuration": {
+      "title": "Fast Composite JDT",
+      "properties": {
+        "fastCompositeJdt.autoSyncOnFirstOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run Gradle model extraction only when no cached model exists. Cached startups do not invoke Gradle."
+        },
+        "fastCompositeJdt.gradleArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--quiet",
+            "--no-scan"
+          ],
+          "description": "Additional arguments passed to the Gradle wrapper during model resync."
+        },
+        "fastCompositeJdt.disableJdtGradleImport": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set java.import.gradle.enabled=false at workspace scope so Red Hat Java does not run its Gradle importer."
+        },
+        "fastCompositeJdt.attachCachedSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Attach matching *-sources.jar files found beside Gradle cache artifacts when available."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  }
+}
