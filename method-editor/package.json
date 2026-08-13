@@ -1,0 +1,111 @@
+{
+  "name": "method-editor",
+  "displayName": "Method Editor",
+  "description": "Enter a focused method-only editing mode; Ctrl+Enter follows a method call in the current method editor; Back/Forward walks method history in one persistent method editor without recreating the editor.",
+  "version": "0.8.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:methodEditor.enter",
+    "onCommand:methodEditor.enterMethodAtCursor",
+    "onCommand:methodEditor.back",
+    "onCommand:methodEditor.forward",
+    "onCommand:methodEditor.nextMethod",
+    "onCommand:methodEditor.previousMethod",
+    "onCommand:methodEditor.pickMethod",
+    "onCommand:methodEditor.exit",
+    "onFileSystem:method"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "methodEditor.enter",
+        "title": "Method Editor: Enter Method Editor"
+      },
+      {
+        "command": "methodEditor.enterMethodAtCursor",
+        "title": "Method Editor: Enter Method at Cursor"
+      },
+      {
+        "command": "methodEditor.back",
+        "title": "Method Editor: Back"
+      },
+      {
+        "command": "methodEditor.forward",
+        "title": "Method Editor: Forward"
+      },
+      {
+        "command": "methodEditor.nextMethod",
+        "title": "Method Editor: Next Method"
+      },
+      {
+        "command": "methodEditor.previousMethod",
+        "title": "Method Editor: Previous Method"
+      },
+      {
+        "command": "methodEditor.pickMethod",
+        "title": "Method Editor: Pick Method in File"
+      },
+      {
+        "command": "methodEditor.exit",
+        "title": "Method Editor: Exit Method Editor"
+      },
+      {
+        "command": "methodEditor.openCurrentMethod",
+        "title": "Method Editor: Open Current Method"
+      },
+      {
+        "command": "methodEditor.openSource",
+        "title": "Method Editor: Open Source File"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "methodEditor.enter",
+        "key": "ctrl+alt+m",
+        "when": "editorTextFocus && resourceScheme == file"
+      },
+      {
+        "command": "methodEditor.enterMethodAtCursor",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.back",
+        "key": "alt+left",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.forward",
+        "key": "alt+right",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.nextMethod",
+        "key": "alt+]",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.previousMethod",
+        "key": "alt+[",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.pickMethod",
+        "key": "ctrl+shift+m",
+        "when": "editorTextFocus && resourceScheme == method"
+      },
+      {
+        "command": "methodEditor.exit",
+        "key": "ctrl+alt+enter",
+        "when": "editorTextFocus && resourceScheme == method"
+      }
+    ]
+  }
+}

@@ -1,0 +1,715 @@
+{
+  "name": "composite-gradle-test-launcher",
+  "displayName": "Composite Gradle Test Launcher",
+  "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
+  "version": "0.4.3",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Debuggers",
+    "Other"
+  ],
+  "keywords": [
+    "gradle",
+    "composite build",
+    "java",
+    "junit",
+    "test",
+    "debug"
+  ],
+  "activationEvents": [
+    "onLanguage:java",
+    "onCommand:compositeGradleTests.runMethod",
+    "onCommand:compositeGradleTests.debugMethod",
+    "onCommand:compositeGradleTests.runClass",
+    "onCommand:compositeGradleTests.debugClass",
+    "onCommand:compositeGradleTests.repeatLast",
+    "onCommand:compositeGradleTests.stop",
+    "onCommand:compositeGradleTests.showResults",
+    "onCommand:compositeGradleTests.showHistory",
+    "onCommand:compositeGradleTests.clearHistory",
+    "onView:compositeGradleTests.resultsView",
+    "onCommand:compositeGradleTests.addTest",
+    "onCommand:compositeGradleTests.openLastTest",
+    "onView:compositeGradleTests.evaluateView",
+    "onCommand:compositeGradleTests.evaluateExpression",
+    "onCommand:compositeGradleTests.evaluateCurrentExpression",
+    "onCommand:compositeGradleTests.runMethodWithReport",
+    "onCommand:compositeGradleTests.runClassWithReport",
+    "onCommand:compositeGradleTests.runMethodWithFlow",
+    "onCommand:compositeGradleTests.runClassWithFlow",
+    "onView:compositeGradleTests.replayFiles",
+    "onView:compositeGradleTests.replayTimeline",
+    "onCommand:compositeGradleTests.replay.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "compositeGradleTests.runMethod",
+        "title": "Composite Gradle: Run Test Under Cursor",
+        "icon": "$(run)"
+      },
+      {
+        "command": "compositeGradleTests.debugMethod",
+        "title": "Composite Gradle: Debug Test Under Cursor",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "compositeGradleTests.runClass",
+        "title": "Composite Gradle: Run Test Class",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "compositeGradleTests.debugClass",
+        "title": "Composite Gradle: Debug Test Class",
+        "icon": "$(debug)"
+      },
+      {
+        "command": "compositeGradleTests.repeatLast",
+        "title": "Composite Gradle: Repeat Last Test",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.openLastTest",
+        "title": "Composite Gradle: Open Last Run Test",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "compositeGradleTests.stop",
+        "title": "Composite Gradle: Stop Current Test",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "compositeGradleTests.copyLastCommand",
+        "title": "Composite Gradle: Copy Last Command",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "compositeGradleTests.showResults",
+        "title": "Composite Gradle: Show Latest Test Result",
+        "icon": "$(output)"
+      },
+      {
+        "command": "compositeGradleTests.showHistory",
+        "title": "Composite Gradle: Show Test History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "compositeGradleTests.clearHistory",
+        "title": "Composite Gradle: Clear Test History",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.refresh",
+        "title": "Composite Gradle: Refresh Project Tests",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.run",
+        "title": "Composite Gradle: Run Selected Project Test",
+        "icon": "$(run)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.debug",
+        "title": "Composite Gradle: Debug Selected Project Test",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.open",
+        "title": "Composite Gradle: Open Selected Project Test",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.runFailed",
+        "title": "Composite Gradle: Run Failed Project Tests",
+        "icon": "$(error)"
+      },
+      {
+        "command": "compositeGradleTests.addTest",
+        "title": "Composite Gradle: Add Test",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.evaluateExpression",
+        "title": "Composite Gradle: Evaluate Expression",
+        "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "compositeGradleTests.evaluateCurrentExpression",
+        "title": "Composite Gradle: Evaluate Current Expression",
+        "icon": "$(play)"
+      },
+      {
+        "command": "compositeGradleTests.runMethodWithReport",
+        "title": "Composite Gradle: Run Test with Code Report",
+        "icon": "$(coverage)"
+      },
+      {
+        "command": "compositeGradleTests.runClassWithReport",
+        "title": "Composite Gradle: Run Test Class with Code Report",
+        "icon": "$(coverage)"
+      },
+      {
+        "command": "compositeGradleTests.runMethodWithFlow",
+        "title": "Composite Gradle: Run Test with Code Flow",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "compositeGradleTests.runClassWithFlow",
+        "title": "Composite Gradle: Run Test Class with Code Flow",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.runAffected",
+        "title": "Composite Gradle: Run Affected Tests",
+        "icon": "$(run-errors)"
+      },
+      {
+        "command": "compositeGradleTests.projectTests.clearAffected",
+        "title": "Composite Gradle: Clear Affected Tests",
+        "icon": "$(close)"
+      },
+      {
+        "command": "compositeGradleTests.replay.open",
+        "title": "Composite Gradle: Open Execution Replay",
+        "icon": "$(debug-alt-small)"
+      },
+      {
+        "command": "compositeGradleTests.replay.openLegacy",
+        "title": "Composite Gradle: Open Legacy Execution Replay",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "compositeGradleTests.replay.exit",
+        "title": "Composite Gradle: Exit Execution Replay",
+        "icon": "$(close)"
+      },
+      {
+        "command": "compositeGradleTests.replay.first",
+        "title": "Replay: First Step",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "compositeGradleTests.replay.previous",
+        "title": "Replay: Previous Line",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepInto",
+        "title": "Replay: Step Into",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOver",
+        "title": "Replay: Step Over",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOut",
+        "title": "Replay: Step Out",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "compositeGradleTests.replay.next",
+        "title": "Replay: Next Line",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "compositeGradleTests.replay.last",
+        "title": "Replay: Last Step",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "compositeGradleTests.replay.previousOccurrence",
+        "title": "Replay: Previous Occurrence",
+        "icon": "$(chevron-left)"
+      },
+      {
+        "command": "compositeGradleTests.replay.nextOccurrence",
+        "title": "Replay: Next Occurrence",
+        "icon": "$(chevron-right)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "compositeGradleTests.runMethod",
+          "when": "editorLangId == java",
+          "group": "testing@1"
+        },
+        {
+          "command": "compositeGradleTests.debugMethod",
+          "when": "editorLangId == java",
+          "group": "testing@2"
+        },
+        {
+          "command": "compositeGradleTests.runClass",
+          "when": "editorLangId == java",
+          "group": "testing@3"
+        },
+        {
+          "command": "compositeGradleTests.debugClass",
+          "when": "editorLangId == java",
+          "group": "testing@4"
+        },
+        {
+          "command": "compositeGradleTests.addTest",
+          "when": "editorLangId == java",
+          "group": "testing@5"
+        },
+        {
+          "command": "compositeGradleTests.runMethodWithReport",
+          "when": "editorLangId == java",
+          "group": "testing@6"
+        },
+        {
+          "command": "compositeGradleTests.runMethodWithFlow",
+          "when": "editorLangId == java",
+          "group": "testing@7"
+        },
+        {
+          "command": "compositeGradleTests.runClassWithReport",
+          "when": "editorLangId == java",
+          "group": "testing@8"
+        },
+        {
+          "command": "compositeGradleTests.runClassWithFlow",
+          "when": "editorLangId == java",
+          "group": "testing@9"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "compositeGradleTests.repeatLast",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.openLastTest",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.stop",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.clearHistory",
+          "when": "view == compositeGradleTests.resultsView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.refresh",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.runFailed",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.runAffected",
+          "when": "view == compositeGradleTests.projectTestsView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.first",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.previous",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepInto",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOver",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@4"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOut",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@5"
+        },
+        {
+          "command": "compositeGradleTests.replay.next",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@6"
+        },
+        {
+          "command": "compositeGradleTests.replay.exit",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@9"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "compositeGradleTests.projectTests.clearAffected",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedRoot",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.run",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(task|class|method)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.debug",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
+          "group": "inline@2"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.open",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem =~ /compositeGradleTests\\.(class|method)/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.projectTests.run",
+          "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedMethod",
+          "group": "inline@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "compositeGradleTests.evaluateCurrentExpression",
+          "when": "compositeGradleTests.evaluateEditorActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepInto",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@20"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOver",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@21"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOut",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@22"
+        },
+        {
+          "command": "compositeGradleTests.replay.exit",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@29"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "compositeGradleTests.repeatLast",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      },
+      {
+        "command": "compositeGradleTests.evaluateExpression",
+        "key": "alt+f8",
+        "mac": "alt+f8",
+        "when": "inDebugMode"
+      },
+      {
+        "command": "compositeGradleTests.evaluateCurrentExpression",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && inDebugMode"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepInto",
+        "key": "f11",
+        "when": "compositeGradleTests.replayActive"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOver",
+        "key": "f10",
+        "when": "compositeGradleTests.replayActive"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOut",
+        "key": "shift+f11",
+        "when": "compositeGradleTests.replayActive"
+      }
+    ],
+    "configuration": {
+      "title": "Composite Gradle Test Launcher",
+      "properties": {
+        "compositeGradleTests.compositeRoot": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Directory from which the root composite Gradle build must run. Supports ${workspaceFolder} and ${workspaceFolder:name} in multi-root workspaces."
+        },
+        "compositeGradleTests.gradleExecutable": {
+          "type": "string",
+          "default": "gradle",
+          "description": "Gradle executable to run. Use gradle for an installation on PATH, or provide an absolute/relative executable path."
+        },
+        "compositeGradleTests.root": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Deprecated root composite build directory. Used only when compositeRoot is not configured.",
+          "markdownDeprecationMessage": "Use `compositeGradleTests.compositeRoot` instead."
+        },
+        "compositeGradleTests.gradleWrapper": {
+          "type": "string",
+          "default": "",
+          "description": "Optional wrapper path relative to the composite root. When set, this overrides gradleExecutable."
+        },
+        "compositeGradleTests.projects": {
+          "type": "array",
+          "default": [],
+          "description": "Maps source roots to Gradle tasks and, optionally, Java debugger project names. The longest matching sourceRoot wins.",
+          "items": {
+            "type": "object",
+            "required": [
+              "sourceRoot",
+              "task"
+            ],
+            "properties": {
+              "sourceRoot": {
+                "type": "string",
+                "description": "Path relative to the configured root."
+              },
+              "task": {
+                "type": "string",
+                "description": "Root-build task path, for example :includedBuild:service:test."
+              },
+              "javaProjectName": {
+                "type": "string",
+                "default": "",
+                "description": "Optional exact Java project name for debugger attach when a source file is under this sourceRoot. This uses the same longest-prefix matching as task resolution."
+              }
+            }
+          }
+        },
+        "compositeGradleTests.autoDetectTask": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically derive included-build and subproject task paths from the current test file, for example includedBuild:app:test. Explicit project mappings take precedence."
+        },
+        "compositeGradleTests.defaultTask": {
+          "type": "string",
+          "default": "test",
+          "description": "Fallback Gradle task when no project mapping matches."
+        },
+        "compositeGradleTests.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--console=plain"
+          ],
+          "description": "Arguments added to every Gradle invocation."
+        },
+        "compositeGradleTests.debugArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--debug-jvm"
+          ],
+          "description": "Arguments added only for debug invocations. The default makes Gradle listen on port 5005."
+        },
+        "compositeGradleTests.debugPort": {
+          "type": "number",
+          "default": 5005,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port used by the Java debugger. Must match the Gradle test debug configuration."
+        },
+        "compositeGradleTests.testAnnotations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "Test",
+            "ParameterizedTest",
+            "RepeatedTest",
+            "TestFactory",
+            "TestTemplate"
+          ],
+          "description": "Simple annotation names treated as test methods."
+        },
+        "compositeGradleTests.showOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reveal the raw Composite Gradle Tests output channel when a test starts. The focused results panel is always shown."
+        },
+        "compositeGradleTests.enhancedTestLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject a Gradle init script that reports passed, failed, and skipped tests and captures standard output/error for the results panel."
+        },
+        "compositeGradleTests.inlineActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show clickable Run Test / Debug Test and Run Class / Debug Class CodeLens actions. These are independent of VS Code Test Explorer and the Java Test Runner."
+        },
+        "compositeGradleTests.javaProjectName": {
+          "type": "string",
+          "default": "",
+          "description": "Legacy global Java project name used by debugger attach when no source-root project mapping matches. Leave empty to resolve from compositeGradleTests.projects or the Java language server."
+        },
+        "compositeGradleTests.navigationOpenMode": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "pinned",
+            "side"
+          ],
+          "default": "preview",
+          "description": "How source navigation opens files. preview reuses a preview editor in the first group, pinned keeps files open, and side opens a preview beside the current editor."
+        },
+        "compositeGradleTests.captureExecutedCode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Capture per-run executed production lines with JaCoCo. This may require Gradle to resolve JaCoCo artifacts. Use the Run with Executed Code commands for one-off capture."
+        },
+        "compositeGradleTests.flowPackagePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional fully qualified class or package prefixes traced by Code Flow and Analyze. Prefixes are matched against every class loaded by the test JVM, including classes from dependency JARs. Examples: org.myorganization or org.myorganization.shared. A trailing .* is optional."
+        },
+        "compositeGradleTests.flowLineState": {
+          "type": "string",
+          "enum": [
+            "off",
+            "receiver",
+            "shallow",
+            "changes"
+          ],
+          "default": "receiver",
+          "description": "Historical state captured at each ordered replay line. off records location only; receiver safely captures this and initialized method arguments. shallow and changes are experimental because JVM local-variable debug scopes may begin before a local slot is initialized."
+        },
+        "compositeGradleTests.byteBuddyVersion": {
+          "type": "string",
+          "default": "1.18.7",
+          "description": "Byte Buddy version used by Code Flow. The artifact net.bytebuddy:byte-buddy:<version> is resolved by Gradle from the configured dependency repository."
+        },
+        "compositeGradleTests.jacocoVersion": {
+          "type": "string",
+          "default": "0.8.14",
+          "description": "JaCoCo version used by Code Report. The Gradle JaCoCo plugin resolves matching agent and report artifacts from the configured project repositories."
+        },
+        "compositeGradleTests.dependencyRepository": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Maven repository URL or local repository path used to resolve Byte Buddy and JaCoCo, for example file:///opt/offline-maven or C:/offline-maven. Leave empty to use Maven Central for Byte Buddy and the project repositories for JaCoCo."
+        },
+        "compositeGradleTests.flowLineStateMaxDepth": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Maximum recursive depth for per-line object snapshots."
+        },
+        "compositeGradleTests.flowLineStateMaxFields": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum fields captured for each object checkpoint."
+        },
+        "compositeGradleTests.flowLineStateMaxCollectionItems": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum collection, map, or array items captured in each checkpoint."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "compositeGradleTests",
+          "title": "Gradle Tests",
+          "icon": "resources/gradle-tests.svg"
+        },
+        {
+          "id": "compositeGradleTests.replay",
+          "title": "Execution Replay",
+          "icon": "resources/replay.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "compositeGradleTests.evaluatePanel",
+          "title": "Evaluate",
+          "icon": "resources/gradle-tests.svg"
+        },
+        {
+          "id": "compositeGradleTests.replayPanel",
+          "title": "Replay",
+          "icon": "resources/replay.svg"
+        }
+      ]
+    },
+    "views": {
+      "compositeGradleTests": [
+        {
+          "id": "compositeGradleTests.projectTestsView",
+          "name": "Project Tests"
+        },
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.resultsView",
+          "name": "Test Results"
+        }
+      ],
+      "compositeGradleTests.evaluatePanel": [
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.evaluateView",
+          "name": "Expressions"
+        }
+      ],
+      "compositeGradleTests.replay": [
+        {
+          "id": "compositeGradleTests.replayFiles",
+          "name": "Where Did Execution Go?"
+        },
+        {
+          "id": "compositeGradleTests.replayState",
+          "name": "State"
+        },
+        {
+          "id": "compositeGradleTests.replayCallStack",
+          "name": "Call Stack"
+        }
+      ],
+      "compositeGradleTests.replayPanel": [
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.replayTimeline",
+          "name": "Replay Timeline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
+}
