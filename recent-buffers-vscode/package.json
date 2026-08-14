@@ -2,7 +2,7 @@
   "name": "recent-buffers",
   "displayName": "Recent Buffers",
   "description": "JetBrains-style recent buffer navigation for VS Code with cursor restoration and on-demand bounded file search.",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {

@@ -4,6 +4,7 @@ const vscode = require('vscode');
 
 const HISTORY_KEY = 'recentBuffers.history.v2';
 let activePanel;
+let searchRequestId = 0;
 const fileSearchCache = new Map();
 let fileSearchGeneration = 0;
 let disposed = false;
@@ -157,7 +158,7 @@ async function showRecentBuffers(context, history) {
     if (panel !== activePanel || disposed) return;
     switch (message?.type) {
       case 'ready':
-        await sendState(panel, history, '');
+        await sendState(panel, history, '', ++searchRequestId);
         break;
       case 'search':
         await sendState(panel, history, String(message.query || ''));
@@ -182,7 +183,7 @@ async function showRecentBuffers(context, history) {
   });
 }
 
-async function sendState(panel, history, query) {
+async function sendState(panel, history, query, requestId = ++searchRequestId) {
   if (!panel || panel !== activePanel) return;
   const q = query.trim();
   const generation = ++fileSearchGeneration;
@@ -202,9 +203,11 @@ async function sendState(panel, history, query) {
   }
 
   if (!activePanel || panel !== activePanel) return;
+  if (requestId !== searchRequestId) return;
   panel.webview.postMessage({
     type: 'state',
     query,
+    requestId,
     rows: [...recentRows, ...fileRows],
     recentMatchCount: recentRows.length,
     fileMatchCount: fileRows.length,
@@ -422,7 +425,7 @@ function getWebviewHtml(webview) {
 <style>
   * { box-sizing: border-box; }
   html, body { height:100%; margin:0; }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); overflow:hidden; }
+  body { font-family: var(--vscode-font-family); font-size:var(--vscode-font-size,13px); color: var(--vscode-foreground); background: var(--vscode-editor-background); overflow:hidden; }
   .stage { height:100%; width:100%; display:flex; padding:0; background:var(--vscode-quickInput-background, var(--vscode-editorWidget-background)); }
   .shell { width:100%; height:100%; max-height:none; display:flex; flex-direction:column; background:var(--vscode-quickInput-background, var(--vscode-editorWidget-background)); border:0; border-radius:0; overflow:hidden; box-shadow:none; }
   .header { padding:16px 18px 10px; border-bottom:1px solid var(--vscode-widget-border, #ffffff18); }
@@ -431,7 +434,7 @@ function getWebviewHtml(webview) {
   .close { border:0; background:transparent; color:var(--vscode-foreground); opacity:.72; font-size:22px; line-height:1; cursor:pointer; padding:2px 6px; border-radius:4px; }
   .close:hover { background:var(--vscode-toolbar-hoverBackground); opacity:1; }
   .searchWrap { position:relative; }
-  .search { width:100%; height:42px; padding:0 104px 0 14px; font:inherit; font-size:15px; color:var(--vscode-input-foreground); background:var(--vscode-input-background); border:1px solid var(--vscode-focusBorder); outline:none; border-radius:5px; }
+  .search { width:100%; height:46px; padding:0 104px 0 15px; font-family:var(--vscode-font-family); font-size:14px; line-height:1.4; color:var(--vscode-input-foreground); background:var(--vscode-input-background); border:1px solid var(--vscode-focusBorder); outline:none; border-radius:5px; }
   .shortcut { position:absolute; right:9px; top:8px; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border, #ffffff24); border-radius:5px; padding:3px 8px; font-size:12px; background:var(--vscode-keybindingLabel-background, #ffffff0b); }
   .tabs { display:flex; gap:26px; padding:0 18px; border-bottom:1px solid var(--vscode-widget-border, #ffffff18); }
   .tab { appearance:none; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--vscode-descriptionForeground); padding:12px 4px 10px; font:inherit; font-size:14px; cursor:pointer; }
@@ -441,14 +444,20 @@ function getWebviewHtml(webview) {
   .notice.show { display:block; }
   .content { min-height:0; flex:1 1 auto; overflow:auto; padding:8px 0; }
   .sectionHeader { display:flex; align-items:center; justify-content:space-between; padding:7px 18px 8px; color:var(--vscode-descriptionForeground); font-size:12px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; }
-  .row { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(180px, 1.55fr) 96px 100px 72px 28px; align-items:center; gap:14px; min-height:50px; padding:5px 14px 5px 18px; margin:0 8px; border-radius:5px; cursor:pointer; }
+  .row { position:relative; display:grid; grid-template-columns:minmax(220px, 280px) minmax(260px, 1fr) 76px 88px 78px 28px; align-items:center; gap:10px; min-height:56px; padding:5px 14px 5px 18px; margin:0 8px; border-radius:5px; cursor:pointer; }
   .row:hover { background:var(--vscode-list-hoverBackground); }
-  .row.active { background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
-  .name { display:flex; align-items:center; gap:10px; min-width:0; font-size:14px; font-weight:560; }
+  .row.active { background:color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 74%, transparent); color:var(--vscode-list-activeSelectionForeground); }
+  .row::before { content:''; position:absolute; left:0; top:7px; bottom:7px; width:3px; border-radius:2px; background:transparent; }
+  .row.active::before { background:var(--vscode-focusBorder, var(--vscode-list-activeSelectionForeground)); }
+  .name { display:flex; align-items:center; gap:10px; min-width:0; font-size:13.5px; line-height:1.35; font-weight:600; color:var(--vscode-foreground); }
+  .row.active .name { color:var(--vscode-list-activeSelectionForeground); }
   .fileIcon { width:18px; text-align:center; font-weight:700; flex:0 0 18px; }
   .java { color:#e76f51; } .gradle { color:#72b7b2; } .json { color:#e5c07b; } .yaml { color:#61afef; } .markdown { color:#61afef; } .script { color:#e5c07b; } .xml { color:#d19a66; } .file { color:var(--vscode-descriptionForeground); }
   .filename, .path { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .path, .meta { color:var(--vscode-descriptionForeground); font-size:12.5px; }
+  .path { color:var(--vscode-descriptionForeground); font-size:12px; line-height:1.35; direction:rtl; text-align:left; unicode-bidi:plaintext; }
+  .pathInner { direction:ltr; unicode-bidi:plaintext; }
+  .meta { color:var(--vscode-descriptionForeground); font-size:11.5px; }
+  .position { font-family:var(--vscode-editor-font-family, monospace); font-size:12px; color:var(--vscode-foreground); opacity:.9; }
   .row.active .path, .row.active .meta { color:color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 72%, transparent); }
   .location::before { content:'⌖ '; opacity:.8; }
   .forget { opacity:0; border:0; background:transparent; color:inherit; cursor:pointer; border-radius:4px; font-size:16px; padding:4px; }
@@ -480,6 +489,7 @@ function getWebviewHtml(webview) {
   const search = document.getElementById('search');
   const content = document.getElementById('content');
   const notice = document.getElementById('notice');
+  let latestRequestId = 0;
   let state = { query:'', rows:[], recentMatchCount:0, fileMatchCount:0, searchedAllFiles:false, fileSearchMinChars:2 };
   let selected = 0;
   let timer;
@@ -517,7 +527,7 @@ function getWebviewHtml(webview) {
       }
       html += '<div class="row ' + (i===selected?'active':'') + '" data-index="' + i + '">' +
         '<div class="name"><span class="fileIcon ' + escapeHtml(r.kind) + '">' + escapeHtml(iconFor(r.kind)) + '</span><span class="filename">' + escapeHtml(r.label) + '</span></div>' +
-        '<div class="path" title="' + escapeHtml(r.path) + '">' + escapeHtml(r.path) + '</div>' +
+        '<div class="path" title="' + escapeHtml(r.path) + '"><span class="pathInner">' + escapeHtml(r.path) + '</span></div>' +
         '<div class="meta location">' + escapeHtml(r.location || '—') + '</div>' +
         '<div class="meta age">' + escapeHtml(r.age || '') + '</div>' +
         '<div class="meta visits">' + (r.visits ? escapeHtml(r.visits + (r.visits === 1 ? ' visit' : ' visits')) : '') + '</div>' +
@@ -571,7 +581,7 @@ function getWebviewHtml(webview) {
 
   window.addEventListener('message', e => {
     const m=e.data;
-    if (m.type==='state') { state=m; if (search.value !== m.query) search.value=m.query; render(); }
+    if (m.type==='state') { state=m;render(); }
     else if (m.type==='focusSearch') search.focus();
     else if (m.type==='moveSelection') {
       moveSelection(Number(m.delta) < 0 ? -1 : 1);

@@ -1,3 +1,18 @@
+## 0.3.0
+
+- Improved typography and visual hierarchy for result rows.
+- Filenames are stronger; paths and metadata are quieter.
+- Line/column uses the editor monospace font.
+- Rows are slightly taller with tighter column spacing.
+- Selected rows use a subtler background plus a left accent bar.
+- Long paths preserve the useful trailing portion.
+
+## 0.2.9
+
+- Fixed fast typing being overwritten by older async search responses.
+- The search input is now owned entirely by the webview while typing; result updates never write query text back into the input.
+- Added request IDs so stale search results are ignored deterministically.
+
 ## 0.2.8
 
 - Ctrl+J / Ctrl+K are now VS Code extension-level keybindings while Recent Buffers is active.
