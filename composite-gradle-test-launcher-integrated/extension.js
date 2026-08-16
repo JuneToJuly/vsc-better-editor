@@ -738,6 +738,29 @@ function refreshRuntimeInitScripts(invocation) {
 }
 
 async function executeInvocation(invocation) {
+  // Replay line numbers come from the bytecode Gradle compiles on disk. If the editor
+  // contains unsaved Java changes, the captured line table can point at a different
+  // line than the source currently visible in VS Code. Save dirty Java buffers before
+  // launching so the compiled source and the Replay editor always use the same text.
+  const dirtyJavaDocuments = vscode.workspace.textDocuments.filter(document =>
+    document.isDirty && !document.isUntitled && document.uri.scheme === 'file'
+      && document.languageId === 'java'
+  );
+  if (dirtyJavaDocuments.length) {
+    const failed = [];
+    for (const document of dirtyJavaDocuments) {
+      try {
+        if (!(await document.save())) failed.push(document.uri.fsPath);
+      } catch (_) {
+        failed.push(document.uri.fsPath);
+      }
+    }
+    if (failed.length) {
+      throw new Error(`Code Flow could not save ${failed.length} modified Java file${failed.length === 1 ? '' : 's'} before running. Save the files and try again.`);
+    }
+    output?.appendLine(`[CGTL FLOW] Saved ${dirtyJavaDocuments.length} modified Java file${dirtyJavaDocuments.length === 1 ? '' : 's'} before capture so Replay line numbers match the editor.`);
+  }
+
   // Init scripts live in VS Code global storage, which can be cleared independently
   // of saved/repeated invocations. Recreate them immediately before spawning Gradle
   // and replace any stale paths retained by Repeat Last or a copied invocation.
@@ -1916,8 +1939,9 @@ function renderFlowReplayHtml(result) {
   function firstReplayLineForCall(callId,afterSequence=-Infinity){const id=String(callId||'');if(!id)return null;for(const e of replayEvents){if(replayCallId(e)!==id)continue;if(Number(e.sequence??e.__index??0)+0.0001<Number(afterSequence))continue;return e}return null}
   function nextReplayLineInFrame(current,afterSequence){if(!current)return null;const id=replayCallId(current),thread=eventThreadKey(current),depth=replayFrameDepth(current);const start=Number(afterSequence??current.sequence??current.__index??0);for(let i=replayPosition+1;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(Number(e.sequence??e.__index??0)<=start)continue;if(id&&replayCallId(e)===id)return e;if(!id&&replayFrameDepth(e)===depth&&sameMethodFrame(e,current))return e}return null}
   function replayCallsFromCurrentLine(current){if(!current)return[];const thread=eventThreadKey(current),currentSeq=Number(current.sequence??current.__index??0),currentId=replayCallId(current);const nextSameFrame=nextReplayLineInFrame(current,currentSeq);const upper=nextSameFrame?Number(nextSameFrame.sequence??nextSameFrame.__index??Infinity):Infinity;return model.events.filter(e=>{if(e.event!=='callsite'||eventThreadKey(e)!==thread)return false;if(String(e.sourcePath||'')!==String(current.sourcePath||'')||Number(e.line||0)!==Number(current.line||0))return false;const seq=Number(e.sequence??e.__index??0);if(seq<currentSeq-0.5||seq>=upper)return false;const entry=replayEntryFor(e);if(!entry)return false;const callerDepth=Number(entry.depth||0)-1;return !currentId||callerDepth===replayFrameDepth(current)||String(entry.callerClassName||'')===String(current.className||'')}) .sort((a,b)=>Number(a.sequence??a.__index??0)-Number(b.sequence??b.__index??0))}
-  function stepReplayInto(){const current=replayEvents[replayPosition];if(!current)return;const calls=replayCallsFromCurrentLine(current);for(const call of calls){const target=firstReplayLineForCall(replayCallId(call),Number(call.sequence??call.__index??0)-1);const index=replayIndexOfEvent(target);if(index>=0){setReplayPosition(index);return}}for(let i=replayPosition+1;i<replayEvents.length;i++){if(eventThreadKey(replayEvents[i])===eventThreadKey(current)){setReplayPosition(i);return}}}
-  function replayOwningEntry(lineEvent){if(!lineEvent)return null;const thread=eventThreadKey(lineEvent),seq=Number(lineEvent.sequence??lineEvent.__index??0),depth=Number(lineEvent.depth||0);let best=null;for(const e of model.events){if(e.event!=='enter'||eventThreadKey(e)!==thread)continue;if(String(e.className||'')!==String(lineEvent.className||'')||String(e.methodName||'')!==String(lineEvent.methodName||''))continue;if(String(e.descriptor||'')!==String(lineEvent.descriptor||''))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq>seq+0.25)continue;const exit=replayExitFor(e);const exitSeq=exit?Number(exit.sequence??exit.__index??Infinity):Infinity;if(exitSeq+0.25<seq)continue;if(!best||entrySeq>Number(best.sequence??best.__index??-Infinity))best=e}return best||replayEntryFor(lineEvent)}
+  function firstReplayLineForEntry(entry,current){if(!entry)return null;const thread=eventThreadKey(entry),currentSeq=Number(current?.sequence??current?.__index??-Infinity),entrySeq=Number(entry.sequence??entry.__index??0);for(const e of replayEvents){const seq=Number(e.sequence??e.__index??0);if(seq<=currentSeq||seq>entrySeq+0.0001)continue;if(eventThreadKey(e)!==thread)continue;if(String(e.className||'')!==String(entry.className||'')||String(e.methodName||'')!==String(entry.methodName||'')||String(e.descriptor||'')!==String(entry.descriptor||''))continue;return e}return firstReplayLineForCall(replayCallId(entry),entrySeq-1)}
+  function stepReplayInto(){const current=replayEvents[replayPosition];if(!current)return;const calls=replayCallsFromCurrentLine(current);for(const call of calls){const entry=replayEntryFor(call);const target=firstReplayLineForEntry(entry,current);const index=replayIndexOfEvent(target);if(index>=0){setReplayPosition(index);return}}for(let i=replayPosition+1;i<replayEvents.length;i++){if(eventThreadKey(replayEvents[i])===eventThreadKey(current)){setReplayPosition(i);return}}}
+  function replayOwningEntry(lineEvent){if(!lineEvent)return null;const thread=eventThreadKey(lineEvent),seq=Number(lineEvent.sequence??lineEvent.__index??0),depth=Number(lineEvent.depth||0);const matches=e=>e.event==='enter'&&eventThreadKey(e)===thread&&String(e.className||'')===String(lineEvent.className||'')&&String(e.methodName||'')===String(lineEvent.methodName||'')&&String(e.descriptor||'')===String(lineEvent.descriptor||'');let best=null;for(const e of model.events){if(!matches(e))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq>seq)continue;const exit=replayExitFor(e);const exitSeq=exit?Number(exit.sequence??exit.__index??Infinity):Infinity;if(exitSeq+0.25<seq)continue;if(!best||entrySeq>Number(best.sequence??best.__index??-Infinity))best=e}if(best)return best;let nextLineSeq=Infinity;for(let i=replayPosition+1;i<replayEvents.length;i++){const candidate=replayEvents[i];if(eventThreadKey(candidate)!==thread)continue;nextLineSeq=Number(candidate.sequence??candidate.__index??Infinity);break}let upcoming=null;for(const e of model.events){if(!matches(e))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq<=seq||entrySeq>=nextLineSeq)continue;if(!upcoming||entrySeq<Number(upcoming.sequence??upcoming.__index??Infinity))upcoming=e}return upcoming||replayEntryFor(lineEvent)}
   function sameReplayOwningFrame(a,b){if(!a||!b||eventThreadKey(a)!==eventThreadKey(b))return false;const ae=replayOwningEntry(a),be=replayOwningEntry(b);if(ae&&be){const aid=replayCallId(ae),bid=replayCallId(be);if(aid&&bid)return aid===bid;return ae.__index===be.__index}return sameMethodFrame(a,b)}
   function sameReplayMethod(a,b){return !!a&&!!b&&eventThreadKey(a)===eventThreadKey(b)&&String(a.sourcePath||'')===String(b.sourcePath||'')&&String(a.className||'')===String(b.className||'')&&String(a.methodName||'')===String(b.methodName||'')&&String(a.descriptor||'')===String(b.descriptor||'')}
   function nextReplayLineInSameMethod(current,fromPosition=replayPosition+1,minSequence=-Infinity){if(!current)return null;for(let i=Math.max(0,fromPosition);i<replayEvents.length;i++){const e=replayEvents[i];if(Number(e.sequence??e.__index??0)<=Number(minSequence))continue;if(sameReplayMethod(current,e))return {event:e,index:i}}return null}
@@ -1960,7 +1984,7 @@ function renderFlowReplayHtml(result) {
       if(eventThreadKey(replayEvents[i])===thread){setReplayPosition(i);return}
     }
   }
-  function stepReplayOut(){const current=replayEvents[replayPosition];if(!current)return;const entry=replayEntryFor(current);if(!entry)return;const callerPath=entry.callerSourcePath,callerLine=Number(entry.callerLine||0),thread=eventThreadKey(current);if(callerPath&&callerLine>0){const boundary=Number(entry.sequence??entry.__index??Infinity);let target=-1;for(let i=0;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(String(e.sourcePath||'')!==String(callerPath)||Number(e.line||0)!==callerLine)continue;if(Number(e.sequence??e.__index??0)>=boundary)continue;target=i}if(target>=0){setReplayPosition(target);return}}const currentDepth=replayFrameDepth(current);for(let i=replayPosition-1;i>=0;i--){const e=replayEvents[i];if(eventThreadKey(e)===thread&&replayFrameDepth(e)<currentDepth){setReplayPosition(i);return}}}
+  function stepReplayOut(){const current=replayEvents[replayPosition];if(!current)return;const entry=replayOwningEntry(current);if(!entry)return;const callerPath=entry.callerSourcePath,callerLine=Number(entry.callerLine||0),thread=eventThreadKey(current);if(callerPath&&callerLine>0){const boundary=Number(entry.sequence??entry.__index??Infinity);let target=-1;for(let i=0;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(String(e.sourcePath||'')!==String(callerPath)||Number(e.line||0)!==callerLine)continue;if(Number(e.sequence??e.__index??0)>=boundary)continue;target=i}if(target>=0){setReplayPosition(target);return}}const currentDepth=replayFrameDepth(current);for(let i=replayPosition-1;i>=0;i--){const e=replayEvents[i];if(eventThreadKey(e)===thread&&replayFrameDepth(e)<currentDepth){setReplayPosition(i);return}}}
   function currentLineOccurrences(){const e=replayEvents[replayPosition];return e?replayOccurrences(e.sourcePath,e.line):[]}
   function seekLineOccurrence(delta){const occurrences=currentLineOccurrences();if(!occurrences.length)return;let index=occurrences.indexOf(replayPosition);if(index<0)index=0;index=Math.max(0,Math.min(occurrences.length-1,index+delta));setReplayPosition(occurrences[index])}
 
@@ -4127,9 +4151,14 @@ class NativeReplaySession {
   }
 
   get current() { return this.lineEvents[this.position]; }
-  setPosition(position) {
+  setPosition(position, options = {}) {
     if (!this.lineEvents.length) return;
     this.position = Math.max(0, Math.min(this.lineEvents.length - 1, Number(position) || 0));
+    // Editor-originated seeks must not rewrite the user's caret position. This keeps
+    // the symbol they clicked selected for native editor commands such as Go to
+    // Definition. Replay controls/timeline navigation still move the caret to the
+    // beginning of the destination line.
+    this.preserveEditorSelectionOnce = Boolean(options.preserveEditorSelection);
     updateNativeReplayWorkbench().catch(error => output?.appendLine(`[replay] ${error?.stack || error}`));
   }
   first() { this.setPosition(0); }
@@ -4143,17 +4172,47 @@ class NativeReplaySession {
   }
   indexOf(event) { return event ? this.lineEvents.indexOf(event) : -1; }
   entryForLine(event) {
+    if (!event) return undefined;
+    const sameIdentity = entry => replayEventThread(entry) === replayEventThread(event)
+      && String(entry.className || '') === String(event.className || '')
+      && String(entry.methodName || '') === String(event.methodName || '')
+      && String(entry.descriptor || '') === String(event.descriptor || '');
+
+    // A LINE emitted at method entry can still carry the caller's callId because
+    // ASM visits the first line before Byte Buddy ENTER advice runs. Never trust
+    // that callId unless it actually identifies the same source method.
     const direct = this.entryByCallId.get(replayEventCallId(event));
-    if (direct) return direct;
+    if (direct && sameIdentity(direct)) return direct;
+
     const seq = replayEventSequence(event);
-    let best;
+    const thread = replayEventThread(event);
+    let previous;
     for (const entry of this.entries) {
-      if (replayEventThread(entry) !== replayEventThread(event)) continue;
-      if (String(entry.className || '') !== String(event.className || '') || String(entry.methodName || '') !== String(event.methodName || '') || String(entry.descriptor || '') !== String(event.descriptor || '')) continue;
-      const start = replayEventSequence(entry), exit = this.exitByCallId.get(replayEventCallId(entry)), end = exit ? replayEventSequence(exit) : Infinity;
-      if (start <= seq + .25 && end + .25 >= seq && (!best || start > replayEventSequence(best))) best = entry;
+      if (!sameIdentity(entry)) continue;
+      const start = replayEventSequence(entry);
+      const exit = this.exitByCallId.get(replayEventCallId(entry));
+      const end = exit ? replayEventSequence(exit) : Infinity;
+      if (start <= seq && end + .25 >= seq && (!previous || start > replayEventSequence(previous))) previous = entry;
     }
-    return best;
+    if (previous) return previous;
+
+    // If this is the boundary LINE immediately before ENTER, the owning ENTER
+    // must occur before the next recorded LINE on this thread. This avoids a
+    // numeric sequence tolerance and, importantly, avoids accidentally treating
+    // the caller frame as the current method during Step Out.
+    let nextLineSeq = Infinity;
+    for (const line of this.lineEvents || []) {
+      const lineSeq = replayEventSequence(line);
+      if (replayEventThread(line) === thread && lineSeq > seq) { nextLineSeq = lineSeq; break; }
+    }
+    let upcoming;
+    for (const entry of this.entries) {
+      if (!sameIdentity(entry)) continue;
+      const start = replayEventSequence(entry);
+      if (start <= seq || start >= nextLineSeq) continue;
+      if (!upcoming || start < replayEventSequence(upcoming)) upcoming = entry;
+    }
+    return upcoming;
   }
   stateForLine(event) {
     if (!event) return { receiver: undefined, locals: undefined, arguments: undefined, entry: undefined };
@@ -4179,10 +4238,32 @@ class NativeReplaySession {
       && replayEventSequence(entry) >= currentSeq - .5 && replayEventSequence(entry) < upper)
       .sort((a,b) => replayEventSequence(a)-replayEventSequence(b));
   }
+  firstLineForEntry(entry, current) {
+    if (!entry) return null;
+    const thread = replayEventThread(entry);
+    const currentSeq = current ? replayEventSequence(current) : -Infinity;
+    const entrySeq = replayEventSequence(entry);
+
+    // The ASM line callback for the first source line can fire before Byte Buddy's
+    // ENTER advice. In that case the line may still carry the caller's callId.
+    // Resolve that boundary line by callee source identity and execution interval
+    // rather than requiring the ENTER callId to already be present.
+    for (const event of this.lineEvents) {
+      const seq = replayEventSequence(event);
+      if (seq <= currentSeq || seq > entrySeq + 0.0001) continue;
+      if (replayEventThread(event) !== thread) continue;
+      if (String(event.className || '') !== String(entry.className || '')
+          || String(event.methodName || '') !== String(entry.methodName || '')
+          || String(event.descriptor || '') !== String(entry.descriptor || '')) continue;
+      return event;
+    }
+
+    return this.firstLineForCall(replayEventCallId(entry), entrySeq - 1);
+  }
   stepInto() {
     const current = this.current; if (!current) return;
     for (const entry of this.childEntriesFromCurrentLine(current)) {
-      const target = this.firstLineForCall(replayEventCallId(entry), replayEventSequence(entry) - 1);
+      const target = this.firstLineForEntry(entry, current);
       const index = this.indexOf(target);
       if (index >= 0) { this.setPosition(index); return; }
     }
@@ -4264,7 +4345,7 @@ class NativeReplaySession {
         distance = candidateDistance;
       }
     }
-    this.setPosition(target);
+    this.setPosition(target, { preserveEditorSelection: true });
     return true;
   }
   occurrences() {
@@ -4550,7 +4631,10 @@ async function updateNativeReplayWorkbench() {
   const session=nativeReplaySession;if(!session)return;
   replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
   for(const editor of vscode.window.visibleTextEditors)applyReplayDecorations(editor);
-  const current=session.current;if(current)await openReplayEditorLocation(current.sourcePath,current.line,false);
+  const current=session.current;
+  const preserveEditorSelection = Boolean(session.preserveEditorSelectionOnce);
+  session.preserveEditorSelectionOnce = false;
+  if(current && !preserveEditorSelection) await openReplayEditorLocation(current.sourcePath,current.line,false);
   vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
   const occ=session.occurrences(),occIndex=occ.indexOf(session.position);
   const status=`Replay ${session.position+1}/${session.lineEvents.length}${occ.length>1?` · occurrence ${occIndex+1}/${occ.length}`:''}`;
