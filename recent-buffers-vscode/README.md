@@ -31,3 +31,8 @@ This intentionally does not create or manage editor groups.
 - `Recent Buffers: Expand Search Scope`
 - `Recent Buffers: Apply Single-Viewport Settings`
 - `Recent Buffers: Clear History`
+
+
+## Previous Buffer
+
+Use **Recent Buffers: Previous Buffer** (`recentBuffers.previousBuffer`) to immediately switch to the most recently visited file other than the current file. Repeating the command toggles between the last two files. Bind it to any shortcut you prefer in Keyboard Shortcuts.

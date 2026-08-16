@@ -22,7 +22,7 @@ if (source.includes('getAllFiles()')) throw new Error('Workspace files should no
 const pkg = require('./package.json');
 if (pkg.main !== './extension.js') throw new Error('Unexpected extension entrypoint');
 if (!pkg.contributes?.keybindings?.some(k => k.command === 'recentBuffers.show' && k.key === 'ctrl+e')) throw new Error('Ctrl+E keybinding missing');
-if (pkg.version !== '0.3.0') throw new Error('Expected version 0.3.0');
+if (pkg.version !== '0.3.5') throw new Error('Expected version 0.3.5');
 if (pkg.contributes.configuration.properties['recentBuffers.allFilesLimit']) throw new Error('Legacy allFilesLimit setting should be removed');
 console.log('Recent Buffers source/package checks passed.');
 
@@ -41,3 +41,20 @@ if (!source.includes("var(--vscode-editor-font-family")) throw new Error("Missin
 if (!source.includes(".row.active::before")) throw new Error("Missing selected-row accent");
 if (!source.includes("direction:rtl")) throw new Error("Missing trailing-path truncation");
 console.log("Typography regression checks passed.");
+
+if (!source.includes("recentWithFiles")) throw new Error("Missing bounded Recent pane");
+if (!source.includes("filesSection")) throw new Error("Missing visible All Files pane");
+if (!source.includes("data-section=\"files\"")) throw new Error("Missing All Files section marker");
+console.log("Split result panes regression checks passed.");
+
+if (!source.includes('spellcheck="false" autofocus')) throw new Error("Missing search autofocus");
+if (!source.includes("function claimSearchFocus()")) throw new Error("Missing immediate focus helper");
+if (!source.includes("requestAnimationFrame(claimSearchFocus)")) throw new Error("Missing first-frame focus reinforcement");
+console.log("Initial-focus regression checks passed.");
+
+if (!source.includes("recentBuffers.previousBuffer")) throw new Error("Missing previous buffer command");
+if (!source.includes("async function openPreviousBuffer")) throw new Error("Missing previous-buffer implementation");
+if (!source.includes("buildRecentRows(history, q, sourceUri)")) throw new Error("Recent rows do not receive invocation source URI");
+if (!source.includes("const currentUri = sourceUri ||")) throw new Error("Invocation source URI is not excluded");
+if (!pkg.contributes.commands.some(c => c.command === "recentBuffers.previousBuffer")) throw new Error("Previous Buffer command not contributed");
+console.log("Previous-buffer regression checks passed.");

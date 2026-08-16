@@ -30,6 +30,7 @@ function activate(context) {
     vscode.workspace.onDidDeleteFiles(invalidateFileCaches),
     vscode.workspace.onDidRenameFiles(invalidateFileCaches),
     vscode.commands.registerCommand('recentBuffers.show', () => showRecentBuffers(context, history)),
+    vscode.commands.registerCommand('recentBuffers.previousBuffer', () => openPreviousBuffer(history)),
     vscode.commands.registerCommand('recentBuffers.moveDown', () => {
       if (activePanel) activePanel.webview.postMessage({ type: 'moveSelection', delta: 1 });
     }),
@@ -132,7 +133,9 @@ async function showRecentBuffers(context, history) {
     return;
   }
 
-  const sourceColumn = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.Active;
+  const sourceEditor = vscode.window.activeTextEditor;
+  const sourceColumn = sourceEditor?.viewColumn || vscode.ViewColumn.Active;
+  const sourceUri = sourceEditor?.document.uri.toString();
   const panel = vscode.window.createWebviewPanel(
     'recentBuffers.navigator',
     'Recent Buffers',
@@ -158,10 +161,18 @@ async function showRecentBuffers(context, history) {
     if (panel !== activePanel || disposed) return;
     switch (message?.type) {
       case 'ready':
-        await sendState(panel, history, '', ++searchRequestId);
+        panel.webview.postMessage({ type: 'focusSearch' });
+        await sendState(panel, history, '', ++searchRequestId, sourceUri);
+        panel.webview.postMessage({ type: 'focusSearch' });
+        setTimeout(() => {
+          if (activePanel === panel) panel.webview.postMessage({ type: 'focusSearch' });
+        }, 25);
+        setTimeout(() => {
+          if (activePanel === panel) panel.webview.postMessage({ type: 'focusSearch' });
+        }, 75);
         break;
       case 'search':
-        await sendState(panel, history, String(message.query || ''));
+        await sendState(panel, history, String(message.query || ''), undefined, sourceUri);
         break;
       case 'open':
         if (message.uri) {
@@ -173,7 +184,7 @@ async function showRecentBuffers(context, history) {
       case 'forget':
         if (message.uri) {
           await history.remove(message.uri);
-          await sendState(panel, history, String(message.query || ''));
+          await sendState(panel, history, String(message.query || ''), undefined, sourceUri);
         }
         break;
       case 'close':
@@ -183,11 +194,11 @@ async function showRecentBuffers(context, history) {
   });
 }
 
-async function sendState(panel, history, query, requestId = ++searchRequestId) {
+async function sendState(panel, history, query, requestId = ++searchRequestId, sourceUri) {
   if (!panel || panel !== activePanel) return;
   const q = query.trim();
   const generation = ++fileSearchGeneration;
-  const recentRows = buildRecentRows(history, q).map(row => ({ ...row, section: 'recent' }));
+  const recentRows = buildRecentRows(history, q, sourceUri).map(row => ({ ...row, section: 'recent' }));
   let fileRows = [];
   let searchedAllFiles = false;
   const minChars = vscode.workspace.getConfiguration('recentBuffers').get('fileSearchMinChars', 2);
@@ -216,8 +227,8 @@ async function sendState(panel, history, query, requestId = ++searchRequestId) {
   });
 }
 
-function buildRecentRows(history, query) {
-  const currentUri = vscode.window.activeTextEditor?.document.uri.toString();
+function buildRecentRows(history, query, sourceUri) {
+  const currentUri = sourceUri || vscode.window.activeTextEditor?.document.uri.toString();
   const now = Date.now();
   const scored = [];
   for (const entry of history.list()) {
@@ -265,6 +276,27 @@ function buildFileRows(files, query, history) {
     kind: fileKind(label),
     recent: !!recent
   }));
+}
+
+async function openPreviousBuffer(history) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isNavigableDocument(editor.document)) {
+    vscode.window.showInformationMessage('Recent Buffers: no active file to switch from.');
+    return;
+  }
+
+  const currentUri = editor.document.uri.toString();
+  // Capture the exact location being left so repeated use becomes a true
+  // two-file toggle: A -> B -> A -> B.
+  history.touch(editor.document.uri, editor.selection);
+
+  const previous = history.list().find(entry => entry.uri !== currentUri);
+  if (!previous) {
+    vscode.window.showInformationMessage('Recent Buffers: no previous buffer yet.');
+    return;
+  }
+
+  await openBuffer(vscode.Uri.parse(previous.uri), history, editor.viewColumn || vscode.ViewColumn.Active);
 }
 
 async function openBuffer(uri, history, viewColumn) {
@@ -428,45 +460,56 @@ function getWebviewHtml(webview) {
   body { font-family: var(--vscode-font-family); font-size:var(--vscode-font-size,13px); color: var(--vscode-foreground); background: var(--vscode-editor-background); overflow:hidden; }
   .stage { height:100%; width:100%; display:flex; padding:0; background:var(--vscode-quickInput-background, var(--vscode-editorWidget-background)); }
   .shell { width:100%; height:100%; max-height:none; display:flex; flex-direction:column; background:var(--vscode-quickInput-background, var(--vscode-editorWidget-background)); border:0; border-radius:0; overflow:hidden; box-shadow:none; }
-  .header { padding:16px 18px 10px; border-bottom:1px solid var(--vscode-widget-border, #ffffff18); }
-  .titleRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
-  .title { font-size:20px; font-weight:650; letter-spacing:.1px; }
+  .header { padding:12px 16px 8px; border-bottom:1px solid var(--vscode-widget-border, #ffffff18); }
+  .titleRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .title { font-size:18px; font-weight:650; letter-spacing:.1px; }
   .close { border:0; background:transparent; color:var(--vscode-foreground); opacity:.72; font-size:22px; line-height:1; cursor:pointer; padding:2px 6px; border-radius:4px; }
   .close:hover { background:var(--vscode-toolbar-hoverBackground); opacity:1; }
   .searchWrap { position:relative; }
-  .search { width:100%; height:46px; padding:0 104px 0 15px; font-family:var(--vscode-font-family); font-size:14px; line-height:1.4; color:var(--vscode-input-foreground); background:var(--vscode-input-background); border:1px solid var(--vscode-focusBorder); outline:none; border-radius:5px; }
-  .shortcut { position:absolute; right:9px; top:8px; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border, #ffffff24); border-radius:5px; padding:3px 8px; font-size:12px; background:var(--vscode-keybindingLabel-background, #ffffff0b); }
+  .search { width:100%; height:40px; padding:0 96px 0 13px; font-family:var(--vscode-font-family); font-size:14px; line-height:1.4; color:var(--vscode-input-foreground); background:var(--vscode-input-background); border:1px solid var(--vscode-focusBorder); outline:none; border-radius:5px; }
+  .shortcut { position:absolute; right:8px; top:6px; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-widget-border, #ffffff24); border-radius:5px; padding:3px 8px; font-size:12px; background:var(--vscode-keybindingLabel-background, #ffffff0b); }
   .tabs { display:flex; gap:26px; padding:0 18px; border-bottom:1px solid var(--vscode-widget-border, #ffffff18); }
   .tab { appearance:none; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--vscode-descriptionForeground); padding:12px 4px 10px; font:inherit; font-size:14px; cursor:pointer; }
   .tab.active { color:var(--vscode-foreground); border-bottom-color:var(--vscode-focusBorder); }
   .tab .ico { margin-right:7px; }
   .notice { display:none; padding:8px 18px; font-size:12px; color:var(--vscode-descriptionForeground); border-bottom:1px solid var(--vscode-widget-border, #ffffff12); }
   .notice.show { display:block; }
-  .content { min-height:0; flex:1 1 auto; overflow:auto; padding:8px 0; }
-  .sectionHeader { display:flex; align-items:center; justify-content:space-between; padding:7px 18px 8px; color:var(--vscode-descriptionForeground); font-size:12px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; }
-  .row { position:relative; display:grid; grid-template-columns:minmax(220px, 280px) minmax(260px, 1fr) 76px 88px 78px 28px; align-items:center; gap:10px; min-height:56px; padding:5px 14px 5px 18px; margin:0 8px; border-radius:5px; cursor:pointer; }
+  .content { min-height:0; flex:1 1 auto; overflow:hidden; padding:4px 0; display:flex; flex-direction:row; }
+  .resultSection { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  .resultSection.recentOnly { flex:1 1 50%; min-width:0; }
+  .resultSection.recentWithFiles { flex:1 1 50%; min-width:0; }
+  .resultSection.filesSection { flex:1 1 50%; min-width:0; border-left:1px solid var(--vscode-widget-border, #ffffff18); }
+  .sectionHeader { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:5px 12px 6px; color:var(--vscode-descriptionForeground); font-size:12px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; }
+  .sectionRows { min-height:0; overflow:auto; padding-bottom:3px; scrollbar-gutter:stable; }
+  .resultSection .row { grid-template-columns:minmax(145px, 210px) minmax(135px, 1fr) 58px 62px 54px 20px; gap:6px; margin:0 4px; padding-left:10px; padding-right:6px; }
+  @media (max-width:1150px) {
+    .resultSection .row { grid-template-columns:minmax(145px,1fr) minmax(150px,1.1fr) 60px 22px; }
+    .resultSection .age, .resultSection .visits { display:none; }
+  }
+  .row { position:relative; display:grid; grid-template-columns:minmax(220px, 280px) minmax(260px, 1fr) 76px 88px 78px 28px; align-items:center; gap:10px; min-height:42px; padding:2px 10px 2px 14px; margin:0 8px; border-radius:5px; cursor:pointer; }
   .row:hover { background:var(--vscode-list-hoverBackground); }
   .row.active { background:color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 74%, transparent); color:var(--vscode-list-activeSelectionForeground); }
-  .row::before { content:''; position:absolute; left:0; top:7px; bottom:7px; width:3px; border-radius:2px; background:transparent; }
+  .row::before { content:''; position:absolute; left:0; top:5px; bottom:5px; width:3px; border-radius:2px; background:transparent; }
   .row.active::before { background:var(--vscode-focusBorder, var(--vscode-list-activeSelectionForeground)); }
-  .name { display:flex; align-items:center; gap:10px; min-width:0; font-size:13.5px; line-height:1.35; font-weight:600; color:var(--vscode-foreground); }
+  .name { display:flex; align-items:center; gap:8px; min-width:0; font-size:13px; line-height:1.35; font-weight:600; color:var(--vscode-foreground); }
   .row.active .name { color:var(--vscode-list-activeSelectionForeground); }
-  .fileIcon { width:18px; text-align:center; font-weight:700; flex:0 0 18px; }
+  .fileIcon { width:16px; text-align:center; font-weight:700; flex:0 0 16px; }
   .java { color:#e76f51; } .gradle { color:#72b7b2; } .json { color:#e5c07b; } .yaml { color:#61afef; } .markdown { color:#61afef; } .script { color:#e5c07b; } .xml { color:#d19a66; } .file { color:var(--vscode-descriptionForeground); }
   .filename, .path { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .path { color:var(--vscode-descriptionForeground); font-size:12px; line-height:1.35; direction:rtl; text-align:left; unicode-bidi:plaintext; }
+  .path { color:var(--vscode-descriptionForeground); font-size:11.5px; line-height:1.35; direction:rtl; text-align:left; unicode-bidi:plaintext; }
   .pathInner { direction:ltr; unicode-bidi:plaintext; }
-  .meta { color:var(--vscode-descriptionForeground); font-size:11.5px; }
-  .position { font-family:var(--vscode-editor-font-family, monospace); font-size:12px; color:var(--vscode-foreground); opacity:.9; }
+  .meta { color:var(--vscode-descriptionForeground); font-size:11px; }
+  .position { font-family:var(--vscode-editor-font-family, monospace); font-size:11px; color:var(--vscode-foreground); opacity:.9; }
   .row.active .path, .row.active .meta { color:color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 72%, transparent); }
   .location::before { content:'⌖ '; opacity:.8; }
   .forget { opacity:0; border:0; background:transparent; color:inherit; cursor:pointer; border-radius:4px; font-size:16px; padding:4px; }
   .row:hover .forget, .row.active .forget { opacity:.68; }
   .forget:hover { opacity:1 !important; background:#ffffff16; }
-  .empty { padding:38px 20px 46px; text-align:center; color:var(--vscode-descriptionForeground); }
+  .empty { padding:24px 16px 30px; text-align:center; color:var(--vscode-descriptionForeground); }
+  .compactEmpty { opacity:.9; }
   .empty strong { display:block; color:var(--vscode-foreground); margin-bottom:7px; font-size:14px; }
-  .footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 18px 12px; border-top:1px solid var(--vscode-widget-border, #ffffff18); color:var(--vscode-descriptionForeground); font-size:12px; }
-  .keys { display:flex; flex-wrap:wrap; gap:16px; }
+  .footer { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 12px 8px; border-top:1px solid var(--vscode-widget-border, #ffffff18); color:var(--vscode-descriptionForeground); font-size:12px; }
+  .keys { display:flex; flex-wrap:wrap; gap:12px; }
   kbd { font:inherit; color:var(--vscode-foreground); background:var(--vscode-keybindingLabel-background, #ffffff0d); border:1px solid var(--vscode-keybindingLabel-border, #ffffff22); border-bottom-color:var(--vscode-keybindingLabel-bottomBorder, #ffffff35); border-radius:4px; padding:2px 6px; margin-right:5px; }
   @media (max-width:850px) { .row { grid-template-columns:minmax(190px,1fr) minmax(160px,1.2fr) 82px 28px; } .age,.visits { display:none; } }
 </style>
@@ -476,7 +519,7 @@ function getWebviewHtml(webview) {
   <main class="shell">
     <div class="header">
       <div class="titleRow"><div class="title">Recent Buffers</div><button class="close" id="close" title="Close">×</button></div>
-      <div class="searchWrap"><input id="search" class="search" autocomplete="off" spellcheck="false" placeholder="Search recent buffers and files..."><span class="shortcut">Ctrl+E</span></div>
+      <div class="searchWrap"><input id="search" class="search" autocomplete="off" spellcheck="false" autofocus placeholder="Search recent buffers and files..."><span class="shortcut">Ctrl+E</span></div>
     </div>
     <div class="notice" id="notice"></div>
     <section class="content" id="content"></section>
@@ -508,24 +551,16 @@ function getWebviewHtml(webview) {
     selected = Math.max(0, Math.min(selected, state.rows.length - 1));
 
     const query = search.value.trim();
-    if (!state.rows.length) {
-      let hint = 'Open a few files and they will appear here.';
-      if (query && query.length < state.fileSearchMinChars) hint = 'Type at least ' + state.fileSearchMinChars + ' characters to search all files.';
-      else if (state.searchedAllFiles) hint = 'No recent buffers or files matched this search.';
-      content.innerHTML = '<div class="sectionHeader"><span>Recent Buffers</span><span>0 items</span></div><div class="empty"><strong>No matching files</strong>' + escapeHtml(hint) + '</div>';
-      return;
-    }
+    const recent = [];
+    const files = [];
+    state.rows.forEach((row, index) => {
+      (row.section === 'files' ? files : recent).push({ row, index });
+    });
 
-    let html = '';
-    let currentSection = '';
-    state.rows.forEach((r, i) => {
-      if (r.section !== currentSection) {
-        currentSection = r.section;
-        const title = currentSection === 'recent' ? 'Recent Buffers' : 'All Files';
-        const count = currentSection === 'recent' ? state.recentMatchCount : state.fileMatchCount;
-        html += '<div class="sectionHeader"><span>' + title + '</span><span>' + count + ' items</span></div>';
-      }
-      html += '<div class="row ' + (i===selected?'active':'') + '" data-index="' + i + '">' +
+    function renderRow(entry) {
+      const r = entry.row;
+      const i = entry.index;
+      return '<div class="row ' + (i===selected?'active':'') + '" data-index="' + i + '">' +
         '<div class="name"><span class="fileIcon ' + escapeHtml(r.kind) + '">' + escapeHtml(iconFor(r.kind)) + '</span><span class="filename">' + escapeHtml(r.label) + '</span></div>' +
         '<div class="path" title="' + escapeHtml(r.path) + '"><span class="pathInner">' + escapeHtml(r.path) + '</span></div>' +
         '<div class="meta location">' + escapeHtml(r.location || '—') + '</div>' +
@@ -533,8 +568,35 @@ function getWebviewHtml(webview) {
         '<div class="meta visits">' + (r.visits ? escapeHtml(r.visits + (r.visits === 1 ? ' visit' : ' visits')) : '') + '</div>' +
         '<button class="forget" title="Forget from history" data-forget="' + i + '">' + (r.recent ? '×' : '') + '</button>' +
       '</div>';
-    });
-    content.innerHTML = html;
+    }
+
+    let recentBody;
+    if (recent.length) {
+      recentBody = recent.map(renderRow).join('');
+    } else {
+      const recentHint = query ? 'No recent buffers matched this search.' : 'Open a few files and they will appear here.';
+      recentBody = '<div class="empty"><strong>No recent matches</strong>' + escapeHtml(recentHint) + '</div>';
+    }
+
+    let filesBody;
+    if (files.length) {
+      filesBody = files.map(renderRow).join('');
+    } else if (!query || query.length < state.fileSearchMinChars) {
+      filesBody = '<div class="empty compactEmpty"><strong>All Files</strong>Type at least ' + state.fileSearchMinChars + ' characters to search the workspace.</div>';
+    } else {
+      filesBody = '<div class="empty compactEmpty"><strong>No additional files</strong>No non-recent workspace files matched this search.</div>';
+    }
+
+    content.innerHTML =
+      '<div class="resultSection recentWithFiles" data-section="recent">' +
+        '<div class="sectionHeader"><span>Recent Buffers</span><span>' + recent.length + ' items</span></div>' +
+        '<div class="sectionRows">' + recentBody + '</div>' +
+      '</div>' +
+      '<div class="resultSection filesSection" data-section="files">' +
+        '<div class="sectionHeader"><span>All Files</span><span>' + files.length + ' items</span></div>' +
+        '<div class="sectionRows">' + filesBody + '</div>' +
+      '</div>';
+
     const active = content.querySelector('.row.active');
     active?.scrollIntoView({ block:'nearest' });
   }
@@ -556,6 +618,9 @@ function getWebviewHtml(webview) {
     if (index >= 0) {
       selected = index;
       render();
+      const filesPane = content.querySelector('[data-section="files"] .sectionRows');
+      if (filesPane) filesPane.scrollTop = 0;
+      content.querySelector('[data-section="files"] .row.active')?.scrollIntoView({ block:'nearest' });
     }
   }
 
@@ -582,15 +647,41 @@ function getWebviewHtml(webview) {
   window.addEventListener('message', e => {
     const m=e.data;
     if (m.type==='state') { state=m;render(); }
-    else if (m.type==='focusSearch') search.focus();
+    else if (m.type==='focusSearch') {
+      claimSearchFocus();
+    }
     else if (m.type==='moveSelection') {
       moveSelection(Number(m.delta) < 0 ? -1 : 1);
       search.focus();
     }
   });
 
+  function claimSearchFocus() {
+    try {
+      search.focus({ preventScroll:true });
+      const end = search.value.length;
+      search.setSelectionRange(end, end);
+    } catch (_) {
+      try { search.focus(); } catch (_) {}
+    }
+  }
+
+  // Do not wait for a timer before the input becomes usable. VS Code can
+  // display the panel before the old 20 ms callback ran, which meant very
+  // fast typing could still go to the editor behind the webview.
+  claimSearchFocus();
+  requestAnimationFrame(claimSearchFocus);
+  requestAnimationFrame(() => requestAnimationFrame(claimSearchFocus));
+  setTimeout(claimSearchFocus, 0);
+  setTimeout(claimSearchFocus, 20);
+  setTimeout(claimSearchFocus, 60);
+
+  window.addEventListener('focus', claimSearchFocus);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) claimSearchFocus();
+  });
+
   vscode.postMessage({type:'ready'});
-  setTimeout(() => search.focus(), 20);
 })();
 </script>
 </body>

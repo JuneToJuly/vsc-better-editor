@@ -1,3 +1,38 @@
+## 0.3.5
+
+- The file active when Recent Buffers opens is now excluded from the Recent Buffers pane for that invocation.
+- Added `Recent Buffers: Previous Buffer` (`recentBuffers.previousBuffer`).
+- Previous Buffer restores the saved cursor location and repeated use toggles between the last two files.
+- No default keybinding is assigned to Previous Buffer so it does not override an existing VS Code shortcut.
+
+## 0.3.4
+
+- Fixed initial keystrokes sometimes being lost immediately after opening Recent Buffers.
+- The search input now uses native autofocus and claims focus immediately during webview startup.
+- Focus is reinforced on the first animation frames and when VS Code reports the webview ready/visible.
+- Refocusing preserves the caret at the end of the current query.
+
+## 0.3.3
+
+- The two-pane layout is now permanent: Recent Buffers always stays on the left and All Files always stays on the right.
+- Removed the width jump when All Files gains or loses results.
+- All Files shows a lightweight search hint before the minimum query length is reached.
+- Reduced row height, gaps, header padding, search height, and footer padding to fit more files vertically.
+
+## 0.3.2
+
+- Recent Buffers and All Files now render side-by-side.
+- Both panes use the full result height and scroll independently.
+- Tab still jumps to the first All Files result.
+
+## 0.3.1
+
+- Split search results into independently scrollable Recent Buffers and All Files panes when file results exist.
+- All Files is now always visible instead of being pushed below a long recent-buffer list.
+- Recent uses roughly 42% of the result area and All Files uses the remaining space.
+- Tab jumps to the first visible All Files result and scrolls that pane to the top.
+- Keyboard navigation continues across both sections as one result sequence.
+
 ## 0.3.0
 
 - Improved typography and visual hierarchy for result rows.
