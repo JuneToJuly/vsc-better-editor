@@ -291,7 +291,12 @@ async function createInvocation(documentUri, target, debug) {
     classDisplayName: target.classDisplayName || target.displayName,
     targetLine: target.range?.start?.line,
     targetCharacter: target.range?.start?.character,
-    captureCoverage: config.get('captureExecutedCode', false)
+    captureCoverage: config.get('captureExecutedCode', false),
+    // Instrumentation packages are intentionally workspace-wide. Replay can cross
+    // composite projects, so do not scope this list to the test source folder.
+    // Folder-scoped reads introduced a regression where an empty folder value
+    // shadowed the workspace package list.
+    flowConfiguredPrefixes: flowPackagePrefixes()
   };
 }
 
@@ -784,7 +789,9 @@ async function executeInvocation(invocation) {
     const flowArgs = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
     const taskIndex = flowArgs.indexOf(invocation.task);
     const testPackage = String(invocation.classFilter || invocation.filter || '').split('.').slice(0, -1).join('.');
-    const configuredPrefixes = flowPackagePrefixes();
+    const configuredPrefixes = Array.isArray(invocation.flowConfiguredPrefixes)
+      ? invocation.flowConfiguredPrefixes.map(normalizeFlowPrefix).filter(Boolean)
+      : flowPackagePrefixes();
     const tracedPrefixes = [...new Set([testPackage, ...configuredPrefixes].map(normalizeFlowPrefix).filter(Boolean))];
     if (!tracedPrefixes.length) {
       throw new Error('Code Flow could not determine a package to trace. Configure compositeGradleTests.flowPackagePrefixes.');
@@ -800,12 +807,30 @@ async function executeInvocation(invocation) {
       `-Dcgtl.flow.lineState.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxFields', 30) || 30)}`,
       `-Dcgtl.flow.lineState.maxCollectionItems=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxCollectionItems', 20) || 20)}`
     );
-    invocation = { ...invocation, flowDir, flowFile, captureFlow: true, args: flowArgs };
+    invocation = {
+      ...invocation,
+      flowDir,
+      flowFile,
+      captureFlow: true,
+      flowAutomaticPackage: testPackage,
+      flowConfiguredPrefixes: configuredPrefixes,
+      flowTracedPrefixes: tracedPrefixes,
+      args: flowArgs
+    };
   }
   lastInvocation = invocation;
   output.clear();
   output.appendLine(`> ${formatCommand(invocation.executable, invocation.args)}`);
   output.appendLine(`cwd: ${invocation.cwd}`);
+  if (invocation.captureFlow) {
+    output.appendLine(`[CGTL FLOW] Automatic package: ${invocation.flowAutomaticPackage || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Additional packages: ${(invocation.flowConfiguredPrefixes || []).join(', ') || '<none>'}`);
+    const flowConfigScopes = flowPackagePrefixConfiguration().scopes;
+    for (const entry of flowConfigScopes) {
+      output.appendLine(`[CGTL FLOW] Package config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
+    }
+    output.appendLine(`[CGTL FLOW] Effective packages: ${(invocation.flowTracedPrefixes || []).join(', ') || '<none>'}`);
+  }
   output.appendLine('');
   if (invocation.showOutput) output.show(true);
 
@@ -1021,11 +1046,95 @@ function normalizeFlowPrefix(value) {
     .replace(/\.+$/, '');
 }
 
+function asFlowPrefixValues(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : String(value || '').split(',');
+}
+
+function flowPackagePrefixConfiguration() {
+  // Instrumentation prefixes are additive. VS Code configuration normally uses
+  // override semantics (folder > workspace > user), which is undesirable here:
+  // a stale/empty value at one scope can hide packages configured at another.
+  // Explicitly merge every scope, including every folder in a multi-root workspace.
+  const values = [];
+  const scopes = [];
+  const seenScopes = new Set();
+
+  const collectInspect = (inspect, label) => {
+    if (!inspect) return;
+    const entries = [
+      ['default', inspect.defaultValue],
+      ['global', inspect.globalValue],
+      ['workspace', inspect.workspaceValue],
+      ['folder', inspect.workspaceFolderValue]
+    ];
+    for (const [scope, raw] of entries) {
+      const normalized = asFlowPrefixValues(raw).map(normalizeFlowPrefix).filter(Boolean);
+      if (!normalized.length) continue;
+      values.push(...normalized);
+      const key = `${label}:${scope}:${normalized.join(',')}`;
+      if (!seenScopes.has(key)) {
+        seenScopes.add(key);
+        scopes.push({ label, scope, values: normalized });
+      }
+    }
+  };
+
+  collectInspect(
+    vscode.workspace.getConfiguration('compositeGradleTests').inspect('flowPackagePrefixes'),
+    'workspace'
+  );
+
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    collectInspect(
+      vscode.workspace.getConfiguration('compositeGradleTests', folder.uri).inspect('flowPackagePrefixes'),
+      folder.name
+    );
+  }
+
+  return { values: [...new Set(values)], scopes };
+}
+
 function flowPackagePrefixes() {
+  return flowPackagePrefixConfiguration().values;
+}
+
+function replayInstrumentationResource() {
+  const replayPath = nativeReplaySession?.currentEvent?.sourcePath
+    || nativeReplaySession?.lineEvents?.[nativeReplaySession?.position]?.sourcePath;
+  if (replayPath) return vscode.Uri.file(replayPath);
+  return vscode.window.activeTextEditor?.document?.uri;
+}
+
+function flowExcludePrefixes() {
   const config = vscode.workspace.getConfiguration('compositeGradleTests');
-  const configured = config.get('flowPackagePrefixes', []);
+  const configured = config.get('flowExcludePrefixes', []);
   const values = Array.isArray(configured) ? configured : String(configured || '').split(',');
   return [...new Set(values.map(normalizeFlowPrefix).filter(Boolean))];
+}
+
+function flowPrefixMatches(className, prefix) {
+  const name = String(className || '');
+  const normalized = normalizeFlowPrefix(prefix);
+  return !!normalized && (name === normalized || name.startsWith(normalized + '.') || name.startsWith(normalized + '$'));
+}
+
+function flowInstrumentationStatus(className) {
+  const included = flowPackagePrefixes().some(prefix => flowPrefixMatches(className, prefix));
+  return included ? 'included' : 'automatic';
+}
+
+async function updateFlowPrefixSetting(key, updater) {
+  // Instrumentation configuration is workspace-wide. This deliberately mirrors
+  // flowPackagePrefixes() so the UI edits the exact setting used by the launcher.
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const current = config.get(key, []);
+  const values = Array.isArray(current)
+    ? current.map(normalizeFlowPrefix).filter(Boolean)
+    : String(current || '').split(',').map(normalizeFlowPrefix).filter(Boolean);
+  const next = [...new Set(updater(values).map(normalizeFlowPrefix).filter(Boolean))].sort();
+  await config.update(key, next, vscode.ConfigurationTarget.Workspace);
+  instrumentationProvider?.refresh();
 }
 
 function dependencyResolutionSettings() {
@@ -1157,6 +1266,7 @@ initscript {
 def cgtlFlowOutput = System.getProperty("cgtl.flow.output")
 def cgtlFlowAgent = System.getProperty("cgtl.flow.agent")
 def cgtlFlowPackages = System.getProperty("cgtl.flow.packages", "")
+def cgtlFlowExcludes = System.getProperty("cgtl.flow.excludes", "")
 def cgtlFlowLineState = System.getProperty("cgtl.flow.lineState", "receiver")
 def cgtlFlowLineStateMaxDepth = System.getProperty("cgtl.flow.lineState.maxDepth", "2")
 def cgtlFlowLineStateMaxFields = System.getProperty("cgtl.flow.lineState.maxFields", "30")
@@ -1171,6 +1281,7 @@ allprojects { project ->
             testTask.systemProperty("cgtl.flow.output", cgtlFlowOutput)
             testTask.systemProperty("cgtl.flow.maxEvents", "200000")
             testTask.systemProperty("cgtl.flow.packages", cgtlFlowPackages)
+            testTask.systemProperty("cgtl.flow.excludes", cgtlFlowExcludes)
             testTask.systemProperty("cgtl.flow.lineState", cgtlFlowLineState)
             testTask.systemProperty("cgtl.flow.lineState.maxDepth", cgtlFlowLineStateMaxDepth)
             testTask.systemProperty("cgtl.flow.lineState.maxFields", cgtlFlowLineStateMaxFields)
@@ -3775,6 +3886,7 @@ function collectJavaProjects(value, results = []) {
 // normal VS Code editor remains the source editor; sidebar/panel views observe this model.
 let nativeReplaySession;
 let replayFilesProvider;
+let instrumentationProvider;
 let replayStateProvider;
 let replayCallStackProvider;
 let replayTimelineProvider;
@@ -3875,13 +3987,19 @@ class NativeReplaySession {
       const key = normalizePath(event.sourcePath);
       let file = map.get(key);
       if (!file) {
-        file = { sourcePath: event.sourcePath, name: path.basename(event.sourcePath), relativePath: vscode.workspace.asRelativePath(event.sourcePath, false), lines: new Set(), events: 0, test: /[\\/]src[\\/]test[\\/]/i.test(event.sourcePath) };
+        file = { sourcePath: event.sourcePath, name: path.basename(event.sourcePath), relativePath: vscode.workspace.asRelativePath(event.sourcePath, false), lines: new Set(), classNames: new Set(), events: 0, test: /[\\/]src[\\/]test[\\/]/i.test(event.sourcePath) };
         map.set(key, file);
       }
       file.lines.add(Number(event.line));
+      if (event.className) file.classNames.add(String(event.className));
       file.events++;
     }
-    return [...map.values()].map(file => ({ ...file, lineCount: file.lines.size })).sort((a,b) => Number(b.test)-Number(a.test) || b.events-a.events || a.name.localeCompare(b.name));
+    return [...map.values()].map(file => {
+      const classNames = [...file.classNames];
+      const primaryClass = classNames[0] || '';
+      const packageName = primaryClass.includes('.') ? primaryClass.split('.').slice(0, -1).join('.') : '';
+      return { ...file, classNames, primaryClass, packageName, lineCount: file.lines.size };
+    }).sort((a,b) => Number(b.test)-Number(a.test) || b.events-a.events || a.name.localeCompare(b.name));
   }
 
   get current() { return this.lineEvents[this.position]; }
@@ -4053,6 +4171,48 @@ class ReplayFilesProvider {
   }
 }
 
+class ReplayInstrumentationProvider {
+  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData = this.emitter.event; }
+  refresh() { this.emitter.fire(); }
+  getTreeItem(item) { return item; }
+  getChildren(parent) {
+    const includes = flowPackagePrefixes();
+    if (!parent) {
+      const roots = [];
+      const includeRoot = new vscode.TreeItem(`Included Packages / Classes (${includes.length})`, vscode.TreeItemCollapsibleState.Expanded);
+      includeRoot.contextValue = 'replayInstrumentationIncludeRoot'; includeRoot.__kind = 'includeRoot'; roots.push(includeRoot);
+      if (nativeReplaySession?.files?.length) {
+        const previousRoot = new vscode.TreeItem(`Previous Run (${nativeReplaySession.files.length} files)`, vscode.TreeItemCollapsibleState.Expanded);
+        previousRoot.contextValue = 'replayInstrumentationPreviousRoot'; previousRoot.__kind = 'previousRoot'; roots.push(previousRoot);
+      }
+      return roots;
+    }
+    if (parent.__kind === 'includeRoot') return includes.map(prefix => this.prefixItem(prefix, 'include'));
+    if (parent.__kind === 'previousRoot') return nativeReplaySession.files.map(file => this.fileItem(file));
+    return [];
+  }
+  prefixItem(prefix, kind) {
+    const item = new vscode.TreeItem(prefix, vscode.TreeItemCollapsibleState.None);
+    item.iconPath = new vscode.ThemeIcon(kind === 'include' ? 'check' : 'circle-slash');
+    item.contextValue = kind === 'include' ? 'replayInstrumentationIncludedPrefix' : 'replayInstrumentationExcludedPrefix';
+    item.__kind = kind; item.prefix = prefix;
+    item.tooltip = kind === 'include' ? `Instrument ${prefix}` : `Do not instrument ${prefix}`;
+    return item;
+  }
+  fileItem(file) {
+    const className = file.primaryClass || '';
+    const status = flowInstrumentationStatus(className);
+    const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
+    item.description = file.packageName || file.relativePath;
+    item.iconPath = new vscode.ThemeIcon(status === 'included' ? 'check' : 'history');
+    item.contextValue = 'replayInstrumentationPreviousFile';
+    item.__kind = 'file'; item.file = file; item.className = className; item.packageName = file.packageName;
+    const statusText = status === 'included' ? 'explicitly included' : 'captured by automatic test/package instrumentation';
+    item.tooltip = `${file.relativePath}\n${className || 'Class name unavailable'}\nPrevious run: ${file.lineCount} lines · ${file.events} events\nInstrumentation: ${statusText}`;
+    return item;
+  }
+}
+
 class ReplayValueItem extends vscode.TreeItem {
   constructor(label, value, depth=0) {
     const fields = depth < 5 ? replayObjectFields(value) : [];
@@ -4164,7 +4324,7 @@ function applyReplayDecorations(editor) {
 }
 async function updateNativeReplayWorkbench() {
   const session=nativeReplaySession;if(!session)return;
-  replayFilesProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
+  replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
   for(const editor of vscode.window.visibleTextEditors)applyReplayDecorations(editor);
   const current=session.current;if(current)await openReplayEditorLocation(current.sourcePath,current.line,false);
   vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
@@ -4192,7 +4352,7 @@ async function openNativeReplay(result) {
 function closeNativeReplay() {
   nativeReplaySession=undefined;
   replayEditorColumn=undefined;
-  replayFilesProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
+  replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
   for(const editor of vscode.window.visibleTextEditors){editor.setDecorations(replayExecutedDecoration,[]);editor.setDecorations(replayCurrentDecoration,[]);}
   vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',false);
 }
@@ -4249,11 +4409,13 @@ module.exports.activate = async function patchedActivate(context) {
     after: { contentText: '  ◀ REPLAY', color: new vscode.ThemeColor('debugIcon.startForeground'), fontStyle: 'italic' }
   });
   replayFilesProvider = new ReplayFilesProvider();
+  instrumentationProvider = new ReplayInstrumentationProvider();
   replayStateProvider = new ReplayStateProvider();
   replayCallStackProvider = new ReplayCallStackProvider();
   replayTimelineProvider = new ReplayTimelineProvider();
   context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayFiles', replayFilesProvider));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayInstrumentation', instrumentationProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayState', replayStateProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayCallStack', replayCallStackProvider));
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('compositeGradleTests.replayTimeline', replayTimelineProvider, { webviewOptions: { retainContextWhenHidden: true } }));
@@ -4275,6 +4437,27 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.last', () => nativeReplaySession?.last()));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previousOccurrence', () => nativeReplaySession?.moveOccurrence(-1)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.nextOccurrence', () => nativeReplaySession?.moveOccurrence(1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addInclude', async () => {
+    const value = await vscode.window.showInputBox({ prompt: 'Package or fully-qualified class to instrument', placeHolder: 'com.mycompany.orders' });
+    const prefix = normalizeFlowPrefix(value); if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addExclude', async () => vscode.window.showInformationMessage('Replay exclusions are temporarily disabled in 0.4.9 while additional-package instrumentation is restored.')));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removePrefix', async item => {
+    if (!item?.prefix) return;
+    const key = item.__kind === 'exclude' ? 'flowExcludePrefixes' : 'flowPackagePrefixes';
+    await updateFlowPrefixSetting(key, values => values.filter(v => v !== item.prefix));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeFile', async item => {
+    const prefix = normalizeFlowPrefix(item?.className || item?.file?.primaryClass); if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.excludeFile', async () => vscode.window.showInformationMessage('Replay exclusions are temporarily disabled in 0.4.9 while additional-package instrumentation is restored.')));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includePackage', async item => {
+    const prefix = normalizeFlowPrefix(item?.packageName || item?.file?.packageName); if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.excludePackage', async () => vscode.window.showInformationMessage('Replay exclusions are temporarily disabled in 0.4.9 while additional-package instrumentation is restored.')));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.openFile', async file => {
     if (!nativeReplaySession || !file?.sourcePath) return;
     const index=nativeReplaySession.lineEvents.findIndex(event=>normalizePath(event.sourcePath)===normalizePath(file.sourcePath));
@@ -4292,6 +4475,9 @@ module.exports.activate = async function patchedActivate(context) {
     const line = Number(event.selections?.[0]?.active?.line ?? -1) + 1;
     if (line <= 0) return;
     nativeReplaySession.seekToSourceLine(editor.document.uri.fsPath, line);
+  }));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes')) instrumentationProvider?.refresh();
   }));
   context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(editors => { if(nativeReplaySession)for(const editor of editors)applyReplayDecorations(editor); }));
 };

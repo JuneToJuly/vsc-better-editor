@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.7",
+  "version": "0.4.12",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -44,7 +44,8 @@
     "onCommand:compositeGradleTests.runClassWithFlow",
     "onView:compositeGradleTests.replayFiles",
     "onView:compositeGradleTests.replayTimeline",
-    "onCommand:compositeGradleTests.replay.open"
+    "onCommand:compositeGradleTests.replay.open",
+    "onView:compositeGradleTests.replayInstrumentation"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -233,6 +234,41 @@
         "command": "compositeGradleTests.replay.nextOccurrence",
         "title": "Replay: Next Occurrence",
         "icon": "$(chevron-right)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addInclude",
+        "title": "Replay Instrumentation: Add Package / Class",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExclude",
+        "title": "Replay Instrumentation: Add Exclusion",
+        "icon": "$(exclude)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removePrefix",
+        "title": "Replay Instrumentation: Remove Rule",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.includeFile",
+        "title": "Replay Instrumentation: Include File",
+        "icon": "$(check)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.excludeFile",
+        "title": "Replay Instrumentation: Exclude File",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.includePackage",
+        "title": "Replay Instrumentation: Include Package",
+        "icon": "$(package)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.excludePackage",
+        "title": "Replay Instrumentation: Exclude Package",
+        "icon": "$(circle-slash)"
       }
     ],
     "menus": {
@@ -353,6 +389,16 @@
           "command": "compositeGradleTests.replay.exit",
           "when": "view == compositeGradleTests.replayTimeline",
           "group": "navigation@9"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.addInclude",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.addExclude",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -380,6 +426,31 @@
           "command": "compositeGradleTests.projectTests.run",
           "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedMethod",
           "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removePrefix",
+          "when": "view == compositeGradleTests.replayInstrumentation && (viewItem == replayInstrumentationIncludedPrefix || viewItem == replayInstrumentationExcludedPrefix)",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "group": "inline@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
@@ -635,6 +706,14 @@
           "minimum": 1,
           "maximum": 200,
           "description": "Maximum collection, map, or array items captured in each checkpoint."
+        },
+        "compositeGradleTests.flowExcludePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Reserved instrumentation exclusions. Temporarily not applied in 0.4.9 while the known-good additional-package matcher is restored."
         }
       }
     },
@@ -687,6 +766,10 @@
         {
           "id": "compositeGradleTests.replayFiles",
           "name": "Where Did Execution Go?"
+        },
+        {
+          "id": "compositeGradleTests.replayInstrumentation",
+          "name": "Instrumentation"
         },
         {
           "id": "compositeGradleTests.replayState",
