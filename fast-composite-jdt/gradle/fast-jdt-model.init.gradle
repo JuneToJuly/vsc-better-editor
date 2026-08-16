@@ -79,8 +79,6 @@ def exportBuild = { Gradle g ->
 
             def configNames = []
             try { if (ss.compileClasspathConfigurationName) configNames << ss.compileClasspathConfigurationName } catch (Throwable ignored) {}
-            try { if (ss.runtimeClasspathConfigurationName) configNames << ss.runtimeClasspathConfigurationName } catch (Throwable ignored) {}
-            try { if (ss.annotationProcessorConfigurationName) configNames << ss.annotationProcessorConfigurationName } catch (Throwable ignored) {}
 
             configNames.unique().each { configName ->
                 def c = p.configurations.findByName(configName)

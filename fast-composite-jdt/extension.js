@@ -17,7 +17,9 @@ const LEGACY_MODEL_FILE = 'composite-model.json';
 const ROOTS_DIR = 'roots';
 const ROOTS_STATE = 'compositeRoots';
 const ACTIVE_ROOT_STATE = 'activeCompositeRoot';
+const APPLIED_ROOT_STATE = 'appliedCompositeRoot';
 const GENERATED_MARKER = '<!-- generated-by: fast-composite-jdt -->';
+const GENERATED_PREFS_MARKER = '# generated-by: fast-composite-jdt';
 
 function log(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
@@ -135,6 +137,15 @@ function getActiveRoot(context) {
 
 async function setActiveRoot(context, root) {
   await context.workspaceState.update(ACTIVE_ROOT_STATE, root ? normalize(root) : undefined);
+}
+
+function getAppliedRoot(context) {
+  const applied = context.workspaceState.get(APPLIED_ROOT_STATE);
+  return applied ? normalize(applied) : undefined;
+}
+
+async function setAppliedRoot(context, root) {
+  await context.workspaceState.update(APPLIED_ROOT_STATE, root ? normalize(root) : undefined);
 }
 
 function hasSettingsFile(root) {
@@ -342,25 +353,146 @@ async function applyModel(model) {
 
     if (p.javaVersion) {
       const v = String(p.javaVersion);
-      const prefs = `eclipse.preferences.version=1\norg.eclipse.jdt.core.compiler.codegen.targetPlatform=${v}\norg.eclipse.jdt.core.compiler.compliance=${v}\norg.eclipse.jdt.core.compiler.source=${v}\n`;
+      const prefs = `${GENERATED_PREFS_MARKER}\neclipse.preferences.version=1\norg.eclipse.jdt.core.compiler.codegen.targetPlatform=${v}\norg.eclipse.jdt.core.compiler.compliance=${v}\norg.eclipse.jdt.core.compiler.source=${v}\n`;
       changed += await writeIfChanged(settingsFile, prefs) ? 1 : 0;
     }
   }
   return changed;
 }
 
-async function notifyJdtOfChanges() {
-  // .project/.classpath are workspace resources and JDT normally reacts to them.
-  // These calls are best-effort accelerators across vscode-java versions.
-  for (const command of ['java.project.import', 'java.project.refreshLib']) {
-    try {
-      await vscode.commands.executeCommand(command);
-      log(`Requested JDT refresh via ${command}.`);
-      return;
-    } catch (e) {
-      log(`${command} unavailable: ${e.message}`);
+
+async function removeOwnedGeneratedFile(file, marker) {
+  try {
+    const content = await fsp.readFile(file, 'utf8');
+    if (!content.includes(marker)) {
+      log(`Leaving non-owned metadata in place: ${file}`);
+      return false;
     }
+    await fsp.rm(file, { force: true });
+    log(`Removed stale generated metadata: ${file}`);
+    return true;
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') log(`Could not remove stale metadata ${file}: ${e.message}`);
+    return false;
   }
+}
+
+async function cleanupRemovedProjects(previousModel, nextModel) {
+  if (!previousModel?.projects?.length) return 0;
+
+  const nextDirs = new Set((nextModel?.projects || []).map(p => normalize(p.directory)));
+  let changed = 0;
+
+  for (const p of previousModel.projects) {
+    const dir = normalize(p.directory);
+    if (nextDirs.has(dir)) continue;
+
+    log(`Project no longer in active composite; cleaning generated JDT metadata: ${dir}`);
+    changed += await removeOwnedGeneratedFile(path.join(dir, '.project'), GENERATED_MARKER) ? 1 : 0;
+    changed += await removeOwnedGeneratedFile(path.join(dir, '.classpath'), GENERATED_MARKER) ? 1 : 0;
+    changed += await removeOwnedGeneratedFile(
+      path.join(dir, '.settings', 'org.eclipse.jdt.core.prefs'),
+      GENERATED_PREFS_MARKER
+    ) ? 1 : 0;
+
+    try {
+      const settingsDir = path.join(dir, '.settings');
+      if ((await fsp.readdir(settingsDir)).length === 0) await fsp.rmdir(settingsDir);
+    } catch {}
+  }
+
+  return changed;
+}
+
+function projectTransition(previousModel, nextModel) {
+  const previousByDir = new Map((previousModel?.projects || []).map(p => [normalize(p.directory), p]));
+  const nextByDir = new Map((nextModel?.projects || []).map(p => [normalize(p.directory), p]));
+
+  const added = [];
+  const updated = [];
+  const removed = [];
+
+  for (const [dir, p] of nextByDir) {
+    if (previousByDir.has(dir)) updated.push(p);
+    else added.push(p);
+  }
+  for (const [dir, p] of previousByDir) {
+    if (!nextByDir.has(dir)) removed.push(p);
+  }
+  return { added, updated, removed };
+}
+
+async function applyModelTransition(context, root, model, previousModelOverride) {
+  let previousModel = previousModelOverride;
+  if (!previousModel) {
+    const appliedRoot = getAppliedRoot(context);
+    if (appliedRoot) previousModel = await readCachedModel(context, appliedRoot);
+  }
+
+  const transition = projectTransition(previousModel, model);
+  let changed = await cleanupRemovedProjects(previousModel, model);
+  changed += await applyModel(model);
+  await setAppliedRoot(context, root);
+  return { changed, transition };
+}
+
+async function activateJavaExtension() {
+  const javaExtension = vscode.extensions.getExtension('redhat.java');
+  if (!javaExtension) {
+    log('Red Hat Java extension is not installed in this extension host.');
+    return false;
+  }
+  try {
+    if (!javaExtension.isActive) {
+      log('Activating Red Hat Java before project synchronization...');
+      await javaExtension.activate();
+    }
+    return true;
+  } catch (e) {
+    log(`Could not activate Red Hat Java: ${e.message}`);
+    return false;
+  }
+}
+
+async function executeJdtCommand(command, ...args) {
+  try {
+    await vscode.commands.executeCommand(command, ...args);
+    log(`Requested JDT synchronization via ${command}.`);
+    return true;
+  } catch (e) {
+    log(`${command} unavailable/failed: ${e.message}`);
+    return false;
+  }
+}
+
+async function notifyJdtOfChanges(transition = { added: [], updated: [], removed: [] }) {
+  // Keep JDT's Eclipse workspace project set aligned with the active composite.
+  // JDT LS defines changeImportedProjects(toImport, toUpdate, toDelete), with file URIs.
+  await activateJavaExtension();
+
+  // JDT LS treats toImport as project *configuration file* URIs. For our
+  // Eclipse-style projects that means the generated .project file, not the
+  // project directory. toUpdate/toDelete, by contrast, are folder URIs.
+  const toImport = (transition.added || []).map(p =>
+    vscode.Uri.file(path.join(p.directory, '.project')).toString()
+  );
+  const toUpdate = (transition.updated || []).map(p => vscode.Uri.file(p.directory).toString());
+  const toDelete = (transition.removed || []).map(p => vscode.Uri.file(p.directory).toString());
+
+  if (toImport.length || toUpdate.length || toDelete.length) {
+    log(`JDT project transition: +${toImport.length} ~${toUpdate.length} -${toDelete.length}`);
+    const changed = await executeJdtCommand('java.project.changeImportedProjects', toImport, toUpdate, toDelete);
+    if (!changed) {
+      // Older clients may not expose changeImportedProjects; import is the safer fallback.
+      await executeJdtCommand('java.project.import');
+    }
+  } else {
+    await executeJdtCommand('java.project.import');
+  }
+
+  // changeImportedProjects is sufficient for normal add/update/remove synchronization.
+  // Do not invoke java.projectConfiguration.update here: it is a user-facing command
+  // that opens a project-selection picker during resync.
 }
 
 async function extractModel(context, root) {
@@ -415,10 +547,11 @@ async function resync(context, quiet = false) {
   status.tooltip = `Refreshing ${rootDisplayName(root)}`;
   const start = Date.now();
   try {
+    const previousModel = await readCachedModel(context, root);
     const model = await extractModel(context, root);
-    const changed = await applyModel(model);
+    const { changed, transition } = await applyModelTransition(context, root, model, previousModel);
     await writeCachedModel(context, root, model);
-    await notifyJdtOfChanges();
+    await notifyJdtOfChanges(transition);
     const ms = Date.now() - start;
     status.text = `$(check) JDT: ${rootDisplayName(root)}`;
     status.tooltip = `${model.projects.length} projects · synced in ${(ms / 1000).toFixed(1)}s\n${root}`;
@@ -438,8 +571,8 @@ async function loadCached(context, root = getActiveRoot(context)) {
   const start = Date.now();
   const model = await readCachedModel(context, root);
   if (!model) return false;
-  const changed = await applyModel(model);
-  await notifyJdtOfChanges();
+  const { changed, transition } = await applyModelTransition(context, root, model);
+  await notifyJdtOfChanges(transition);
   const ms = Date.now() - start;
   status.text = `$(check) JDT: ${rootDisplayName(root)}`;
   status.tooltip = `${model.projects.length} cached projects · loaded in ${ms}ms\n${root}`;
@@ -535,20 +668,25 @@ async function removeCompositeRoot(context) {
   })), { title: 'Remove Fast Composite JDT Root' });
   if (!pick) return;
 
+  const oldModel = await readCachedModel(context, pick.root);
   const remaining = roots.filter(r => normalize(r.path) !== normalize(pick.root));
   await setRegisteredRoots(context, remaining);
-  await fsp.rm(modelPath(context, pick.root), { force: true });
 
   if (normalize(active || '') === normalize(pick.root)) {
     const next = remaining[0]?.path;
     await setActiveRoot(context, next);
-    if (next) await loadCached(context, next);
-    else {
+    if (next) {
+      await loadCached(context, next);
+    } else {
+      await cleanupRemovedProjects(oldModel, { projects: [] });
+      await setAppliedRoot(context, undefined);
+      await notifyJdtOfChanges(projectTransition(oldModel, { projects: [] }));
       status.text = '$(circle-slash) JDT Model';
       status.tooltip = 'No composite root configured';
     }
   }
-  vscode.window.showInformationMessage(`Fast Composite JDT: removed ${pick.label}. Generated project metadata was left in place.`);
+  await fsp.rm(modelPath(context, pick.root), { force: true });
+  vscode.window.showInformationMessage(`Fast Composite JDT: removed ${pick.label}.`);
 }
 
 async function showStatus(context) {

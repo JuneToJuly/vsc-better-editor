@@ -38,3 +38,8 @@ No sync is required when adding/editing/removing Java files under already-known 
 ## JDT project naming
 
 JDT project names are derived from Gradle build-tree project paths. For example, `:shared-model` is shown as `shared-model`, while `:services:api` is shown as `services-api`. A numeric suffix is used only when two Gradle paths would otherwise collapse to the same Eclipse-safe project name.
+
+
+## 0.2.3 behavior
+
+Model extraction resolves compile classpaths only. Runtime and annotation-processor classpaths are intentionally not resolved. Resync also removes Fast Composite JDT-owned `.project`, `.classpath`, and generated JDT prefs for projects that disappeared from the active composite model.

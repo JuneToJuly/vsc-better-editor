@@ -2,7 +2,7 @@
   "name": "fast-composite-jdt",
   "displayName": "Fast Composite JDT",
   "description": "Fast Gradle composite-build to JDT adapter with cached named composite roots and instant model switching.",
-  "version": "0.2.2",
+  "version": "0.2.6",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -83,5 +83,8 @@
   },
   "scripts": {
     "package": "npx @vscode/vsce package"
-  }
+  },
+  "extensionKind": [
+    "workspace"
+  ]
 }
