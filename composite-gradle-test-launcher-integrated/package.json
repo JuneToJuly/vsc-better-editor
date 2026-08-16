@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.14",
+  "version": "0.4.19",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -309,6 +309,16 @@
         "command": "compositeGradleTests.replay.instrumentation.removePackage",
         "title": "Replay Instrumentation: Remove Package",
         "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addRule",
+        "title": "Replay Instrumentation: Add Rule",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.configureFile",
+        "title": "Replay Instrumentation: Configure File",
+        "icon": "$(settings-gear)"
       }
     ],
     "menus": {
@@ -431,24 +441,9 @@
           "group": "navigation@9"
         },
         {
-          "command": "compositeGradleTests.replay.instrumentation.addPackage",
+          "command": "compositeGradleTests.replay.instrumentation.addRule",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@1"
-        },
-        {
-          "command": "compositeGradleTests.replay.instrumentation.addFile",
-          "when": "view == compositeGradleTests.replayInstrumentation",
-          "group": "navigation@2"
-        },
-        {
-          "command": "compositeGradleTests.replay.instrumentation.addExcludePackage",
-          "when": "view == compositeGradleTests.replayInstrumentation",
-          "group": "navigation@3"
-        },
-        {
-          "command": "compositeGradleTests.replay.instrumentation.addExcludeFile",
-          "when": "view == compositeGradleTests.replayInstrumentation",
-          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -495,12 +490,12 @@
         {
           "command": "compositeGradleTests.replay.instrumentation.includeFile",
           "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_(automatic|package)/",
-          "group": "inline@1"
+          "group": "navigation@1"
         },
         {
           "command": "compositeGradleTests.replay.instrumentation.removeFile",
           "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile_file",
-          "group": "inline@1"
+          "group": "navigation@1"
         },
         {
           "command": "compositeGradleTests.replay.instrumentation.includePackage",
@@ -521,6 +516,11 @@
           "command": "compositeGradleTests.replay.instrumentation.excludePackage",
           "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
           "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.configureFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "inline@1"
         }
       ],
       "editor/title": [

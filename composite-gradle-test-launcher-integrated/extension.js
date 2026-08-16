@@ -1924,42 +1924,40 @@ function renderFlowReplayHtml(result) {
   function stepReplayOver(){
     const current=replayEvents[replayPosition];if(!current)return;
     const thread=eventThreadKey(current),currentSeq=Number(current.sequence??current.__index??0);
+    const owner=replayOwningEntry(current);
+    const ownerExit=owner?replayExitFor(owner):null;
+    const invocationEnd=ownerExit?Number(ownerExit.sequence??ownerExit.__index??Infinity):Infinity;
 
-    // Step Over is source-frame navigation: remain in the method that owns the
-    // highlighted line. Do not use the next LINE event's callId/depth to decide
-    // whether it belongs to the caller; the first callee LINE can be emitted
-    // before ENTER and therefore temporarily carries misleading frame metadata.
-    const nextCallerLine=nextReplayLineInSameMethod(current,replayPosition+1,currentSeq);
-    if(nextCallerLine){
-      // If this line recursively invokes the same method, a child invocation can
-      // also look like the same source method. Skip through any child call(s)
-      // launched from this exact source-line occurrence before accepting it.
-      const upperSeq=Number(nextCallerLine.event.sequence??nextCallerLine.event.__index??Infinity);
-      let skipThrough=currentSeq;
-      for(const call of model.events){
-        if(call.event!=='callsite'||eventThreadKey(call)!==thread)continue;
-        if(String(call.sourcePath||'')!==String(current.sourcePath||'')||Number(call.line||0)!==Number(current.line||0))continue;
-        const callSeq=Number(call.sequence??call.__index??0);
-        if(callSeq<currentSeq-0.5||callSeq>=upperSeq)continue;
-        const exit=replayExitFor(call);
-        if(exit)skipThrough=Math.max(skipThrough,Number(exit.sequence??exit.__index??skipThrough));
-      }
-      const target=nextReplayLineInSameMethod(current,replayPosition+1,skipThrough);
-      if(target){setReplayPosition(target.index);return}
-      setReplayPosition(nextCallerLine.index);return;
+    // Step Over is line-centric: skip only calls made by THIS source line and
+    // stop on the next source line in the current invocation. Do not trust the
+    // first callee LINE's callId/depth; it can be emitted before ENTER advice.
+    // Instead, use source-method identity and bound the search by this
+    // invocation's EXIT so a later invocation of the same method is not used.
+    let skipThrough=currentSeq;
+    for(const call of model.events){
+      if(call.event!=='callsite'||eventThreadKey(call)!==thread)continue;
+      if(String(call.sourcePath||'')!==String(current.sourcePath||'')||Number(call.line||0)!==Number(current.line||0))continue;
+      const callSeq=Number(call.sequence??call.__index??0);
+      if(callSeq<currentSeq-0.5||callSeq>invocationEnd)continue;
+      const exit=replayExitFor(call);
+      if(exit)skipThrough=Math.max(skipThrough,Number(exit.sequence??exit.__index??skipThrough));
     }
 
-    // No later line exists in this method (for example we are at its final
-    // executable line). In that case behave like a debugger and continue at the
-    // first replay line after this invocation exits.
-    const owner=replayOwningEntry(current)||replayEntryFor(current);
-    const exit=owner?replayExitFor(owner):null;
-    const boundary=exit?Number(exit.sequence??exit.__index??currentSeq):currentSeq;
     for(let i=replayPosition+1;i<replayEvents.length;i++){
-      const e=replayEvents[i];
-      if(eventThreadKey(e)!==thread)continue;
-      if(Number(e.sequence??e.__index??0)<=boundary)continue;
-      setReplayPosition(i);return;
+      const candidate=replayEvents[i];
+      if(eventThreadKey(candidate)!==thread)continue;
+      const seq=Number(candidate.sequence??candidate.__index??0);
+      if(seq<=skipThrough)continue;
+      if(seq>invocationEnd)break;
+      if(sameReplayMethod(current,candidate)){setReplayPosition(i);return}
+    }
+
+    // There is no next source line in this method invocation. At a method's
+    // final line, Step Over must not skip anything else: simply continue to the
+    // next visible instrumented LINE on this thread. This is important when the
+    // caller is excluded and therefore has no recorded location.
+    for(let i=replayPosition+1;i<replayEvents.length;i++){
+      if(eventThreadKey(replayEvents[i])===thread){setReplayPosition(i);return}
     }
   }
   function stepReplayOut(){const current=replayEvents[replayPosition];if(!current)return;const entry=replayEntryFor(current);if(!entry)return;const callerPath=entry.callerSourcePath,callerLine=Number(entry.callerLine||0),thread=eventThreadKey(current);if(callerPath&&callerLine>0){const boundary=Number(entry.sequence??entry.__index??Infinity);let target=-1;for(let i=0;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(String(e.sourcePath||'')!==String(callerPath)||Number(e.line||0)!==callerLine)continue;if(Number(e.sequence??e.__index??0)>=boundary)continue;target=i}if(target>=0){setReplayPosition(target);return}}const currentDepth=replayFrameDepth(current);for(let i=replayPosition-1;i>=0;i--){const e=replayEvents[i];if(eventThreadKey(e)===thread&&replayFrameDepth(e)<currentDepth){setReplayPosition(i);return}}}
@@ -4193,27 +4191,37 @@ class NativeReplaySession {
   }
   stepOver() {
     const current = this.current; if (!current) return;
+    const thread = replayEventThread(current);
     const currentSeq = replayEventSequence(current);
-    // Deliberately navigate by source method. This is the working 0.3.29 rule:
-    // the first callee LINE can precede ENTER and therefore cannot be trusted as
-    // frame metadata for Step Over.
+    const owner = this.entryForLine(current);
+    const ownerExit = owner ? this.exitByCallId.get(replayEventCallId(owner)) : null;
+    const invocationEnd = ownerExit ? replayEventSequence(ownerExit) : Infinity;
+
+    // Step Over is line-centric. Skip child calls launched from the highlighted
+    // source line, then stop at the next line in this source method. Source
+    // identity is intentional here: the first callee LINE can precede ENTER and
+    // temporarily carry caller-like frame metadata.
     let skipThrough = currentSeq;
     for (const entry of this.childEntriesFromCurrentLine(current)) {
       const exit = this.exitByCallId.get(replayEventCallId(entry));
       if (exit) skipThrough = Math.max(skipThrough, replayEventSequence(exit));
     }
+
     for (let i=this.position+1;i<this.lineEvents.length;i++) {
       const event = this.lineEvents[i];
-      if (replayEventSequence(event) <= skipThrough) continue;
+      if (replayEventThread(event) !== thread) continue;
+      const seq = replayEventSequence(event);
+      if (seq <= skipThrough) continue;
+      if (seq > invocationEnd) break;
       if (replaySameMethod(current, event)) { this.setPosition(i); return; }
     }
-    const owner = this.entryForLine(current);
-    const exit = owner ? this.exitByCallId.get(replayEventCallId(owner)) : null;
-    const boundary = exit ? replayEventSequence(exit) : currentSeq;
-    const thread = replayEventThread(current);
+
+    // If this is the final recorded line of the method, do not perform another
+    // implicit step-over. Just continue to the next visible instrumented line.
+    // This naturally handles excluded callers between two instrumented methods.
     for (let i=this.position+1;i<this.lineEvents.length;i++) {
       const event = this.lineEvents[i];
-      if (replayEventThread(event) === thread && replayEventSequence(event) > boundary) { this.setPosition(i); return; }
+      if (replayEventThread(event) === thread) { this.setPosition(i); return; }
     }
   }
   stepOut() {
@@ -4306,63 +4314,125 @@ class ReplayInstrumentationProvider {
     const includeFiles = flowClassNames();
     const excludePackages = flowExcludePackagePrefixes();
     const excludeFiles = flowExcludeClassNames();
+    const ruleCount = includePackages.length + includeFiles.length + excludePackages.length + excludeFiles.length;
+
     if (!parent) {
       const roots = [];
-      const includePackageRoot = new vscode.TreeItem(`Included Packages (${includePackages.length})`, vscode.TreeItemCollapsibleState.Expanded);
-      includePackageRoot.contextValue = 'replayInstrumentationPackageRoot'; includePackageRoot.__kind = 'includePackageRoot'; roots.push(includePackageRoot);
-      const includeFileRoot = new vscode.TreeItem(`Included Files / Classes (${includeFiles.length})`, vscode.TreeItemCollapsibleState.Expanded);
-      includeFileRoot.contextValue = 'replayInstrumentationFileRoot'; includeFileRoot.__kind = 'includeFileRoot'; roots.push(includeFileRoot);
-      const excludePackageRoot = new vscode.TreeItem(`Excluded Packages (${excludePackages.length})`, vscode.TreeItemCollapsibleState.Collapsed);
-      excludePackageRoot.contextValue = 'replayInstrumentationExcludePackageRoot'; excludePackageRoot.__kind = 'excludePackageRoot'; roots.push(excludePackageRoot);
-      const excludeFileRoot = new vscode.TreeItem(`Excluded Files / Classes (${excludeFiles.length})`, vscode.TreeItemCollapsibleState.Collapsed);
-      excludeFileRoot.contextValue = 'replayInstrumentationExcludeFileRoot'; excludeFileRoot.__kind = 'excludeFileRoot'; roots.push(excludeFileRoot);
+      const rulesRoot = new vscode.TreeItem(`Rules (${ruleCount})`, vscode.TreeItemCollapsibleState.Expanded);
+      rulesRoot.contextValue = 'replayInstrumentationRulesRoot';
+      rulesRoot.__kind = 'rulesRoot';
+      rulesRoot.tooltip = 'Instrumentation rules applied to the next Code Flow run.';
+      roots.push(rulesRoot);
+
       if (nativeReplaySession?.files?.length) {
-        const previousRoot = new vscode.TreeItem(`Previous Run (${nativeReplaySession.files.length} files)`, vscode.TreeItemCollapsibleState.Expanded);
-        previousRoot.contextValue = 'replayInstrumentationPreviousRoot'; previousRoot.__kind = 'previousRoot'; roots.push(previousRoot);
+        const previousRoot = new vscode.TreeItem(`Previous Run (${nativeReplaySession.files.length})`, vscode.TreeItemCollapsibleState.Expanded);
+        previousRoot.contextValue = 'replayInstrumentationPreviousRoot';
+        previousRoot.__kind = 'previousRoot';
+        previousRoot.description = 'captured files';
+        previousRoot.tooltip = 'Files that participated in the most recent captured execution. Click a file to open it; use the inline action or context menu to change its instrumentation rule.';
+        roots.push(previousRoot);
       }
       return roots;
     }
-    if (parent.__kind === 'includePackageRoot') return includePackages.map(value => this.ruleItem(value, 'package', false));
-    if (parent.__kind === 'includeFileRoot') return includeFiles.map(value => this.ruleItem(value, 'file', false));
-    if (parent.__kind === 'excludePackageRoot') return excludePackages.map(value => this.ruleItem(value, 'package', true));
-    if (parent.__kind === 'excludeFileRoot') return excludeFiles.map(value => this.ruleItem(value, 'file', true));
-    if (parent.__kind === 'previousRoot') return nativeReplaySession.files.map(file => this.previousFileItem(file));
+
+    if (parent.__kind === 'rulesRoot') {
+      const children = [];
+      const includeCount = includePackages.length + includeFiles.length;
+      const excludeCount = excludePackages.length + excludeFiles.length;
+      const includeRoot = new vscode.TreeItem(`Include (${includeCount})`, includeCount ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+      includeRoot.contextValue = 'replayInstrumentationIncludeRoot'; includeRoot.__kind = 'includeRoot';
+      includeRoot.iconPath = new vscode.ThemeIcon('check');
+      includeRoot.description = includeCount ? '' : 'none';
+      children.push(includeRoot);
+      const excludeRoot = new vscode.TreeItem(`Exclude (${excludeCount})`, excludeCount ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+      excludeRoot.contextValue = 'replayInstrumentationExcludeRoot'; excludeRoot.__kind = 'excludeRoot';
+      excludeRoot.iconPath = new vscode.ThemeIcon('circle-slash');
+      excludeRoot.description = excludeCount ? '' : 'none';
+      children.push(excludeRoot);
+      return children;
+    }
+
+    if (parent.__kind === 'includeRoot') {
+      return [
+        ...includePackages.map(value => this.ruleItem(value, 'package', false)),
+        ...includeFiles.map(value => this.ruleItem(value, 'file', false))
+      ];
+    }
+    if (parent.__kind === 'excludeRoot') {
+      return [
+        ...excludePackages.map(value => this.ruleItem(value, 'package', true)),
+        ...excludeFiles.map(value => this.ruleItem(value, 'file', true))
+      ];
+    }
+    if (parent.__kind === 'previousRoot') {
+      const priority = { file: 0, package: 1, automatic: 2, excludedFile: 3, excludedPackage: 4 };
+      return nativeReplaySession.files
+        .map(file => ({ file, status: flowInstrumentationStatus(file.primaryClass || '') }))
+        .sort((a, b) => (priority[a.status.kind] ?? 9) - (priority[b.status.kind] ?? 9) || a.file.name.localeCompare(b.file.name))
+        .map(({ file, status }) => this.previousFileItem(file, status));
+    }
     return [];
   }
+
   ruleItem(value, kind, excluded) {
-    const label = kind === 'package' ? value : (value.split('.').pop() || value);
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-    item.description = kind === 'file' ? value : 'package';
+    const simpleName = value.split('.').pop() || value;
+    const packageName = kind === 'file' ? value.slice(0, Math.max(0, value.length - simpleName.length - 1)) : '';
+    const item = new vscode.TreeItem(kind === 'package' ? value : simpleName, vscode.TreeItemCollapsibleState.None);
+
+    if (kind === 'file') {
+      const covering = !excluded
+        ? flowPackagePrefixes().filter(rule => flowPrefixMatches(value, rule)).sort((a, b) => b.length - a.length)[0]
+        : flowExcludePackagePrefixes().filter(rule => flowPrefixMatches(value, rule)).sort((a, b) => b.length - a.length)[0];
+      item.description = covering ? `${packageName} · covered by ${covering}` : packageName;
+      item.tooltip = covering
+        ? `${value}\n${excluded ? 'Excluded' : 'Included'} directly, but this rule is already covered by package rule ${covering}.`
+        : `${excluded ? 'Exclude' : 'Instrument'} ${value} and nested classes from the same source file.`;
+    } else {
+      item.description = '';
+      item.tooltip = `${excluded ? 'Exclude' : 'Instrument'} package ${value}`;
+    }
+
     item.iconPath = new vscode.ThemeIcon(excluded ? 'circle-slash' : (kind === 'package' ? 'package' : 'file-code'));
     item.contextValue = excluded
       ? (kind === 'package' ? 'replayInstrumentationExcludePackageRule' : 'replayInstrumentationExcludeFileRule')
       : (kind === 'package' ? 'replayInstrumentationPackageRule' : 'replayInstrumentationFileRule');
-    item.__kind = kind; item.prefix = value; item.className = kind === 'file' ? value : ''; item.packageName = kind === 'package' ? value : '';
-    item.tooltip = excluded
-      ? (kind === 'package' ? `Exclude package from Replay: ${value}` : `Exclude ${value} and its nested classes from Replay`)
-      : (kind === 'package' ? `Instrument package: ${value}` : `Instrument only ${value} and its nested classes`);
+    item.__kind = kind;
+    item.prefix = value;
+    item.className = kind === 'file' ? value : '';
+    item.packageName = kind === 'package' ? value : packageName;
     return item;
   }
-  previousFileItem(file) {
+
+  previousFileItem(file, status = flowInstrumentationStatus(file.primaryClass || '')) {
     const className = file.primaryClass || '';
-    const status = flowInstrumentationStatus(className);
-    const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
     const packageName = file.packageName || '';
-    if (status.kind === 'excludedFile') item.description = `${packageName}  • excluded file`;
-    else if (status.kind === 'excludedPackage') item.description = `${packageName}  • excluded via ${status.rule}`;
-    else if (status.kind === 'file') item.description = `${packageName}  • file`;
-    else if (status.kind === 'package') item.description = `${packageName}  • via ${status.rule}`;
-    else item.description = `${packageName}  • automatic`;
-    item.iconPath = new vscode.ThemeIcon(status.kind.startsWith('excluded') ? 'circle-slash' : status.kind === 'file' ? 'check' : status.kind === 'package' ? 'package' : 'history');
+    const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
+
+    const statusMeta = status.kind === 'excludedFile'
+      ? { text: 'excluded · file rule', icon: 'circle-slash' }
+      : status.kind === 'excludedPackage'
+        ? { text: `excluded · ${status.rule}`, icon: 'circle-slash' }
+        : status.kind === 'file'
+          ? { text: 'file rule', icon: 'check' }
+          : status.kind === 'package'
+            ? { text: `package rule · ${status.rule}`, icon: 'check' }
+            : { text: 'automatic', icon: 'circle-outline' };
+
+    item.description = [packageName, statusMeta.text].filter(Boolean).join(' · ');
+    item.iconPath = new vscode.ThemeIcon(statusMeta.icon);
     item.contextValue = `replayInstrumentationPreviousFile_${status.kind}`;
-    item.__kind = 'previousFile'; item.file = file; item.className = className; item.packageName = file.packageName;
+    item.__kind = 'previousFile';
+    item.file = file;
+    item.className = className;
+    item.packageName = packageName;
     item.command = { command: 'compositeGradleTests.replay.openFile', title: 'Open Executed File', arguments: [file] };
-    const statusText = status.kind === 'excludedFile' ? `excluded by file rule ${status.rule}`
-      : status.kind === 'excludedPackage' ? `excluded by package rule ${status.rule}`
-      : status.kind === 'file' ? 'explicit file/class rule'
-      : status.kind === 'package' ? `package rule ${status.rule}`
-      : 'automatic test package';
-    item.tooltip = `${file.relativePath}\n${className || 'Class name unavailable'}\nPrevious run: ${file.lineCount} lines · ${file.events} events\nInstrumentation: ${statusText}\n\nRight-click to include or exclude this file or its package.`;
+
+    const statusText = status.kind === 'excludedFile' ? `Excluded by file rule ${status.rule}`
+      : status.kind === 'excludedPackage' ? `Excluded by package rule ${status.rule}`
+      : status.kind === 'file' ? 'Included by an explicit file/class rule'
+      : status.kind === 'package' ? `Included by package rule ${status.rule}`
+      : 'Included automatically because it is part of the test package';
+    item.tooltip = `${file.relativePath}\n${className || 'Class name unavailable'}\n${file.lineCount} executed lines · ${file.events} replay events\n${statusText}\n\nClick to open. Use the inline action or right-click to change instrumentation.`;
     return item;
   }
 }
@@ -4591,6 +4661,43 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.last', () => nativeReplaySession?.last()));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previousOccurrence', () => nativeReplaySession?.moveOccurrence(-1)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.nextOccurrence', () => nativeReplaySession?.moveOccurrence(1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addRule', async () => {
+    const choice = await vscode.window.showQuickPick([
+      { label: '$(package) Include Package', description: 'Instrument every class in a package', command: 'compositeGradleTests.replay.instrumentation.addPackage' },
+      { label: '$(file-code) Include File / Class', description: 'Instrument one source file/class and its nested classes', command: 'compositeGradleTests.replay.instrumentation.addFile' },
+      { label: '$(circle-slash) Exclude Package', description: 'Do not instrument classes in a package', command: 'compositeGradleTests.replay.instrumentation.addExcludePackage' },
+      { label: '$(circle-slash) Exclude File / Class', description: 'Do not instrument one source file/class', command: 'compositeGradleTests.replay.instrumentation.addExcludeFile' }
+    ], { title: 'Add Replay Instrumentation Rule', placeHolder: 'Choose a rule type' });
+    if (choice?.command) await vscode.commands.executeCommand(choice.command);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.configureFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.file?.primaryClass);
+    const packageName = normalizeFlowPrefix(item?.packageName || item?.file?.packageName);
+    if (!className && !packageName) return;
+    const status = flowInstrumentationStatus(className);
+    const choices = [];
+    if (className && status.kind !== 'file') choices.push({ label: '$(file-code) Include This File', description: className, action: 'includeFile' });
+    if (packageName && status.kind !== 'package') choices.push({ label: '$(package) Include This Package', description: packageName, action: 'includePackage' });
+    if (className && status.kind !== 'excludedFile') choices.push({ label: '$(circle-slash) Exclude This File', description: className, action: 'excludeFile' });
+    if (packageName && status.kind !== 'excludedPackage') choices.push({ label: '$(circle-slash) Exclude This Package', description: packageName, action: 'excludePackage' });
+    if (flowClassNames().includes(className)) choices.push({ label: '$(trash) Remove File Include Rule', description: className, action: 'removeFile' });
+    if (flowPackagePrefixes().includes(packageName)) choices.push({ label: '$(trash) Remove Package Include Rule', description: packageName, action: 'removePackage' });
+    if (flowExcludeClassNames().includes(className)) choices.push({ label: '$(trash) Remove File Exclusion', description: className, action: 'removeExcludeFile' });
+    if (flowExcludePackagePrefixes().includes(packageName)) choices.push({ label: '$(trash) Remove Package Exclusion', description: packageName, action: 'removeExcludePackage' });
+    const choice = await vscode.window.showQuickPick(choices, { title: `Instrumentation: ${item?.file?.name || className}`, placeHolder: 'Choose how this code should be instrumented' });
+    if (!choice) return;
+    const commands = {
+      includeFile: 'compositeGradleTests.replay.instrumentation.includeFile',
+      includePackage: 'compositeGradleTests.replay.instrumentation.includePackage',
+      excludeFile: 'compositeGradleTests.replay.instrumentation.excludeFile',
+      excludePackage: 'compositeGradleTests.replay.instrumentation.excludePackage',
+      removeFile: 'compositeGradleTests.replay.instrumentation.removeFile',
+      removePackage: 'compositeGradleTests.replay.instrumentation.removePackage',
+      removeExcludeFile: 'compositeGradleTests.replay.instrumentation.removeExcludeFile',
+      removeExcludePackage: 'compositeGradleTests.replay.instrumentation.removeExcludePackage'
+    };
+    await vscode.commands.executeCommand(commands[choice.action], item);
+  }));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addPackage', async () => {
     const prefix = await pickReplayInstrumentationPackage('Add Replay Instrumentation Package', 'Java package to instrument on the next Code Flow run');
     if (!prefix) return;
