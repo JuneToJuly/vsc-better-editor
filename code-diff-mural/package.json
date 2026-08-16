@@ -1,0 +1,62 @@
+{
+  "name": "code-diff-mural",
+  "displayName": "Code Diff Mural",
+  "description": "A pan-and-zoom mural for comparing any two Git branches, commits, or tags.",
+  "version": "0.0.11",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onCommand:codeDiffMural.compareAgainst",
+    "onCommand:codeDiffMural.refresh"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeDiffMural.compareAgainst",
+        "title": "Code Diff Mural: Compare Branches / Commits"
+      },
+      {
+        "command": "codeDiffMural.refresh",
+        "title": "Code Diff Mural: Refresh"
+      }
+    ],
+    "configuration": {
+      "title": "Code Diff Mural",
+      "properties": {
+        "codeDiffMural.maxZoom": {
+          "type": "number",
+          "default": 44,
+          "minimum": 10,
+          "maximum": 300,
+          "description": "Maximum mural zoom percentage. For example, 44 caps zoom at 44%."
+        },
+        "codeDiffMural.minZoom": {
+          "type": "number",
+          "default": 10,
+          "minimum": 5,
+          "maximum": 100,
+          "description": "Minimum mural zoom percentage."
+        }
+      }
+    },
+    "menus": {
+      "scm/title": [
+        {
+          "command": "codeDiffMural.compareAgainst",
+          "group": "navigation@90"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "npx @vscode/vsce package"
+  }
+}
