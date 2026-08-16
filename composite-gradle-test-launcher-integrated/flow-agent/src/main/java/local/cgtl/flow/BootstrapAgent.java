@@ -397,6 +397,7 @@ public final class BootstrapAgent {
     Class<?> generated = Class.forName("local.cgtl.flow.generated.OrderedLineAgent", true, loader);
     generated.getMethod("install", Instrumentation.class).invoke(null, instrumentation);
     System.err.println("[CGTL FLOW] Ordered line replay installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
+    System.err.println("[CGTL FLOW] Ordered line replay exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
   }
 
   private static String generatedSource() {
@@ -450,9 +451,23 @@ public final class BootstrapAgent {
             if (prefix.isEmpty()) continue;
             matcher = matcher.or(ElementMatchers.nameStartsWith(prefix + ".")).or(ElementMatchers.named(prefix));
           }
+          String excludes = System.getProperty("cgtl.flow.excludes", "").trim();
+          ElementMatcher.Junction<TypeDescription> excluded = ElementMatchers.none();
+          for (String token : excludes.split(",")) {
+            String rule = token.trim();
+            if (rule.isEmpty()) continue;
+            if (rule.startsWith("package:")) {
+              String pkg = rule.substring("package:".length()).trim();
+              if (!pkg.isEmpty()) excluded = excluded.or(ElementMatchers.nameStartsWith(pkg + ".")).or(ElementMatchers.named(pkg));
+            } else if (rule.startsWith("class:")) {
+              String cls = rule.substring("class:".length()).trim();
+              if (!cls.isEmpty()) excluded = excluded.or(ElementMatchers.named(cls)).or(ElementMatchers.nameStartsWith(cls + "$"));
+            }
+          }
           // Test classes are intentionally included. Ordered replay must begin in
           // the selected test method so its setup and initial call site are visible.
           return matcher
+              .and(ElementMatchers.not(excluded))
               .and(ElementMatchers.not(ElementMatchers.isInterface()))
               .and(ElementMatchers.not(ElementMatchers.isAnnotation()))
               .and(ElementMatchers.not(ElementMatchers.isSynthetic()));

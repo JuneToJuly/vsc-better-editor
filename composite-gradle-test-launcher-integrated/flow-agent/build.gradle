@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'local.cgtl'
-version = '0.4.9'
+version = '0.4.14'
 
 def byteBuddyVersion = providers.gradleProperty('byteBuddyVersion').getOrElse('1.18.7')
 def dependencyRepository = providers.gradleProperty('dependencyRepository').orNull

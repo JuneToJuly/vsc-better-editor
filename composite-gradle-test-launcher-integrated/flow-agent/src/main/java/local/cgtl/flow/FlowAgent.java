@@ -63,6 +63,7 @@ public final class FlowAgent {
       Object transformer = Proxy.newProxyInstance(loader, new Class<?>[]{transformerType}, handler);
       call(call(builder, "transform", transformer), "installOn", inst);
       System.err.println("[CGTL FLOW] Snapshot agent installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
+      System.err.println("[CGTL FLOW] Snapshot agent exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
     } catch (Throwable t) {
       System.err.println("[CGTL FLOW] Agent disabled: " + t);
       t.printStackTrace();
@@ -78,6 +79,26 @@ public final class FlowAgent {
       matcher = call(matcher, "or", staticCall(matchers, "nameStartsWith", pkg + "."));
       matcher = call(matcher, "or", staticCall(matchers, "named", pkg));
     }
+    String excludes = System.getProperty("cgtl.flow.excludes", "").trim();
+    Object excluded = staticCall(matchers, "none");
+    for (String token : excludes.split(",")) {
+      String rule = token.trim();
+      if (rule.isEmpty()) continue;
+      if (rule.startsWith("package:")) {
+        String pkg = rule.substring("package:".length()).trim();
+        if (!pkg.isEmpty()) {
+          excluded = call(excluded, "or", staticCall(matchers, "nameStartsWith", pkg + "."));
+          excluded = call(excluded, "or", staticCall(matchers, "named", pkg));
+        }
+      } else if (rule.startsWith("class:")) {
+        String cls = rule.substring("class:".length()).trim();
+        if (!cls.isEmpty()) {
+          excluded = call(excluded, "or", staticCall(matchers, "named", cls));
+          excluded = call(excluded, "or", staticCall(matchers, "nameStartsWith", cls + "$"));
+        }
+      }
+    }
+    matcher = call(matcher, "and", staticCall(matchers, "not", excluded));
     // Test classes within the selected package are intentionally included.
     // This lets ordered replay begin at the actual test line that initiates the call.
     matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isInterface")));

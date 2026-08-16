@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.12",
+  "version": "0.4.14",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -269,6 +269,46 @@
         "command": "compositeGradleTests.replay.instrumentation.excludePackage",
         "title": "Replay Instrumentation: Exclude Package",
         "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addPackage",
+        "title": "Replay Instrumentation: Add Package",
+        "icon": "$(package)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addFile",
+        "title": "Replay Instrumentation: Add File / Class",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeFile",
+        "title": "Replay Instrumentation: Remove File / Class",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExcludePackage",
+        "title": "Replay Instrumentation: Exclude Package",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExcludeFile",
+        "title": "Replay Instrumentation: Exclude File / Class",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeExcludePackage",
+        "title": "Replay Instrumentation: Remove Package Exclusion",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeExcludeFile",
+        "title": "Replay Instrumentation: Remove File / Class Exclusion",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removePackage",
+        "title": "Replay Instrumentation: Remove Package",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -391,14 +431,24 @@
           "group": "navigation@9"
         },
         {
-          "command": "compositeGradleTests.replay.instrumentation.addInclude",
+          "command": "compositeGradleTests.replay.instrumentation.addPackage",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@1"
         },
         {
-          "command": "compositeGradleTests.replay.instrumentation.addExclude",
+          "command": "compositeGradleTests.replay.instrumentation.addFile",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.addExcludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.addExcludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -429,28 +479,48 @@
         },
         {
           "command": "compositeGradleTests.replay.instrumentation.removePrefix",
-          "when": "view == compositeGradleTests.replayInstrumentation && (viewItem == replayInstrumentationIncludedPrefix || viewItem == replayInstrumentationExcludedPrefix)",
+          "when": "view == compositeGradleTests.replayInstrumentation && (viewItem == replayInstrumentationPackageRule || viewItem == replayInstrumentationFileRule)",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removeExcludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationExcludePackageRule",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removeExcludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationExcludeFileRule",
           "group": "inline@1"
         },
         {
           "command": "compositeGradleTests.replay.instrumentation.includeFile",
-          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_(automatic|package)/",
           "group": "inline@1"
         },
         {
-          "command": "compositeGradleTests.replay.instrumentation.excludeFile",
-          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
-          "group": "inline@2"
+          "command": "compositeGradleTests.replay.instrumentation.removeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile_file",
+          "group": "inline@1"
         },
         {
           "command": "compositeGradleTests.replay.instrumentation.includePackage",
-          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_(automatic|file)/",
           "group": "navigation@1"
         },
         {
-          "command": "compositeGradleTests.replay.instrumentation.excludePackage",
-          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile",
+          "command": "compositeGradleTests.replay.instrumentation.removePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile_package",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
@@ -658,7 +728,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional fully qualified class or package prefixes traced by Code Flow and Analyze. Prefixes are matched against every class loaded by the test JVM, including classes from dependency JARs. Examples: org.myorganization or org.myorganization.shared. A trailing .* is optional."
+          "description": "Additional Java packages traced by Code Flow and Analyze. Package rules instrument classes beneath the package. Use flowClassNames when you only want one source file/class."
         },
         "compositeGradleTests.flowLineState": {
           "type": "string",
@@ -714,6 +784,30 @@
           },
           "default": [],
           "description": "Reserved instrumentation exclusions. Temporarily not applied in 0.4.9 while the known-good additional-package matcher is restored."
+        },
+        "compositeGradleTests.flowClassNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified top-level classes traced by Code Flow and Analyze. Each class rule instruments that class and its nested/anonymous classes without instrumenting the rest of its package."
+        },
+        "compositeGradleTests.flowExcludePackagePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Java packages excluded from Code Flow instrumentation even when covered by an included package."
+        },
+        "compositeGradleTests.flowExcludeClassNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified top-level classes excluded from Code Flow instrumentation. Nested/anonymous classes from the same source file are excluded too."
         }
       }
     },
