@@ -1,0 +1,53 @@
+{
+  "name": "refactor-fallout",
+  "displayName": "Refactor Fallout",
+  "description": "Turn compiler fallout into guided repair sessions.",
+  "version": "0.7.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:refactorFallout.open",
+    "onCommand:refactorFallout.refresh"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "refactorFallout.open",
+        "title": "Refactor Fallout: Open Mural"
+      },
+      {
+        "command": "refactorFallout.refresh",
+        "title": "Refactor Fallout: Refresh"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "refactorFallout.open",
+          "group": "navigation@99"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Refactor Fallout",
+      "properties": {
+        "refactorFallout.includeWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include warning diagnostics in repair groups and Repair All sessions."
+        },
+        "refactorFallout.autoRefresh": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  },
+  "scripts": {}
+}

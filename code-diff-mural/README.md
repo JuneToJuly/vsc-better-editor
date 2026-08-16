@@ -20,3 +20,9 @@ A pan-and-zoom VS Code mural for comparing source changes between any two Git br
 - Auto Layout: restore automatic package placement
 - Double click change: open target file
 - Right click change: open file or side-by-side diff
+
+## 0.0.13
+
+- Removed GitLab review integration; the mural stays focused on codebase diffs.
+- Added **Previous** mode. When enabled, the base automatically follows the first parent of the selected target (`target^`), making single-commit review one click.
+- Changing the target while Previous is enabled automatically updates the base. Turn Previous off to compare arbitrary ranges again.

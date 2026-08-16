@@ -4,7 +4,6 @@ const crypto = require('crypto');
 
 const METHOD_KINDS = new Set([
   vscode.SymbolKind.Method,
-  vscode.SymbolKind.Function,
   vscode.SymbolKind.Constructor
 ]);
 
@@ -59,14 +58,6 @@ class MethodFileSystemProvider {
   }
 }
 
-function flattenSymbols(symbols, out = []) {
-  for (const symbol of symbols || []) {
-    if (METHOD_KINDS.has(symbol.kind)) out.push(symbol);
-    if (symbol.children?.length) flattenSymbols(symbol.children, out);
-  }
-  return out.sort((a, b) => a.range.start.compareTo(b.range.start));
-}
-
 function normalizeSymbolRange(symbol) {
   return symbol?.range || symbol?.location?.range;
 }
@@ -79,9 +70,42 @@ function normalizeSymbol(symbol) {
     detail: symbol.detail || '',
     kind: symbol.kind,
     range,
-    selectionRange: symbol.selectionRange || range,
+    selectionRange: symbol.selectionRange || symbol.location?.range || range,
     children: symbol.children || []
   };
+}
+
+function collectExecutableSymbols(symbols, out = []) {
+  for (const raw of symbols || []) {
+    const symbol = normalizeSymbol(raw);
+    if (!symbol) continue;
+    if (METHOD_KINDS.has(symbol.kind)) out.push(symbol);
+    if (raw.children?.length) collectExecutableSymbols(raw.children, out);
+  }
+  return out;
+}
+
+function rangeSize(document, range) {
+  return document.offsetAt(range.end) - document.offsetAt(range.start);
+}
+
+function compareMethodOrder(a, b) {
+  const start = a.range.start.compareTo(b.range.start);
+  if (start !== 0) return start;
+  return a.range.end.compareTo(b.range.end);
+}
+
+function findInnermostMethod(document, methods, position) {
+  const containing = methods.filter(method => containsPosition(method.range, position));
+  if (!containing.length) return undefined;
+  containing.sort((a, b) => {
+    const size = rangeSize(document, a.range) - rangeSize(document, b.range);
+    if (size !== 0) return size;
+    // If two providers report equal-sized ranges, prefer the declaration whose
+    // selection/name is also closest to the cursor.
+    return b.range.start.compareTo(a.range.start);
+  });
+  return containing[0];
 }
 
 function maskJavaNonCode(text) {
@@ -188,36 +212,38 @@ function getJavaFallbackMethods(document) {
       selectionRange: new vscode.Range(document.positionAt(nameStart), document.positionAt(nameEnd + 1)),
       children: []
     });
-    brace = endBrace;
+    // Keep scanning inside the body as well: local/anonymous classes can declare
+    // real methods, and the innermost declaration must win for a cursor there.
   }
   return methods;
 }
 
 async function getMethods(document) {
-  const rawSymbols = await vscode.commands.executeCommand(
-    'vscode.executeDocumentSymbolProvider',
-    document.uri
-  );
-  const providerMethods = flattenSymbols(rawSymbols || [])
-    .map(normalizeSymbol)
-    .filter(Boolean);
-
-  if (document.languageId !== 'java') {
-    return providerMethods.sort((a, b) => a.range.start.compareTo(b.range.start));
-  }
-
-  // JDT is the preferred source. The lexical fallback covers temporary parse errors
-  // and constructs where the symbol provider omits a method while the file is being edited.
-  const fallbackMethods = getJavaFallbackMethods(document);
-  const merged = [...providerMethods];
-  for (const fallback of fallbackMethods) {
-    const duplicate = merged.some(method =>
-      method.name === fallback.name &&
-      Math.abs(method.range.start.line - fallback.range.start.line) <= 1
+  let rawSymbols;
+  try {
+    rawSymbols = await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      document.uri
     );
-    if (!duplicate) merged.push(fallback);
+  } catch {
+    rawSymbols = undefined;
   }
-  return merged.sort((a, b) => a.range.start.compareTo(b.range.start));
+
+  const providerMethods = collectExecutableSymbols(rawSymbols || [])
+    .filter(method => method.range && !method.range.isEmpty)
+    .sort(compareMethodOrder);
+
+  // A language server's syntax model is authoritative. Do not merge a lexical
+  // guess into a valid JDT result: doing that can manufacture false methods from
+  // lambdas, switches, anonymous-class construction, or malformed code.
+  if (providerMethods.length || document.languageId !== 'java') {
+    return providerMethods;
+  }
+
+  // Emergency Java fallback for the short window before JDT has produced
+  // document symbols (startup / transient parse failure). This is deliberately
+  // secondary and never competes with JDT declarations.
+  return getJavaFallbackMethods(document).sort(compareMethodOrder);
 }
 
 function containsPosition(range, position) {
@@ -435,7 +461,7 @@ async function activate(context) {
     }
 
     const position = editor.selection.active;
-    const symbol = methods.find(method => containsPosition(method.range, position));
+    const symbol = findInnermostMethod(editor.document, methods, position);
     if (!symbol) {
       vscode.window.showInformationMessage('Place the cursor inside a method first.');
       return;
@@ -501,7 +527,7 @@ async function activate(context) {
       }
       const methods = await getMethods(targetDoc);
       const targetPosition = definition.range.start;
-      const targetMethod = methods.find(method => containsPosition(method.range, targetPosition));
+      const targetMethod = findInnermostMethod(targetDoc, methods, targetPosition);
       if (!targetMethod) continue;
 
       const sameMethod =

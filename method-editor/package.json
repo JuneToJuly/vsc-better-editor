@@ -1,8 +1,8 @@
 {
   "name": "method-editor",
   "displayName": "Method Editor",
-  "description": "Enter a focused method-only editing mode; Ctrl+Enter follows a method call in the current method editor; Back/Forward walks method history in one persistent method editor without recreating the editor.",
-  "version": "0.8.0",
+  "description": "Focused method-only editing with JDT-backed Method/Constructor declaration lookup, innermost-method selection, and persistent single-editor navigation.",
+  "version": "0.9.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

@@ -36,3 +36,11 @@
 ## 0.2.0
 
 - Added explicit Method Mode workflow and method history navigation.
+
+## 0.9.0
+- Replaced first-match method selection with an explicit MethodLocator model.
+- JDT Method and Constructor symbols are authoritative when available.
+- Cursor selection chooses the smallest/innermost enclosing executable declaration.
+- Removed Function symbols from the Java method definition model (lambdas are not methods).
+- Definition navigation resolves the innermost target method/constructor at the JDT destination.
+- Java lexical parsing is now emergency fallback only and can discover nested local/anonymous-class methods.

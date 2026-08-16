@@ -27,7 +27,7 @@ function activate(context) {
         placeHolder: `Compare ${target} against…`
       });
       if (!base) return;
-      await showMural(repo, base, target);
+      await showMural(repo, base, target, false, false);
     } catch (err) {
       vscode.window.showErrorMessage(`Code Diff Mural: ${friendlyError(err)}`);
     }
@@ -38,7 +38,7 @@ function activate(context) {
       return vscode.commands.executeCommand('codeDiffMural.compareAgainst');
     }
     try {
-      await showMural(lastState.repo, lastState.base, lastState.target, true);
+      await showMural(lastState.repo, lastState.base, lastState.target, true, lastState.comparePrevious);
     } catch (err) {
       vscode.window.showErrorMessage(`Code Diff Mural: ${friendlyError(err)}`);
     }
@@ -199,7 +199,14 @@ async function chooseRef(repo, options = {}) {
   return ref;
 }
 
-async function showMural(repo, base, target, preserveView = false) {
+async function showMural(repo, base, target, preserveView = false, comparePrevious = false) {
+  if (comparePrevious) {
+    try {
+      base = (await git(repo, ['rev-parse', '--verify', `${target}^`])).trim();
+    } catch (_) {
+      throw new Error(`${target} has no previous commit to compare against.`);
+    }
+  }
   const [diffText, targetHash, baseHash] = await Promise.all([
     git(repo, ['diff', '--find-renames', '--find-copies', '--no-ext-diff', '--no-color', '--unified=3', base, target, '--'], { maxBuffer: 128 * 1024 * 1024 }),
     git(repo, ['rev-parse', '--short', target]),
@@ -208,7 +215,7 @@ async function showMural(repo, base, target, preserveView = false) {
 
   const model = parseDiff(diffText);
   const summary = summarize(model);
-  lastState = { repo, base, target };
+  lastState = { repo, base, target, comparePrevious };
 
   if (!muralPanel) {
     muralPanel = vscode.window.createWebviewPanel(
@@ -225,20 +232,22 @@ async function showMural(repo, base, target, preserveView = false) {
           if (nextRepo) {
             const nextTarget = await currentBranchOrHead(nextRepo);
             const nextBase = await chooseRef(nextRepo, { side:'base', otherRef:nextTarget, placeHolder:`Compare ${nextTarget} against…` });
-            if (nextBase) await showMural(nextRepo, nextBase, nextTarget);
+            if (nextBase) await showMural(nextRepo, nextBase, nextTarget, false, false);
           }
         } else if (message.type === 'chooseBase') {
           const next = await chooseRef(lastState.repo, { side:'base', otherRef:lastState.target });
-          if (next) await showMural(lastState.repo, next, lastState.target);
+          if (next) await showMural(lastState.repo, next, lastState.target, false, false);
         } else if (message.type === 'chooseTarget') {
           const next = await chooseRef(lastState.repo, { side:'target', otherRef:lastState.base });
-          if (next) await showMural(lastState.repo, lastState.base, next);
+          if (next) await showMural(lastState.repo, lastState.base, next, false, lastState.comparePrevious);
         } else if (message.type === 'refresh') {
-          await showMural(lastState.repo, lastState.base, lastState.target, true);
+          await showMural(lastState.repo, lastState.base, lastState.target, true, lastState.comparePrevious);
         } else if (message.type === 'openFile') {
-          await openTargetFile(lastState.repo, lastState.target, message.file, message.line || 1);
+          await openTargetFile(lastState.repo, lastState.target, message.file, message.newLine || message.line || message.oldLine || 1);
         } else if (message.type === 'openDiff') {
-          await openFileDiff(lastState.repo, lastState.base, lastState.target, message.file, message.oldFile, message.line || 1, message.status);
+          await openFileDiff(lastState.repo, lastState.base, lastState.target, message.file, message.oldFile, message.newLine || message.line || message.oldLine || 1, message.status);
+        } else if (message.type === 'setComparePrevious') {
+          await showMural(lastState.repo, lastState.base, lastState.target, false, !!message.enabled);
         }
       } catch (err) {
         vscode.window.showErrorMessage(`Code Diff Mural: ${friendlyError(err)}`);
@@ -260,13 +269,14 @@ async function showMural(repo, base, target, preserveView = false) {
     targetHash: targetHash.trim(),
     nonce: nonce(),
     preserveView,
+    comparePrevious,
     minZoom: vscode.workspace.getConfiguration('codeDiffMural').get('minZoom', 10),
     maxZoom: vscode.workspace.getConfiguration('codeDiffMural').get('maxZoom', 44)
   });
 }
 
 async function refDocumentUri(repo, ref, file) {
-  return vscode.Uri.parse(`code-diff-mural-base:/${encodeURIComponent(path.basename(file))}?${new URLSearchParams({ repo, ref, file }).toString()}`);
+  return vscode.Uri.from({ scheme: 'code-diff-mural-base', path: '/' + path.basename(file), query: new URLSearchParams({ repo, ref, file }).toString() });
 }
 
 async function refResolvesToHead(repo, ref) {
@@ -318,6 +328,10 @@ async function openFileDiff(repo, base, target, file, oldFile, line, status) {
   }
 
   await vscode.commands.executeCommand('vscode.diff', baseUri, targetUri, `${basePath} (${base}) ↔ ${file} (${target})`, { preview: false });
+  // The diff editor opens asynchronously. revealLine targets the modified side and
+  // makes the mural action land on the exact changed line instead of hunk start.
+  await new Promise(resolve => setTimeout(resolve, 60));
+  try { await vscode.commands.executeCommand('revealLine', { lineNumber: Math.max(0, line - 1), at: 'center' }); } catch (_) {}
 }
 
 async function git(cwd, args, options = {}) {
@@ -619,13 +633,14 @@ button:hover { background:var(--vscode-button-secondaryHoverBackground); }
 <div id="toolbar">
   <div class="brand">DIFF MURAL</div>
   <button id="repoButton" title="Git repository: ${escapeAttr(data.repo)}">${escapeHtml(data.repoName)} ▾</button>
-  <button id="baseButton" title="Choose base branch / commit">${escapeHtml(data.base)} ▾</button>
+  <button id="baseButton" title="Choose base branch / commit" ${data.comparePrevious ? 'disabled' : ''}>${data.comparePrevious ? 'Previous commit' : escapeHtml(data.base) + ' ▾'}</button>
   <span class="compare-arrow">→</span>
   <button id="targetButton" title="Choose target branch / commit">${escapeHtml(data.target)} ▾</button>
   <div class="pill optional"><strong>${escapeHtml(data.baseHash)}</strong> → <strong>${escapeHtml(data.targetHash)}</strong></div>
   <div class="pill stat">${data.summary.files} files · ${data.summary.hunks} changes</div>
   <div class="stat add">+${data.summary.additions}</div>
   <div class="stat del">−${data.summary.deletions}</div>
+  <label class="previous-toggle" title="Always compare the selected target revision with its first parent"><input id="comparePrevious" type="checkbox" ${data.comparePrevious ? 'checked' : ''} /> Previous</label>
   <div class="spacer"></div>
   <div class="search-wrap"><input id="search" placeholder="Find package, file, method…" /><span id="searchStatus"></span></div>
   <button id="refresh" title="Refresh diff">↻</button>
@@ -640,7 +655,7 @@ ${data.model.length ? `<div id="minimap"><div id="miniWorld">${packages.map(([pk
   <div class="inspector-tools"><span id="hunkIndex"></span><button id="prevHunk" title="Previous change">←</button><button id="nextHunk" title="Next change">→</button><button id="openInspectorDiff">Open side-by-side diff</button></div>
   <div id="inspectorCode" class="inspector-code"></div>
 </div>
-<div id="contextMenu" role="menu"><button data-action="open-file">Open File</button><button data-action="open-diff">Open Side-by-Side Diff</button></div>` : ''}
+<div id="contextMenu" role="menu"><button data-action="open-file">Open File Here</button><button data-action="open-diff">Open Side-by-Side Diff Here</button></div>` : ''}
 <script nonce="${data.nonce}">
 const vscode = acquireVsCodeApi();
 const viewport = document.getElementById('viewport');
@@ -888,11 +903,15 @@ if (world) {
     if (!el) return;
     const fileEl = el.closest?.('.file') || el;
     const hunkEl = el.closest?.('.hunk');
+    const lineEl = el.closest?.('.line');
+    const oldLine = Number(lineEl?.dataset.oldLine || 0) || undefined;
+    const newLine = Number(lineEl?.dataset.newLine || 0) || undefined;
     vscode.postMessage({
       type,
       file: hunkEl?.dataset.file || fileEl.dataset.file,
       oldFile: hunkEl?.dataset.oldFile || fileEl.dataset.oldFile,
-      line:Number(hunkEl?.dataset.line || 1),
+      line:newLine || oldLine || Number(hunkEl?.dataset.line || 1),
+      oldLine, newLine, lineType:lineEl?.dataset.lineType,
       status:hunkEl?.dataset.status || fileEl.dataset.status
     });
   }
@@ -906,10 +925,10 @@ if (world) {
     // Single click only marks the hunk. Double-click now opens the current file;
     // the side-by-side diff is an explicit action instead of the default.
     el.addEventListener('click', e => { markSelected(el, false); e.stopPropagation(); });
-    el.addEventListener('dblclick', e => { e.stopPropagation(); postOpen('openFile', el); });
+    el.addEventListener('dblclick', e => { e.stopPropagation(); postOpen('openFile', e.target.closest('.line') || el); });
     el.addEventListener('contextmenu', e => {
       e.preventDefault(); e.stopPropagation();
-      contextTarget = el;
+      contextTarget = e.target.closest('.line') || el;
       contextMenu.style.left = Math.min(e.clientX, innerWidth - 190) + 'px';
       contextMenu.style.top = Math.min(e.clientY, innerHeight - 90) + 'px';
       contextMenu.classList.add('open');
@@ -971,6 +990,7 @@ if (world) {
   document.getElementById('repoButton').onclick = () => vscode.postMessage({ type:'chooseRepo' });
   document.getElementById('baseButton').onclick = () => vscode.postMessage({ type:'chooseBase' });
   document.getElementById('targetButton').onclick = () => vscode.postMessage({ type:'chooseTarget' });
+  document.getElementById('comparePrevious').onchange = e => vscode.postMessage({ type:'setComparePrevious', enabled:e.target.checked });
   document.getElementById('refresh').onclick = () => vscode.postMessage({ type:'refresh' });
 
   const search = document.getElementById('search');
@@ -1056,6 +1076,7 @@ if (world) {
   document.getElementById('repoButton').onclick = () => vscode.postMessage({ type:'chooseRepo' });
   document.getElementById('baseButton').onclick = () => vscode.postMessage({ type:'chooseBase' });
   document.getElementById('targetButton').onclick = () => vscode.postMessage({ type:'chooseTarget' });
+  document.getElementById('comparePrevious').onchange = e => vscode.postMessage({ type:'setComparePrevious', enabled:e.target.checked });
   document.getElementById('refresh').onclick = () => vscode.postMessage({ type:'refresh' });
 }
 </script>
@@ -1095,7 +1116,7 @@ function renderHunkLines(lines, filePath = '') {
     const code = line.highlight
       ? renderHighlightedText(line.text, line.highlight, line.type, filePath)
       : syntaxHighlight(line.text, filePath);
-    return `<div class="line ${line.type}"><span class="ln old">${oldNo}</span><span class="ln new">${newNo}</span><span class="sign">${sign}</span><span class="code">${code}</span></div>`;
+    return `<div class="line ${line.type}" data-old-line="${oldNo}" data-new-line="${newNo}" data-line-type="${line.type}"><span class="ln old">${oldNo}</span><span class="ln new">${newNo}</span><span class="sign">${sign}</span><span class="code">${code}</span></div>`;
   }).join('');
 }
 
