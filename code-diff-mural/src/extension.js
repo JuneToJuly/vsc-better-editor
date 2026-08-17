@@ -7,6 +7,9 @@ const util = require('util');
 
 const execFile = util.promisify(cp.execFile);
 
+const SPECIAL_STAGED = '__CDM_STAGED__';
+const SPECIAL_WORKTREE = '__CDM_WORKTREE__';
+
 let muralPanel;
 let lastState;
 let providerRegistration;
@@ -55,6 +58,12 @@ class BaseDocumentProvider {
     const file = params.get('file');
     if (!repo || !ref || !file) return '';
     try {
+      if (ref === SPECIAL_STAGED) {
+        return await git(repo, ['show', `:${file}`], { maxBuffer: 32 * 1024 * 1024 });
+      }
+      if (ref === SPECIAL_WORKTREE) {
+        return fs.readFileSync(path.join(repo, file), 'utf8');
+      }
       return await git(repo, ['show', `${ref}:${file}`], { maxBuffer: 32 * 1024 * 1024 });
     } catch (err) {
       return `Unable to load ${file} at ${ref}\n\n${friendlyError(err)}`;
@@ -147,7 +156,12 @@ async function chooseRef(repo, options = {}) {
   ]);
 
   const excluded = new Set([options.otherRef].filter(Boolean));
+  const specialItems = [
+    { label: '$(diff-added) Staged', description: 'Git index — exactly what would be committed', ref: SPECIAL_STAGED },
+    { label: '$(files) Working Tree', description: 'Files on disk — staged + unstaged changes', ref: SPECIAL_WORKTREE }
+  ].filter(item => !excluded.has(item.ref));
   const items = [
+    ...specialItems,
     { label: '$(edit) Enter commit / branch / tag…', kind: 'input', alwaysShow: true },
     ...uniqueLines(branchesRaw)
       .filter(ref => ref !== 'origin/HEAD' && !excluded.has(ref))
@@ -195,25 +209,36 @@ async function chooseRef(repo, options = {}) {
     return undefined;
   }
 
+  // Staged and Working Tree are virtual snapshots, not Git revision names.
+  // Do not pass them through rev-parse; doing so produces
+  // "fatal: Needed a single revision" when selected from the picker.
+  if (ref === SPECIAL_STAGED || ref === SPECIAL_WORKTREE) return ref;
+
   await git(repo, ['rev-parse', '--verify', `${ref}^{commit}`]);
   return ref;
 }
 
 async function showMural(repo, base, target, preserveView = false, comparePrevious = false) {
   if (comparePrevious) {
-    try {
-      base = (await git(repo, ['rev-parse', '--verify', `${target}^`])).trim();
-    } catch (_) {
-      throw new Error(`${target} has no previous commit to compare against.`);
+    if (target === SPECIAL_STAGED || target === SPECIAL_WORKTREE) {
+      base = 'HEAD';
+    } else {
+      try {
+        base = (await git(repo, ['rev-parse', '--verify', `${target}^`])).trim();
+      } catch (_) {
+        throw new Error(`${target} has no previous commit to compare against.`);
+      }
     }
   }
+
   const [diffText, targetHash, baseHash] = await Promise.all([
-    git(repo, ['diff', '--find-renames', '--find-copies', '--no-ext-diff', '--no-color', '--unified=3', base, target, '--'], { maxBuffer: 128 * 1024 * 1024 }),
-    git(repo, ['rev-parse', '--short', target]),
-    git(repo, ['rev-parse', '--short', base])
+    diffSnapshots(repo, base, target),
+    snapshotHash(repo, target),
+    snapshotHash(repo, base)
   ]);
 
   const model = parseDiff(diffText);
+  await enrichPackageNames(repo, target, model);
   const summary = summarize(model);
   lastState = { repo, base, target, comparePrevious };
 
@@ -257,16 +282,20 @@ async function showMural(repo, base, target, preserveView = false, comparePrevio
     muralPanel.reveal(vscode.ViewColumn.One, true);
   }
 
-  muralPanel.title = `Diff Mural: ${base} ↔ ${target}`;
+  const baseLabel = snapshotLabel(base);
+  const targetLabel = snapshotLabel(target);
+  muralPanel.title = `Diff Mural: ${baseLabel} ↔ ${targetLabel}`;
   muralPanel.webview.html = renderHtml({
     model,
     summary,
     repoName: path.basename(repo),
     repo,
-    base,
-    baseHash: baseHash.trim(),
-    target,
-    targetHash: targetHash.trim(),
+    base: baseLabel,
+    baseRef: base,
+    baseHash,
+    target: targetLabel,
+    targetRef: target,
+    targetHash,
     nonce: nonce(),
     preserveView,
     comparePrevious,
@@ -275,11 +304,42 @@ async function showMural(repo, base, target, preserveView = false, comparePrevio
   });
 }
 
+function snapshotLabel(ref) {
+  if (ref === SPECIAL_STAGED) return 'Staged';
+  if (ref === SPECIAL_WORKTREE) return 'Working Tree';
+  return ref;
+}
+
+async function snapshotHash(repo, ref) {
+  if (ref === SPECIAL_STAGED) {
+    try { return `index ${(await git(repo, ['write-tree'])).trim().slice(0, 7)}`; }
+    catch (_) { return 'index'; }
+  }
+  if (ref === SPECIAL_WORKTREE) return 'working';
+  return (await git(repo, ['rev-parse', '--short', ref])).trim();
+}
+
+async function diffSnapshots(repo, base, target) {
+  // Force stable path formatting for every snapshot type. -c belongs before the
+  // diff subcommand, so build the complete git argument vector here.
+  const common = ['-c', 'diff.noprefix=false', '-c', 'core.quotePath=false', 'diff', '--find-renames', '--find-copies', '--no-ext-diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3'];
+  let args;
+  if (base === SPECIAL_STAGED && target === SPECIAL_WORKTREE) args = [...common];
+  else if (base === SPECIAL_WORKTREE && target === SPECIAL_STAGED) args = [...common, '-R'];
+  else if (target === SPECIAL_STAGED && base !== SPECIAL_WORKTREE) args = [...common, '--cached', base, '--'];
+  else if (base === SPECIAL_STAGED && target !== SPECIAL_WORKTREE) args = [...common, '-R', '--cached', target, '--'];
+  else if (target === SPECIAL_WORKTREE && base !== SPECIAL_STAGED) args = [...common, base, '--'];
+  else if (base === SPECIAL_WORKTREE && target !== SPECIAL_STAGED) args = [...common, '-R', target, '--'];
+  else args = [...common, base, target, '--'];
+  return git(repo, args, { maxBuffer: 128 * 1024 * 1024 });
+}
+
 async function refDocumentUri(repo, ref, file) {
   return vscode.Uri.from({ scheme: 'code-diff-mural-base', path: '/' + path.basename(file), query: new URLSearchParams({ repo, ref, file }).toString() });
 }
 
 async function refResolvesToHead(repo, ref) {
+  if (ref === SPECIAL_STAGED || ref === SPECIAL_WORKTREE) return false;
   const [refHash, headHash] = await Promise.all([
     git(repo, ['rev-parse', `${ref}^{commit}`]),
     git(repo, ['rev-parse', 'HEAD'])
@@ -288,6 +348,7 @@ async function refResolvesToHead(repo, ref) {
 }
 
 async function openTargetFile(repo, target, file, line) {
+  if (!file || file === '.' || file === '/') throw new Error('Cannot open this change because its Git path is missing. Refresh the mural and try again.');
   const p = new vscode.Position(Math.max(0, line - 1), 0);
   const currentPath = path.join(repo, file);
   let editor;
@@ -295,10 +356,15 @@ async function openTargetFile(repo, target, file, line) {
   // When the target is the checked-out commit, use the real workspace file so
   // normal navigation/editing still works. Otherwise open the branch snapshot
   // through the read-only Git document provider.
-  if (fs.existsSync(currentPath) && await refResolvesToHead(repo, target)) {
+  if (target === SPECIAL_WORKTREE && fs.existsSync(currentPath)) {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(currentPath));
+    editor = await vscode.window.showTextDocument(doc, { preview: false });
+  } else if (fs.existsSync(currentPath) && await refResolvesToHead(repo, target)) {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(currentPath));
     editor = await vscode.window.showTextDocument(doc, { preview: false });
   } else {
+    // Staged and non-checked-out revisions are virtual documents. Never resolve
+    // them through the workspace filesystem: the index may differ from disk.
     const doc = await vscode.workspace.openTextDocument(await refDocumentUri(repo, target, file));
     editor = await vscode.window.showTextDocument(doc, { preview: false });
   }
@@ -307,12 +373,13 @@ async function openTargetFile(repo, target, file, line) {
 }
 
 async function openFileDiff(repo, base, target, file, oldFile, line, status) {
+  if (!file || file === '.' || file === '/') throw new Error('Cannot open this diff because its Git path is missing. Refresh the mural and try again.');
   const basePath = oldFile || file;
   const baseUri = await refDocumentUri(repo, base, basePath);
   const targetPath = path.join(repo, file);
   let targetUri;
 
-  if (status !== 'deleted' && fs.existsSync(targetPath) && await refResolvesToHead(repo, target)) {
+  if (status !== 'deleted' && fs.existsSync(targetPath) && (target === SPECIAL_WORKTREE || await refResolvesToHead(repo, target))) {
     targetUri = vscode.Uri.file(targetPath);
   } else if (status !== 'deleted') {
     targetUri = await refDocumentUri(repo, target, file);
@@ -344,6 +411,34 @@ async function git(cwd, args, options = {}) {
   return stdout;
 }
 
+function decodeGitPathToken(token) {
+  if (!token) return '';
+  token = token.trim();
+  if (token.startsWith('"') && token.endsWith('"')) {
+    try {
+      // Git quotes paths using C-style escapes. JSON handles the common escaped
+      // quote/backslash/tab/newline forms; octal escapes are handled below.
+      token = JSON.parse(token);
+    } catch (_) {
+      token = token.slice(1, -1).replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+    }
+  }
+  return token.replace(/^[ab]\//, '');
+}
+
+function pathsFromDiffHeader(line) {
+  // Handles both normal and quoted Git paths. Do not require a/ b/ prefixes:
+  // staged/worktree diffs can be affected by repository Git configuration and
+  // should still produce usable file identities.
+  const body = line.slice('diff --git '.length);
+  const tokens = body.match(/"(?:\\.|[^"\\])*"|\S+/g) || [];
+  if (tokens.length < 2) return null;
+  const oldPath = decodeGitPathToken(tokens[0]);
+  const newPath = decodeGitPathToken(tokens[1]);
+  if (!oldPath || !newPath) return null;
+  return { oldPath, newPath };
+}
+
 function parseDiff(text) {
   if (!text.trim()) return [];
   const lines = text.split(/\r?\n/);
@@ -355,10 +450,11 @@ function parseDiff(text) {
     const line = lines[i];
     if (line.startsWith('diff --git ')) {
       if (file) files.push(file);
-      const m = /^diff --git a\/(.*?) b\/(.*)$/.exec(line);
+      const paths = pathsFromDiffHeader(line);
+      if (!paths) { file = null; hunk = null; continue; }
       file = {
-        oldPath: m ? m[1] : '',
-        path: m ? m[2] : '',
+        oldPath: paths.oldPath,
+        path: paths.newPath,
         status: 'modified',
         additions: 0,
         deletions: 0,
@@ -370,7 +466,13 @@ function parseDiff(text) {
     }
     if (!file) continue;
 
-    if (line.startsWith('new file mode ')) file.status = 'added';
+    if (line.startsWith('--- ')) {
+      const raw = line.slice(4).split('\t')[0];
+      if (raw !== '/dev/null') file.oldPath = decodeGitPathToken(raw);
+    } else if (line.startsWith('+++ ')) {
+      const raw = line.slice(4).split('\t')[0];
+      if (raw !== '/dev/null') file.path = decodeGitPathToken(raw);
+    } else if (line.startsWith('new file mode ')) file.status = 'added';
     else if (line.startsWith('deleted file mode ')) file.status = 'deleted';
     else if (line.startsWith('rename from ')) {
       file.status = 'renamed';
@@ -419,15 +521,39 @@ function parseDiff(text) {
 }
 
 function packageFor(filePath) {
-  const dir = path.posix.dirname(filePath.replace(/\\/g, '/'));
-  const parts = dir.split('/').filter(Boolean);
-  const markers = ['java', 'kotlin', 'scala', 'groovy', 'src'];
+  const normalized = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const dir = path.posix.dirname(normalized);
+  if (!dir || dir === '.') return '(root)';
+  const parts = dir.split('/').filter(p => p && p !== '.');
+
+  // Prefer the language source root. In Gradle/Maven layouts this correctly
+  // turns .../src/main/java/example/order/Foo.java into example.order instead
+  // of grouping every changed source file under a project/build directory.
+  const languages = new Set(['java', 'kotlin', 'scala', 'groovy']);
   let start = -1;
   for (let i = 0; i < parts.length; i++) {
-    if (markers.includes(parts[i]) && parts[i + 1]) start = i + 1;
+    if (languages.has(parts[i]) && parts[i + 1]) start = i + 1;
   }
   const pkgParts = start >= 0 ? parts.slice(start) : parts;
   return pkgParts.length ? pkgParts.join('.') : '(root)';
+}
+
+async function enrichPackageNames(repo, target, files) {
+  // Paths are normally enough, but generated/nonstandard source layouts can
+  // otherwise collapse into one package. For JVM source files, use the actual
+  // package declaration from the target snapshot when available.
+  await Promise.all(files.map(async file => {
+    if (!/\.(java|kt|kts|groovy|scala)$/i.test(file.path || '')) return;
+    try {
+      let text;
+      if (target === SPECIAL_WORKTREE) text = fs.readFileSync(path.join(repo, file.path), 'utf8');
+      else if (target === SPECIAL_STAGED) text = await git(repo, ['show', `:${file.path}`], { maxBuffer: 2 * 1024 * 1024 });
+      else text = await git(repo, ['show', `${target}:${file.path}`], { maxBuffer: 2 * 1024 * 1024 });
+      const head = text.slice(0, 16000);
+      const m = /^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;?/m.exec(head);
+      if (m) file.packageName = m[1];
+    } catch (_) {}
+  }));
 }
 
 function summarize(files) {
@@ -487,7 +613,7 @@ function renderHtml(data) {
       }).join('');
       return `<section class="file status-${f.status}" data-file-container="${escapeAttr(f.path)}" data-file="${escapeAttr(f.path)}" data-old-file="${escapeAttr(f.oldPath || f.path)}" data-status="${f.status}">
         <header class="file-header">
-          <span class="file-title">${escapeHtml(f.fileName)}</span>
+          <button class="file-title file-open-title" data-open-line="${f.hunks[0]?.newStart || f.hunks[0]?.oldStart || 1}" title="Open ${escapeAttr(f.fileName)}">${escapeHtml(f.fileName)}</button>
           <span class="file-actions"><button class="file-action" data-action="open-file" title="Open target file">Open</button><button class="file-action" data-action="open-diff" title="Open side-by-side diff">Diff</button></span>
           <span class="file-counts">+${f.additions} −${f.deletions}</span>
         </header>
@@ -544,6 +670,8 @@ button:hover { background:var(--vscode-button-secondaryHoverBackground); }
 .file-header span:first-child { text-overflow:ellipsis; overflow:hidden; transform:scale(var(--label-boost)); transform-origin:left center; }
 .file-header { justify-content:flex-start; }
 .file-title { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.file-open-title { appearance:none; border:0; background:none; color:inherit; padding:0; margin:0; font:inherit; font-weight:inherit; text-align:left; cursor:pointer; }
+.file-open-title:hover { text-decoration:underline; color:var(--accent); }
 .file-actions { display:flex; gap:4px; opacity:0; pointer-events:none; flex:0 0 auto; }
 .file:hover .file-actions, .file:focus-within .file-actions { opacity:1; pointer-events:auto; }
 .file-action { padding:2px 6px; font-size:10px; line-height:1.2; }
@@ -935,6 +1063,18 @@ if (world) {
     });
     el.addEventListener('keydown', e => {
       if (e.key === 'Enter') postOpen('openFile', el);
+    });
+  });
+
+  document.querySelectorAll('.file-open-title').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const fileEl = btn.closest('.file');
+      vscode.postMessage({
+        type:'openFile',
+        file:fileEl.dataset.file, oldFile:fileEl.dataset.oldFile,
+        line:Number(btn.dataset.openLine || 1), status:fileEl.dataset.status
+      });
     });
   });
 

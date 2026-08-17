@@ -826,6 +826,7 @@ async function executeInvocation(invocation) {
       `-Dcgtl.flow.agent=${agentJar}`,
       `-Dcgtl.flow.packages=${tracedPrefixes.join(',')}`,
       `-Dcgtl.flow.excludes=${flowEncodedExclusions().join(',')}`,
+      `-Dcgtl.flow.stateAdapters=${flowStateAdapterClasses().join(',')}`,
       `-Dcgtl.flow.lineState=${String(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineState', 'receiver') || 'receiver')}`,
       `-Dcgtl.flow.lineState.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxDepth', 2) || 2)}`,
       `-Dcgtl.flow.lineState.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxFields', 30) || 30)}`,
@@ -852,6 +853,7 @@ async function executeInvocation(invocation) {
     output.appendLine(`[CGTL FLOW] Instrumentation files/classes: ${flowClassNames().join(', ') || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Excluded packages: ${flowExcludePackagePrefixes().join(', ') || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Excluded files/classes: ${flowExcludeClassNames().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Custom state adapters: ${flowStateAdapterClasses().join(', ') || '<none>'}`);
     for (const entry of flowPackagePrefixConfiguration().scopes) {
       output.appendLine(`[CGTL FLOW] Package config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
     }
@@ -1008,64 +1010,50 @@ async function createAnalysisFingerprint(invocation) {
 }
 
 async function executeCombinedAnalysis(baseInvocation) {
+  // Analyze used to execute the test twice: once under JaCoCo for a code report
+  // and once under the Replay agent for ordered execution/state capture. Replay now
+  // derives executed source lines directly from its LINE events, so a second test
+  // execution is both redundant and potentially misleading for stateful tests.
   const fingerprintBefore = await createAnalysisFingerprint(baseInvocation);
-  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: generating code report…');
-  const reportInvocation = { ...baseInvocation, captureCoverage: true, captureFlow: false, analysisMode: 'report' };
-  const report = await executeInvocationAndWait(reportInvocation);
-  const reportCompleted = report.status === 'passed' || report.status === 'failed';
-  if (!reportCompleted) {
-    await recordResult(report);
-    showResultsView(report);
-    throw new Error('Code Report could not complete, so Analyze could not continue. See the recorded test result.');
-  }
-  const fingerprintMiddle = await createAnalysisFingerprint(baseInvocation);
-  if (fingerprintMiddle !== fingerprintBefore) throw new Error('Source files changed during Code Report. Run Analyze again.');
-  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: capturing code flow…');
-  const flowInvocation = { ...baseInvocation, captureCoverage: false, captureFlow: true, analysisMode: 'flow' };
-  const flow = await executeInvocationAndWait(flowInvocation);
-  const flowCompleted = flow.status === 'passed' || flow.status === 'failed';
-  if (!flowCompleted) {
+  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: analyzing execution…');
+
+  const analysisInvocation = {
+    ...baseInvocation,
+    captureCoverage: false,
+    captureFlow: true,
+    analysisMode: 'analyze'
+  };
+  const flow = await executeInvocationAndWait(analysisInvocation);
+  const completed = flow.status === 'passed' || flow.status === 'failed';
+  if (!completed) {
     await recordResult(flow);
     showResultsView(flow);
-    throw new Error('Code Flow could not complete, so Analyze could not merge the result. See the recorded test result.');
+    throw new Error('Analyze could not complete. See the recorded test result.');
   }
+
   const fingerprintAfter = await createAnalysisFingerprint(baseInvocation);
-  if (fingerprintAfter !== fingerprintBefore) throw new Error('Source files changed during Code Flow. Run Analyze again.');
-  const combined = {
+  if (fingerprintAfter !== fingerprintBefore) {
+    throw new Error('Source files changed during Analyze. Run Analyze again.');
+  }
+
+  const analyzed = {
     ...flow,
     id: `${Date.now()}-analysis-${Math.random().toString(16).slice(2)}`,
-    displayName: flow.displayName || report.displayName,
-    status: flow.status === 'passed' && report.status === 'passed' ? 'passed' : (flow.status === 'failed' || report.status === 'failed' ? 'failed' : flow.status),
-    durationMs: Number(report.durationMs || 0) + Number(flow.durationMs || 0),
-    startedAt: report.startedAt,
-    finishedAt: flow.finishedAt,
-    executedCode: report.executedCode || [],
-    flowEvents: flow.flowEvents || [],
-    summary: report.summary || flow.summary,
-    testOutput: [report.testOutput, flow.testOutput].filter(Boolean).join('\n'),
-    failure: report.failure || flow.failure,
-    failures: (report.failures && report.failures.length ? report.failures : flow.failures) || [],
-    events: (report.events && report.events.length ? report.events : flow.events) || [],
-    exitCode: report.exitCode !== 0 ? report.exitCode : flow.exitCode,
-    reportStatus: report.status,
-    flowStatus: flow.status,
-    coverageCaptured: true,
+    coverageCaptured: false,
     flowCaptured: true,
     analysisMode: 'analyze',
     analysisFingerprint: fingerprintBefore,
-    reportRunId: report.id,
     flowRunId: flow.id,
-    output: `[CODE REPORT]\n${report.output || ''}\n\n[CODE FLOW]\n${flow.output || ''}`,
-    command: `${report.command}\n${flow.command}`,
     invocation: sanitizeInvocation(baseInvocation)
   };
-  await recordResult(combined);
-  if (combined.executedCode.length) await updateCoverageIndex(combined);
-  latestResults.set(combined.filter, combined);
-  showResultsView(combined);
-  const analysisIcon = combined.status === 'failed' ? '$(testing-failed-icon)' : '$(check)';
-  const analysisLabel = combined.status === 'failed' ? 'Analysis captured failed test' : 'Analysis complete';
-  vscode.window.setStatusBarMessage(`${analysisIcon} ${analysisLabel}: ${combined.displayName}`, combined.status === 'failed' ? 8000 : 5000);
+
+  await recordResult(analyzed);
+  if (analyzed.executedCode.length) await updateCoverageIndex(analyzed);
+  latestResults.set(analyzed.filter, analyzed);
+  showResultsView(analyzed);
+  const analysisIcon = analyzed.status === 'failed' ? '$(testing-failed-icon)' : '$(check)';
+  const analysisLabel = analyzed.status === 'failed' ? 'Analysis captured failed test' : 'Analysis complete';
+  vscode.window.setStatusBarMessage(`${analysisIcon} ${analysisLabel}: ${analyzed.displayName}`, analyzed.status === 'failed' ? 8000 : 5000);
 }
 
 function normalizeFlowPrefix(value) {
@@ -1129,6 +1117,10 @@ function flowClassNameConfiguration() {
 
 function flowClassNames() {
   return flowClassNameConfiguration().values;
+}
+
+function flowStateAdapterClasses() {
+  return additiveFlowSettingConfiguration('flowStateAdapterClasses').values;
 }
 
 function flowConfiguredInstrumentationPrefixes() {
@@ -1416,6 +1408,7 @@ def cgtlFlowOutput = System.getProperty("cgtl.flow.output")
 def cgtlFlowAgent = System.getProperty("cgtl.flow.agent")
 def cgtlFlowPackages = System.getProperty("cgtl.flow.packages", "")
 def cgtlFlowExcludes = System.getProperty("cgtl.flow.excludes", "")
+def cgtlFlowStateAdapters = System.getProperty("cgtl.flow.stateAdapters", "")
 def cgtlFlowLineState = System.getProperty("cgtl.flow.lineState", "receiver")
 def cgtlFlowLineStateMaxDepth = System.getProperty("cgtl.flow.lineState.maxDepth", "2")
 def cgtlFlowLineStateMaxFields = System.getProperty("cgtl.flow.lineState.maxFields", "30")
@@ -1431,6 +1424,7 @@ allprojects { project ->
             testTask.systemProperty("cgtl.flow.maxEvents", "200000")
             testTask.systemProperty("cgtl.flow.packages", cgtlFlowPackages)
             testTask.systemProperty("cgtl.flow.excludes", cgtlFlowExcludes)
+            testTask.systemProperty("cgtl.flow.stateAdapters", cgtlFlowStateAdapters)
             testTask.systemProperty("cgtl.flow.lineState", cgtlFlowLineState)
             testTask.systemProperty("cgtl.flow.lineState.maxDepth", cgtlFlowLineStateMaxDepth)
             testTask.systemProperty("cgtl.flow.lineState.maxFields", cgtlFlowLineStateMaxFields)
@@ -1887,7 +1881,7 @@ function renderFlowReplayHtml(result) {
   const eventLabel=e=>e.event==='callsite'?'Call '+String(e.calleeClassName||'').split('.').pop()+'.'+e.calleeMethodName+'()':e.event==='enter'?'Enter '+simple(e)+'.'+e.methodName+'()':e.event==='exit'?(e.thrown?'Exception from ':'Exit ')+simple(e)+'.'+e.methodName+'()':e.event==='resume'?'Resume '+simple(e)+'.'+e.methodName+'()':'Line '+e.line;
   const eventKind=e=>e.event==='callsite'?'Call':e.event==='enter'?'Entry':e.event==='exit'?(e.thrown?'Exception':'Exit'):e.event==='resume'?'Resume':'Line';
   const valueText=v=>{if(v===undefined)return 'not available';if(v===null)return 'null';if(typeof v==='string'||typeof v==='number'||typeof v==='boolean')return String(v);if(v.display!==undefined)return String(v.display);if(v.value!==undefined&&typeof v.value!=='object')return String(v.value);if(v.summary!==undefined)return String(v.summary);if(Array.isArray(v))return '['+v.map(valueText).join(', ')+']';const type=objectType(v);return type+(objectCount(v)!==null?' ('+objectCount(v)+')':'')};
-  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
+  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
   const objectType=v=>{const raw=String(v?.type||v?.className||v?.summary||'Object');return raw.includes('@')?raw.slice(0,raw.indexOf('@')).split('.').pop():raw.split('.').pop()};
   const objectIdentity=v=>String(v?.identity||v?.identityHash||v?.id||v?.summary||'').match(/@([0-9a-fA-F]+)/)?.[1]||'';
   const objectCount=v=>v?.size!==undefined?Number(v.size):Array.isArray(v?.items)?v.items.length:Array.isArray(v?.entries)?v.entries.length:null;
@@ -2719,9 +2713,14 @@ function renderResultDetail(result) {
   const flowSection = flowEntryCount
     ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3><button class="coverage-expand" data-command="openFlow" data-id="${escapeHtml(result.id)}">Open replay</button></div><div class="empty-output">${flowLineCount ? `${flowLineCount} ordered source-line events` : `${flowMethodCount} ordered method calls with source locations`} captured. Open replay to walk through the execution.</div></div>`
     : (result.flowCaptured ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3></div><div class="empty-output">Flow capture completed, but no flow events were recorded.</div></div>` : '');
-  const executedSection = executedFileCount
-    ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><div class="coverage-title-actions"><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span>${canExpandExecuted ? `<button class="coverage-expand" data-command="expandExecuted" data-id="${escapeHtml(result.id)}">Open expanded</button>` : ''}</div></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
-    : (result.coverageCaptured ? `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>` : '');
+  // The inline Executed Code report belongs only to explicit JaCoCo Code Report runs.
+  // Flow/Analyze still derive executedCode from ordered LINE events for native Replay
+  // (Where Did Execution Go?, decorations, navigation), but do not duplicate it here.
+  const executedSection = result.coverageCaptured
+    ? (executedFileCount
+        ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><div class="coverage-title-actions"><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span>${canExpandExecuted ? `<button class="coverage-expand" data-command="expandExecuted" data-id="${escapeHtml(result.id)}">Open expanded</button>` : ''}</div></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
+        : `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>`)
+    : '';
   const resultSection = showResults && eventLines.length
     ? `<div class="section"><div class="section-title"><h3>Results · ${eventLines.length}</h3></div><div class="event-list">${eventLines.map(line => {
         const match = line.match(/\s(PASSED|FAILED|SKIPPED)$/);
@@ -4086,7 +4085,7 @@ function replayValueLabel(value) {
 function replayObjectFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
   if (value.fields && typeof value.fields === 'object' && !Array.isArray(value.fields)) return Object.entries(value.fields);
-  const ignored = new Set(['type','className','display','identity','identityHash','id','value','summary','size','snapshotId','checkpointSequence','__fromCheckpoint','__checkpointSequence']);
+  const ignored = new Set(['type','className','display','identity','identityHash','id','value','summary','size','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence']);
   return Object.entries(value).filter(([key]) => !ignored.has(key));
 }
 
@@ -4405,6 +4404,14 @@ class ReplayInstrumentationProvider {
       rulesRoot.tooltip = 'Instrumentation rules applied to the next Code Flow run.';
       roots.push(rulesRoot);
 
+      const adapterClasses = flowStateAdapterClasses();
+      const adaptersRoot = new vscode.TreeItem(`State Adapters (${adapterClasses.length} custom)`, vscode.TreeItemCollapsibleState.Expanded);
+      adaptersRoot.contextValue = 'replayStateAdaptersRoot';
+      adaptersRoot.__kind = 'stateAdaptersRoot';
+      adaptersRoot.description = 'built-ins + project adapters';
+      adaptersRoot.tooltip = 'Semantic state capture for common JDK types and custom project types.';
+      roots.push(adaptersRoot);
+
       if (nativeReplaySession?.files?.length) {
         const previousRoot = new vscode.TreeItem(`Previous Run (${nativeReplaySession.files.length})`, vscode.TreeItemCollapsibleState.Expanded);
         previousRoot.contextValue = 'replayInstrumentationPreviousRoot';
@@ -4445,6 +4452,25 @@ class ReplayInstrumentationProvider {
         ...excludeFiles.map(value => this.ruleItem(value, 'file', true))
       ];
     }
+    if (parent.__kind === 'stateAdaptersRoot') {
+      const builtIn = new vscode.TreeItem('Built-in adapters', vscode.TreeItemCollapsibleState.None);
+      builtIn.description = 'Path, File, URI/URL, Optional, UUID, java.time, Pattern, Locale, Currency, socket address';
+      builtIn.iconPath = new vscode.ThemeIcon('library');
+      builtIn.tooltip = 'Built-in adapters use safe, known JDK accessors instead of reflecting into JDK implementation internals.';
+      const custom = flowStateAdapterClasses().map(className => {
+        const simple = className.split('.').pop() || className;
+        const item = new vscode.TreeItem(simple, vscode.TreeItemCollapsibleState.None);
+        item.description = className.slice(0, Math.max(0, className.length - simple.length - 1));
+        item.tooltip = `${className}\nLoaded from the test runtime classpath when Code Flow captures state.`;
+        item.iconPath = new vscode.ThemeIcon('symbol-structure');
+        item.contextValue = 'replayStateAdapterCustom';
+        item.__kind = 'stateAdapterCustom';
+        item.adapterClass = className;
+        return item;
+      });
+      return [builtIn, ...custom];
+    }
+
     if (parent.__kind === 'previousRoot') {
       const priority = { file: 0, package: 1, automatic: 2, excludedFile: 3, excludedPackage: 4 };
       return nativeReplaySession.files
@@ -4802,6 +4828,60 @@ module.exports.activate = async function patchedActivate(context) {
     if (!className) return;
     await updateFlowPrefixSetting('flowExcludeClassNames', values => [...values, className]);
   }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.addExisting', async () => {
+    const className = normalizeFlowPrefix(await vscode.window.showInputBox({
+      title: 'Register Replay State Adapter',
+      prompt: 'Fully qualified adapter class on the test runtime classpath',
+      placeHolder: 'cgtl.replay.adapters.MoneyReplayAdapter',
+      validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java class name.'
+    }));
+    if (!className) return;
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.remove', async item => {
+    const className = normalizeFlowPrefix(item?.adapterClass || item?.label);
+    if (!className) return;
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => values.filter(v => v !== className));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.create', async () => {
+    const activeUri = vscode.window.activeTextEditor?.document?.uri;
+    const folder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : (vscode.workspace.workspaceFolders || [])[0];
+    if (!folder) return vscode.window.showWarningMessage('Open a workspace before creating a Replay state adapter.');
+    const targetType = normalizeFlowPrefix(await vscode.window.showInputBox({
+      title: 'Create Replay State Adapter',
+      prompt: 'Fully qualified type this adapter should display',
+      placeHolder: 'com.example.order.Money',
+      validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java type name.'
+    }));
+    if (!targetType) return;
+    const targetSimple = targetType.split('.').pop().replace(/[^A-Za-z0-9_$]/g, '') || 'Value';
+    const adapterSimple = await vscode.window.showInputBox({
+      title: 'Create Replay State Adapter', prompt: 'Adapter class name', value: `${targetSimple}ReplayAdapter`,
+      validateInput: value => /^[A-Za-z_$][\w$]*$/.test(String(value || '').trim()) ? undefined : 'Enter a valid Java class name.'
+    });
+    if (!adapterSimple) return;
+    const packageName = 'cgtl.replay.adapters';
+    const adapterClass = `${packageName}.${adapterSimple.trim()}`;
+    let projectRoot = folder.uri.fsPath;
+    if (activeUri?.scheme === 'file') {
+      let cursor = path.dirname(activeUri.fsPath);
+      while (cursor && cursor.startsWith(folder.uri.fsPath)) {
+        if (fs.existsSync(path.join(cursor, 'build.gradle')) || fs.existsSync(path.join(cursor, 'build.gradle.kts'))) { projectRoot = cursor; break; }
+        const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
+      }
+    }
+    const directory = path.join(projectRoot, 'src', 'test', 'java', ...packageName.split('.'));
+    fs.mkdirSync(directory, { recursive: true });
+    const filePath = path.join(directory, `${adapterSimple.trim()}.java`);
+    if (fs.existsSync(filePath)) return vscode.window.showWarningMessage(`Replay adapter already exists: ${filePath}`);
+    const source = `package ${packageName};\n\nimport java.util.LinkedHashMap;\nimport java.util.Map;\n\n/** CGTL Replay state adapter for ${targetType}. */\npublic final class ${adapterSimple.trim()} {\n    private ${adapterSimple.trim()}() {}\n\n    public static boolean supports(Class<?> type) {\n        return \"${targetType}\".equals(type.getName());\n    }\n\n    public static Object snapshot(Object value) {\n        Map<String, Object> state = new LinkedHashMap<>();\n        // Cast value to ${targetType} and add the state that matters to you.\n        // state.put(\"$display\", \"compact label shown in Replay\");\n        // state.put(\"fieldName\", typedValue.someSafeAccessor());\n        state.put(\"runtimeType\", value.getClass().getName());\n        return state;\n    }\n}\n`;
+    fs.writeFileSync(filePath, source, 'utf8');
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => [...values, adapterClass]);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    await vscode.window.showTextDocument(document, { preview: false });
+    instrumentationProvider?.refresh();
+  }));
+
   // Backward-compatible alias for older command palette/menu references.
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addInclude', () => vscode.commands.executeCommand('compositeGradleTests.replay.instrumentation.addPackage')));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addExclude', () => vscode.commands.executeCommand('compositeGradleTests.replay.instrumentation.addExcludePackage')));
@@ -4861,7 +4941,7 @@ module.exports.activate = async function patchedActivate(context) {
     nativeReplaySession.seekToSourceLine(editor.document.uri.fsPath, line);
   }));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
-    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowClassNames') || event.affectsConfiguration('compositeGradleTests.flowExcludePackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowExcludeClassNames')) instrumentationProvider?.refresh();
+    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowClassNames') || event.affectsConfiguration('compositeGradleTests.flowExcludePackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowExcludeClassNames') || event.affectsConfiguration('compositeGradleTests.flowStateAdapterClasses')) instrumentationProvider?.refresh();
   }));
   context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(editors => { if(nativeReplaySession)for(const editor of editors)applyReplayDecorations(editor); }));
 };

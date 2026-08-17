@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.23",
+  "version": "0.4.26",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -319,6 +319,21 @@
         "command": "compositeGradleTests.replay.instrumentation.configureFile",
         "title": "Replay Instrumentation: Configure File",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.create",
+        "title": "Replay State: Create Custom Adapter",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.addExisting",
+        "title": "Replay State: Register Existing Adapter",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.remove",
+        "title": "Replay State: Remove Custom Adapter",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -444,6 +459,11 @@
           "command": "compositeGradleTests.replay.instrumentation.addRule",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.create",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -520,6 +540,16 @@
         {
           "command": "compositeGradleTests.replay.instrumentation.configureFile",
           "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.addExisting",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayStateAdaptersRoot",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.remove",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayStateAdapterCustom",
           "group": "inline@1"
         }
       ],
@@ -808,6 +838,14 @@
           },
           "default": [],
           "description": "Fully qualified top-level classes excluded from Code Flow instrumentation. Nested/anonymous classes from the same source file are excluded too."
+        },
+        "compositeGradleTests.flowStateAdapterClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified custom Replay state adapter classes available on the test runtime classpath. Recommended location: src/test/java/cgtl/replay/adapters. Each class exposes public static boolean supports(Class<?>) and public static Object snapshot(Object)."
         }
       }
     },
