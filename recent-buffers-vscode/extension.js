@@ -339,16 +339,66 @@ async function searchFiles(query) {
   if (cached) return cached;
 
   const config = vscode.workspace.getConfiguration('recentBuffers');
-  const limit = config.get('fileSearchResultLimit', 200);
+  const resultLimit = config.get('fileSearchResultLimit', 200);
   const exclude = config.get('exclude');
-  const include = buildSearchGlob(normalized);
-  const files = await vscode.workspace.findFiles(include, exclude, limit);
 
+  // VS Code's findFiles is glob-based, while Recent Buffers uses our fuzzy
+  // score over "filename + path". A strict glob can therefore discard files
+  // that the fuzzy matcher would accept (for example filename text followed
+  // by workspace/path text). Discover a bounded candidate pool
+  // progressively, then let buildFileRows apply the exact same fuzzyScore.
+  const candidateLimit = Math.max(resultLimit * 3, 400);
+  const probes = buildCandidateQueries(normalized);
+  const seen = new Map();
+
+  for (const probe of probes) {
+    const remaining = candidateLimit - seen.size;
+    if (remaining <= 0) break;
+    const found = await vscode.workspace.findFiles(buildSearchGlob(probe), exclude, remaining);
+    for (const uri of found) {
+      seen.set(uri.toString(), uri);
+      if (seen.size >= candidateLimit) break;
+    }
+
+    // Once the exact/long probe gives us a useful candidate set, don't keep
+    // broadening unless it is sparse. This keeps large workspaces cheap.
+    if (seen.size >= Math.min(resultLimit, 80)) break;
+  }
+
+  const files = [...seen.values()];
   fileSearchCache.set(key, files);
   while (fileSearchCache.size > 50) {
     fileSearchCache.delete(fileSearchCache.keys().next().value);
   }
   return files;
+}
+
+function buildCandidateQueries(query) {
+  const compact = [...query].filter(ch => !/\s/.test(ch)).join('');
+  if (!compact) return [];
+
+  const probes = [compact];
+
+  // Progressively remove trailing context. This lets a query such as
+  // "build.gradleian" discover build.gradle candidates first; fuzzyScore then
+  // checks the complete query against "build.gradle ians/build.gradle".
+  const lengths = [
+    Math.floor(compact.length * 0.80),
+    Math.floor(compact.length * 0.65),
+    Math.floor(compact.length * 0.50)
+  ];
+
+  // If a recognizable filename extension is present, keep the filename-sized
+  // prefix as an especially useful discovery probe.
+  const extensionMatch = compact.match(/^(.+?\.(?:java|gradle|kts|json|ya?ml|xml|md|js|ts|properties))/i);
+  if (extensionMatch) probes.push(extensionMatch[1]);
+
+  for (const len of lengths) {
+    if (len >= 2) probes.push(compact.slice(0, len));
+  }
+
+  // Preserve order while removing duplicates.
+  return [...new Set(probes)];
 }
 
 function buildSearchGlob(query) {
@@ -481,9 +531,9 @@ function getWebviewHtml(webview) {
   .resultSection.filesSection { flex:1 1 50%; min-width:0; border-left:1px solid var(--vscode-widget-border, #ffffff18); }
   .sectionHeader { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:5px 12px 6px; color:var(--vscode-descriptionForeground); font-size:12px; font-weight:650; letter-spacing:.5px; text-transform:uppercase; }
   .sectionRows { min-height:0; overflow:auto; padding-bottom:3px; scrollbar-gutter:stable; }
-  .resultSection .row { grid-template-columns:minmax(145px, 210px) minmax(135px, 1fr) 58px 62px 54px 20px; gap:6px; margin:0 4px; padding-left:10px; padding-right:6px; }
+  .resultSection .row { grid-template-columns:minmax(190px, 275px) minmax(95px, 1fr) 48px 52px 46px 18px; gap:5px; margin:0 4px; padding-left:10px; padding-right:6px; }
   @media (max-width:1150px) {
-    .resultSection .row { grid-template-columns:minmax(145px,1fr) minmax(150px,1.1fr) 60px 22px; }
+    .resultSection .row { grid-template-columns:minmax(180px,1.35fr) minmax(90px,.85fr) 48px 18px; }
     .resultSection .age, .resultSection .visits { display:none; }
   }
   .row { position:relative; display:grid; grid-template-columns:minmax(220px, 280px) minmax(260px, 1fr) 76px 88px 78px 28px; align-items:center; gap:10px; min-height:42px; padding:2px 10px 2px 14px; margin:0 8px; border-radius:5px; cursor:pointer; }
@@ -496,6 +546,7 @@ function getWebviewHtml(webview) {
   .fileIcon { width:16px; text-align:center; font-weight:700; flex:0 0 16px; }
   .java { color:#e76f51; } .gradle { color:#72b7b2; } .json { color:#e5c07b; } .yaml { color:#61afef; } .markdown { color:#61afef; } .script { color:#e5c07b; } .xml { color:#d19a66; } .file { color:var(--vscode-descriptionForeground); }
   .filename, .path { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .filename { min-width:0; }
   .path { color:var(--vscode-descriptionForeground); font-size:11.5px; line-height:1.35; direction:rtl; text-align:left; unicode-bidi:plaintext; }
   .pathInner { direction:ltr; unicode-bidi:plaintext; }
   .meta { color:var(--vscode-descriptionForeground); font-size:11px; }

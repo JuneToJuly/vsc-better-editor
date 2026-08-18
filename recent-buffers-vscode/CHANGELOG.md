@@ -1,3 +1,11 @@
+## 0.3.6
+
+- All Files now uses bounded progressive candidate discovery followed by the same fuzzy `filename + path` scoring as Recent Buffers.
+- Fixes searches where part of the query matches the filename and later characters match the workspace/path context.
+- Candidate discovery stays bounded; the extension still does not preload the entire workspace.
+- Rebalanced side-by-side columns to give filenames/class names substantially more visible width.
+- Tightened line/age/visit metadata columns to preserve space for filenames.
+
 ## 0.3.5
 
 - The file active when Recent Buffers opens is now excluded from the Recent Buffers pane for that invocation.
