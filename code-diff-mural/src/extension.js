@@ -618,7 +618,7 @@ function renderHtml(data) {
           <span class="file-counts">+${f.additions} −${f.deletions}</span>
         </header>
         <div class="file-path">${escapeHtml(f.path)}</div>
-        <div class="hunks">${hunkHtml}</div>
+        <div class="file-scroll" tabindex="0" title="Scroll to browse all changes in this file"><div class="hunks">${hunkHtml}</div></div>
       </section>`;
     }).join('');
 
@@ -678,7 +678,12 @@ button:hover { background:var(--vscode-button-secondaryHoverBackground); }
 .file-counts { margin-left:auto; flex:0 0 auto; }
 .file-counts { font-weight:400; color:var(--muted); }
 .file-path { padding:0 9px 7px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:10px; }
-.hunks { display:flex; flex-direction:column; gap:5px; padding:0 6px 6px; }
+.file-scroll { max-height:680px; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; border-top:1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.file-scroll::-webkit-scrollbar { width:10px; }
+.file-scroll::-webkit-scrollbar-thumb { background:color-mix(in srgb, var(--vscode-scrollbarSlider-background) 80%, transparent); border-radius:8px; border:2px solid transparent; background-clip:padding-box; }
+.file-scroll::-webkit-scrollbar-thumb:hover { background:color-mix(in srgb, var(--vscode-scrollbarSlider-hoverBackground) 90%, transparent); border:2px solid transparent; background-clip:padding-box; }
+.file-scroll:not(.scrollable) { overflow-y:hidden; scrollbar-gutter:auto; }
+.hunks { display:flex; flex-direction:column; gap:5px; padding:6px; }
 .hunk { position:relative; border:1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius:4px; overflow:hidden; min-height:26px; cursor:pointer; background:var(--vscode-editor-background); }
 /* Hunk containers are intentionally neutral. Diff meaning belongs to the changed lines,
    not the card border/header, so mixed hunks never look like an all-green/all-red change. */
@@ -692,7 +697,7 @@ button:hover { background:var(--vscode-button-secondaryHoverBackground); }
 .counts { white-space:nowrap; color:var(--muted); } .counts b { color:var(--vscode-gitDecoration-addedResourceForeground, #81c995); } .counts i { color:var(--vscode-gitDecoration-deletedResourceForeground, #ef8b87); font-style:normal; }
 .hunk.sm { min-height:28px; } .hunk.md { min-height:48px; } .hunk.lg { min-height:72px; } .hunk.xl { min-height:100px; }
 .source-wrap { position:relative; border-top:1px solid color-mix(in srgb, var(--border) 70%, transparent); background:var(--vscode-editor-background); }
-.source { display:block; width:100%; font-family:var(--vscode-editor-font-family); font-size:14px; line-height:1.5; max-height:520px; overflow:hidden; visibility:visible; }
+.source { display:block; width:100%; font-family:var(--vscode-editor-font-family); font-size:14px; line-height:1.5; overflow:visible; visibility:visible; }
 .overview-hint { display:none; position:absolute; inset:0; align-items:center; justify-content:center; gap:10px; padding:10px; color:var(--fg); font-family:var(--vscode-font-family); pointer-events:none; white-space:nowrap; }
 .overview-hint strong { font-size:15px; transform:scale(var(--label-boost)); transform-origin:center; }
 .overview-hint span { color:var(--muted); transform:scale(var(--label-boost)); transform-origin:left center; }
@@ -882,6 +887,32 @@ if (world) {
       vscode.setState({ ...(vscode.getState() || {}), scale, tx, ty, packagePositions });
       e.stopPropagation();
     });
+  });
+
+  // Large file cards are bounded mini-editors. Plain wheel over a scrollable
+  // file browses that file instead of zooming the mural; Shift+wheel always
+  // remains mural pan. Small files keep the normal mural wheel behavior.
+  const fileScrolls = [...document.querySelectorAll('.file-scroll')];
+  function refreshFileScrollability() {
+    fileScrolls.forEach(el => el.classList.toggle('scrollable', el.scrollHeight > el.clientHeight + 2));
+  }
+  requestAnimationFrame(refreshFileScrollability);
+  window.addEventListener('resize', refreshFileScrollability);
+  fileScrolls.forEach(el => {
+    el.addEventListener('wheel', e => {
+      if (e.shiftKey || !el.classList.contains('scrollable')) return;
+      const dy = e.deltaY || e.deltaX;
+      if (!dy) return;
+      const atTop = el.scrollTop <= 0;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+      // Keep scrolling trapped inside the file while it has content in the
+      // requested direction. At an edge, let the mural receive the wheel so
+      // users can immediately resume zooming without moving the pointer.
+      if ((dy < 0 && atTop) || (dy > 0 && atBottom)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      el.scrollTop += dy;
+    }, { passive:false });
   });
 
   viewport.addEventListener('wheel', e => {

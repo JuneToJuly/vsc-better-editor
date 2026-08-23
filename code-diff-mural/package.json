@@ -2,7 +2,7 @@
   "name": "code-diff-mural",
   "displayName": "Code Diff Mural",
   "description": "A pan-and-zoom mural for comparing Git branches, commits, tags, staged changes, and the working tree.",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "publisher": "local-dev",
   "license": "MIT",
   "engines": {
