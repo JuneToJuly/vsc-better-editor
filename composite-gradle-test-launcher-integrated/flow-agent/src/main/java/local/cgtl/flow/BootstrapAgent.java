@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Collection;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.tools.JavaCompiler;
@@ -44,6 +46,10 @@ public final class BootstrapAgent {
   private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
   private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
   private static final int snapshotMaxItems = Integer.getInteger("cgtl.flow.lineState.maxCollectionItems", 20);
+  private static final int capturePointMaxDepth = Integer.getInteger("cgtl.flow.capturePoint.maxDepth", 8);
+  private static final int capturePointMaxFields = Integer.getInteger("cgtl.flow.capturePoint.maxFields", 200);
+  private static final int capturePointMaxItems = Integer.getInteger("cgtl.flow.capturePoint.maxCollectionItems", 200);
+  private static final Set<String> capturePoints = parseCapturePoints(System.getProperty("cgtl.flow.capturePoints", ""));
   private static final ConcurrentHashMap<String, List<LocalScope>> localScopes = new ConcurrentHashMap<>();
 
   private static final class LocalScope {
@@ -73,6 +79,10 @@ public final class BootstrapAgent {
           + " maxDepth=" + snapshotMaxDepth
           + " maxFields=" + snapshotMaxFields
           + " maxItems=" + snapshotMaxItems);
+      System.err.println("[CGTL FLOW] Capture points=" + (capturePoints.isEmpty() ? "<none>" : capturePoints)
+          + " maxDepth=" + capturePointMaxDepth
+          + " maxFields=" + capturePointMaxFields
+          + " maxItems=" + capturePointMaxItems);
       installLineTransformer(instrumentation);
     } catch (Throwable error) {
       System.err.println("[CGTL FLOW] Ordered line replay disabled: " + error);
@@ -108,8 +118,15 @@ public final class BootstrapAgent {
       long callId = currentCallId();
       int depth = currentDepth();
       String sourceFile = sourceFile(className);
+      boolean capturePoint = isCapturePoint(className, line);
+      String receiverJson = capturePoint ? deepSnapshotForCapturePoint(receiver) : snapshotForLine(receiver);
+      String localsJson = capturePoint
+          ? deepLocalsJson(className, methodName, descriptor, line, localNames, localValues)
+          : localsJson(className, methodName, descriptor, line, localNames, localValues);
       String json = "{\"sequence\":" + eventSequence +
           ",\"event\":\"line\"" +
+          ",\"capturePoint\":" + capturePoint +
+          (capturePoint ? ",\"capturePointDepth\":" + capturePointMaxDepth : "") +
           ",\"callId\":" + callId +
           ",\"invocationId\":" + callId +
           ",\"className\":" + quote(className) +
@@ -120,8 +137,8 @@ public final class BootstrapAgent {
           ",\"depth\":" + depth +
           ",\"threadId\":" + Thread.currentThread().getId() +
           ",\"threadName\":" + quote(Thread.currentThread().getName()) +
-          ",\"frameReceiver\":" + snapshotForLine(receiver) +
-          ",\"frameLocals\":" + localsJson(className, methodName, descriptor, line, localNames, localValues) + "}";
+          ",\"frameReceiver\":" + receiverJson +
+          ",\"frameLocals\":" + localsJson + "}";
       synchronized (Class.forName("local.cgtl.flow.FlowAgent$Recorder")) {
         output.write(json);
         output.write("\n");
@@ -174,6 +191,189 @@ public final class BootstrapAgent {
     return className + "#" + methodName + descriptor;
   }
 
+  private static Set<String> parseCapturePoints(String raw) {
+    Set<String> result = new HashSet<>();
+    if (raw == null || raw.isBlank()) return result;
+    for (String value : raw.split(",")) {
+      String trimmed = value == null ? "" : value.trim();
+      int hash = trimmed.lastIndexOf('#');
+      if (hash <= 0 || hash >= trimmed.length() - 1) continue;
+      try {
+        int line = Integer.parseInt(trimmed.substring(hash + 1));
+        if (line > 0) result.add(trimmed.substring(0, hash) + "#" + line);
+      } catch (NumberFormatException ignored) { }
+    }
+    return result;
+  }
+
+  private static boolean isCapturePoint(String className, int line) {
+    if (capturePoints.isEmpty() || className == null || line <= 0) return false;
+    if (capturePoints.contains(className + "#" + line)) return true;
+    int nested = className.indexOf('$');
+    return nested > 0 && capturePoints.contains(className.substring(0, nested) + "#" + line);
+  }
+
+  private static String deepLocalsJson(String className, String methodName, String descriptor, int line,
+      String[] names, Object[] values) {
+    if (values == null) return "{}";
+    StringBuilder out = new StringBuilder("{");
+    int emitted = 0;
+    for (int i = 0; i < values.length; i++) {
+      Object value = values[i];
+      if (value == UNSET_LOCAL) continue;
+      String name = names != null && i < names.length && names[i] != null && !names[i].isBlank()
+          ? names[i]
+          : localName(className, methodName, descriptor, line, i);
+      if (name == null || name.isBlank()) continue;
+      if (emitted++ > 0) out.append(',');
+      out.append(quote(name)).append(':').append(deepSnapshotForCapturePoint(value));
+    }
+    return out.append('}').toString();
+  }
+
+  private static String deepSnapshotForCapturePoint(Object value) {
+    try { return deepSnapshot(value, 0, new IdentityHashMap<>()); }
+    catch (Throwable error) {
+      return "{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}";
+    }
+  }
+
+  /**
+   * High-fidelity snapshot used only at explicit Replay capture points. Unlike the
+   * normal line snapshot, this does not collapse unchanged objects into snapshotRef
+   * records: the capture point must be self-contained when inspected later.
+   */
+  private static String deepSnapshot(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+    if (value == null) return "null";
+    if (isScalar(value)) return scalarSnapshot(value);
+    Class<?> type = value.getClass();
+
+    // Depth is a strict object-graph boundary. At depth N, nested values at
+    // level N are represented only by a compact identity summary; containers
+    // and adapters must not bypass the boundary by expanding their contents.
+    if (level >= capturePointMaxDepth) {
+      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + ",\"truncated\":true}";
+    }
+
+    SnapshotAdapters.Adapted adapted = SnapshotAdapters.adapt(value);
+    if (adapted != null) {
+      Object adaptedValue = SnapshotAdapters.sanitizedAdapterValue(adapted);
+      StringBuilder out = new StringBuilder("{\"type\":").append(quote(type.getName()))
+          .append(",\"adapter\":").append(quote(adapted.adapter));
+      if (adapted.display != null) out.append(",\"value\":").append(quote(limit(adapted.display, 1000)));
+      if (adaptedValue instanceof Map<?,?> map) {
+        out.append(",\"fields\":").append(deepStructuredMap(map, level + 1, seen));
+      } else if (adaptedValue instanceof Collection<?> collection) {
+        out.append(",\"items\":").append(deepStructuredCollection(collection, level + 1, seen))
+            .append(",\"size\":").append(collection.size());
+      } else if (adaptedValue != null && adaptedValue.getClass().isArray()) {
+        out.append(",\"items\":").append(deepStructuredArray(adaptedValue, level + 1, seen))
+            .append(",\"size\":").append(Array.getLength(adaptedValue));
+      }
+      return out.append('}').toString();
+    }
+
+    if (seen.put(value, Boolean.TRUE) != null) {
+      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote("<cycle " + identityText(value) + ">") + "}";
+    }
+
+    if (type.isArray()) {
+      int total = Array.getLength(value);
+      int count = Math.min(total, capturePointMaxItems);
+      StringBuilder items = new StringBuilder("[");
+      for (int i = 0; i < count; i++) {
+        if (i > 0) items.append(',');
+        items.append(deepSnapshot(Array.get(value, i), level + 1, seen));
+      }
+      return "{\"type\":" + quote(type.getName()) + ",\"items\":" + items.append(']') + ",\"size\":" + total
+          + (total > count ? ",\"truncated\":true" : "") + "}";
+    }
+
+    if (value instanceof Map<?,?> map) {
+      StringBuilder entries = new StringBuilder("[");
+      int i = 0;
+      for (Map.Entry<?,?> entry : map.entrySet()) {
+        if (i >= capturePointMaxItems) break;
+        if (i++ > 0) entries.append(',');
+        entries.append("{\"key\":").append(deepSnapshot(entry.getKey(), level + 1, seen))
+            .append(",\"value\":").append(deepSnapshot(entry.getValue(), level + 1, seen)).append('}');
+      }
+      return "{\"type\":" + quote(type.getName()) + ",\"entries\":" + entries.append(']') + ",\"size\":" + map.size()
+          + (map.size() > i ? ",\"truncated\":true" : "") + "}";
+    }
+
+    if (value instanceof Collection<?> collection) {
+      StringBuilder items = new StringBuilder("[");
+      int i = 0;
+      for (Object item : collection) {
+        if (i >= capturePointMaxItems) break;
+        if (i++ > 0) items.append(',');
+        items.append(deepSnapshot(item, level + 1, seen));
+      }
+      return "{\"type\":" + quote(type.getName()) + ",\"items\":" + items.append(']') + ",\"size\":" + collection.size()
+          + (collection.size() > i ? ",\"truncated\":true" : "") + "}";
+    }
+
+    // Unknown JDK internals remain opaque unless a safe semantic adapter handles them.
+    if (type.getName().startsWith("java.")) {
+      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + "}";
+    }
+
+    StringBuilder fields = new StringBuilder("{");
+    int count = 0;
+    boolean truncated = false;
+    outer:
+    for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
+      for (Field field : current.getDeclaredFields()) {
+        if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) continue;
+        if (count >= capturePointMaxFields) { truncated = true; break outer; }
+        if (count++ > 0) fields.append(',');
+        fields.append(quote(field.getName())).append(':');
+        try {
+          field.setAccessible(true);
+          fields.append(deepSnapshot(field.get(value), level + 1, seen));
+        } catch (Throwable error) {
+          fields.append("{\"type\":\"unavailable\",\"value\":").append(quote("<" + error.getClass().getSimpleName() + ">")).append('}');
+        }
+      }
+    }
+    return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value))
+        + ",\"fields\":" + fields.append('}')
+        + (truncated ? ",\"truncated\":true" : "") + "}";
+  }
+
+  private static String deepStructuredMap(Map<?,?> map, int level, IdentityHashMap<Object, Boolean> seen) {
+    StringBuilder out = new StringBuilder("{");
+    int i = 0;
+    for (Map.Entry<?,?> entry : map.entrySet()) {
+      if (i >= capturePointMaxFields) break;
+      if (i++ > 0) out.append(',');
+      out.append(quote(String.valueOf(entry.getKey()))).append(':').append(deepSnapshot(entry.getValue(), level, seen));
+    }
+    return out.append('}').toString();
+  }
+
+  private static String deepStructuredCollection(Collection<?> collection, int level, IdentityHashMap<Object, Boolean> seen) {
+    StringBuilder out = new StringBuilder("[");
+    int i = 0;
+    for (Object item : collection) {
+      if (i >= capturePointMaxItems) break;
+      if (i++ > 0) out.append(',');
+      out.append(deepSnapshot(item, level, seen));
+    }
+    return out.append(']').toString();
+  }
+
+  private static String deepStructuredArray(Object array, int level, IdentityHashMap<Object, Boolean> seen) {
+    StringBuilder out = new StringBuilder("[");
+    int count = Math.min(Array.getLength(array), capturePointMaxItems);
+    for (int i = 0; i < count; i++) {
+      if (i > 0) out.append(',');
+      out.append(deepSnapshot(Array.get(array, i), level, seen));
+    }
+    return out.append(']').toString();
+  }
+
   private static String localsJson(String className, String methodName, String descriptor, int line,
       String[] names, Object[] values) {
     if (values == null) return "{}";
@@ -208,6 +408,12 @@ public final class BootstrapAgent {
     if (value == null) return "null";
     if (isScalar(value)) return scalarSnapshot(value);
     Class<?> type = value.getClass();
+
+    // Root values still expose their direct structure, but nested values at
+    // the configured depth are summaries only. This makes maxDepth strict for
+    // ordinary objects, Maps, Collections, arrays, and adapter-backed values.
+    if (!forceRoot && level >= snapshotMaxDepth) return summary(value);
+
     SnapshotAdapters.Adapted adapted = SnapshotAdapters.adapt(value);
     if (adapted != null) return adaptedSnapshot(value, type, adapted, level, seen, forceRoot);
     if (seen.put(value, Boolean.TRUE) != null) {
@@ -228,7 +434,7 @@ public final class BootstrapAgent {
       StringBuilder out = new StringBuilder("[" );
       for (int i = 0; i < length; i++) {
         if (i > 0) out.append(',');
-        out.append(level >= snapshotMaxDepth ? summary(Array.get(value, i)) : snapshot(Array.get(value, i), level + 1, seen, false));
+        out.append(snapshot(Array.get(value, i), level + 1, seen, false));
       }
       body = "\"items\":" + out.append(']').toString() + ",\"size\":" + Array.getLength(value);
     } else if (value instanceof Map<?,?> map) {
@@ -236,8 +442,8 @@ public final class BootstrapAgent {
       for (Map.Entry<?,?> entry : map.entrySet()) {
         if (i++ >= snapshotMaxItems) break;
         if (i > 1) out.append(',');
-        out.append("{\"key\":").append(level >= snapshotMaxDepth ? summary(entry.getKey()) : snapshot(entry.getKey(), level + 1, seen, false));
-        out.append(",\"value\":").append(level >= snapshotMaxDepth ? summary(entry.getValue()) : snapshot(entry.getValue(), level + 1, seen, false)).append('}');
+        out.append("{\"key\":").append(snapshot(entry.getKey(), level + 1, seen, false));
+        out.append(",\"value\":").append(snapshot(entry.getValue(), level + 1, seen, false)).append('}');
       }
       body = "\"entries\":" + out.append(']').toString() + ",\"size\":" + map.size();
     } else if (value instanceof Collection<?> collection) {
@@ -245,7 +451,7 @@ public final class BootstrapAgent {
       for (Object item : collection) {
         if (i++ >= snapshotMaxItems) break;
         if (i > 1) out.append(',');
-        out.append(level >= snapshotMaxDepth ? summary(item) : snapshot(item, level + 1, seen, false));
+        out.append(snapshot(item, level + 1, seen, false));
       }
       body = "\"items\":" + out.append(']').toString() + ",\"size\":" + collection.size();
     } else if (level >= snapshotMaxDepth || type.getName().startsWith("java.")) {
@@ -260,7 +466,7 @@ public final class BootstrapAgent {
           try {
             field.setAccessible(true);
             Object child = field.get(value);
-            fields.append(level + 1 > snapshotMaxDepth ? summary(child) : snapshot(child, level + 1, seen, false));
+            fields.append(snapshot(child, level + 1, seen, false));
           } catch (Throwable error) {
             fields.append("{\"type\":\"unavailable\",\"value\":" + quote("<" + error.getClass().getSimpleName() + ">") + "}");
           }
@@ -499,6 +705,8 @@ public final class BootstrapAgent {
       import java.util.ArrayList;
       import java.util.IdentityHashMap;
       import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
       import java.util.Map;
       import net.bytebuddy.matcher.ElementMatcher;
       import net.bytebuddy.matcher.ElementMatchers;

@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.37",
+  "version": "0.4.39",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -359,6 +359,16 @@
         "command": "compositeGradleTests.replay.adapters.remove",
         "title": "Replay State: Remove Custom Adapter",
         "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.capturePoint.toggle",
+        "title": "Replay: Toggle Capture Point",
+        "icon": "$(record)"
+      },
+      {
+        "command": "compositeGradleTests.replay.capturePoint.remove",
+        "title": "Replay: Remove Capture Point",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -417,6 +427,11 @@
           "command": "compositeGradleTests.replay.instrumentation.includeCurrentPackage",
           "when": "compositeGradleTests.replayActive && editorLangId == java",
           "group": "replayInstrumentation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.capturePoint.toggle",
+          "when": "editorLangId == java",
+          "group": "replayInstrumentation@0"
         }
       ],
       "view/title": [
@@ -601,6 +616,11 @@
           "command": "compositeGradleTests.replay.adapters.remove",
           "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayStateAdapterCustom",
           "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.capturePoint.remove",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayCapturePoint",
+          "group": "inline@1"
         }
       ],
       "editor/title": [
@@ -638,6 +658,11 @@
           "command": "compositeGradleTests.replay.instrumentation.includeCurrentPackage",
           "when": "compositeGradleTests.replayActive && editorLangId == java",
           "group": "navigation@24"
+        },
+        {
+          "command": "compositeGradleTests.replay.capturePoint.toggle",
+          "when": "compositeGradleTests.replayActive && editorLangId == java",
+          "group": "navigation@19"
         }
       ]
     },
@@ -906,6 +931,35 @@
           },
           "default": [],
           "description": "Fully qualified custom Replay state adapter classes available on the test runtime classpath. Recommended location: src/test/java/cgtl/replay/adapters. Each class exposes public static boolean supports(Class<?>) and public static Object snapshot(Object)."
+        },
+        "compositeGradleTests.replayCapturePoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Replay Capture Points in fully-qualified-class#line form. At these source lines, Code Flow captures a deeper self-contained receiver/local state snapshot."
+        },
+        "compositeGradleTests.replayCapturePointMaxDepth": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Maximum recursive depth for explicit Replay Capture Point deep snapshots."
+        },
+        "compositeGradleTests.replayCapturePointMaxFields": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum fields captured per object at an explicit Replay Capture Point."
+        },
+        "compositeGradleTests.replayCapturePointMaxCollectionItems": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 2000,
+          "description": "Maximum collection/map/array items captured at an explicit Replay Capture Point."
         }
       }
     },

@@ -830,6 +830,10 @@ async function executeInvocation(invocation) {
       `-Dcgtl.flow.packages=${tracedPrefixes.join(',')}`,
       `-Dcgtl.flow.excludes=${flowEncodedExclusions().join(',')}`,
       `-Dcgtl.flow.stateAdapters=${flowStateAdapterClasses().join(',')}`,
+      `-Dcgtl.flow.capturePoints=${replayCapturePoints().join(',')}`,
+      `-Dcgtl.flow.capturePoint.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxDepth', 8) || 8)}`,
+      `-Dcgtl.flow.capturePoint.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxFields', 200) || 200)}`,
+      `-Dcgtl.flow.capturePoint.maxCollectionItems=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxCollectionItems', 200) || 200)}`,
       `-Dcgtl.flow.lineState=${String(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineState', 'receiver') || 'receiver')}`,
       `-Dcgtl.flow.lineState.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxDepth', 2) || 2)}`,
       `-Dcgtl.flow.lineState.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxFields', 30) || 30)}`,
@@ -857,6 +861,7 @@ async function executeInvocation(invocation) {
     output.appendLine(`[CGTL FLOW] Excluded packages: ${flowExcludePackagePrefixes().join(', ') || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Excluded files/classes: ${flowExcludeClassNames().join(', ') || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Custom state adapters: ${flowStateAdapterClasses().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Capture points: ${replayCapturePoints().join(', ') || '<none>'}`);
     for (const entry of flowPackagePrefixConfiguration().scopes) {
       output.appendLine(`[CGTL FLOW] Package config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
     }
@@ -1126,6 +1131,30 @@ function flowStateAdapterClasses() {
   return additiveFlowSettingConfiguration('flowStateAdapterClasses').values;
 }
 
+function replayCapturePoints() {
+  return additiveFlowSettingConfiguration('replayCapturePoints').values;
+}
+
+function replayCapturePointKey(className, line) {
+  return `${normalizeFlowPrefix(className)}#${Number(line)}`;
+}
+
+function replayCapturePointAtEditor(editor = vscode.window.activeTextEditor) {
+  const target = activeJavaInstrumentationTarget(editor);
+  if (!target?.className || !editor) return undefined;
+  const line = editor.selection.active.line + 1;
+  return { ...target, line, key: replayCapturePointKey(target.className, line) };
+}
+
+async function updateReplayCapturePoints(updater) {
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const current = replayCapturePoints();
+  const next = [...new Set(updater(current).map(v => String(v || '').trim()).filter(Boolean))].sort();
+  await config.update('replayCapturePoints', next, vscode.ConfigurationTarget.Workspace);
+  instrumentationProvider?.refresh();
+  refreshReplayCapturePointDecorations();
+}
+
 function flowConfiguredInstrumentationPrefixes() {
   return [...new Set([...flowPackagePrefixes(), ...flowClassNames()])];
 }
@@ -1250,6 +1279,81 @@ async function includeCurrentReplayPackage() {
   }
   await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, target.packageName]);
   vscode.window.showInformationMessage(`Replay will instrument package ${target.packageName} on the next Analyze / Code Flow run.`);
+}
+
+
+function parseReplayCapturePoint(value) {
+  const text = String(value || '').trim();
+  const hash = text.lastIndexOf('#');
+  if (hash <= 0) return undefined;
+  const className = normalizeFlowPrefix(text.slice(0, hash));
+  const line = Number(text.slice(hash + 1));
+  if (!className || !Number.isInteger(line) || line <= 0) return undefined;
+  return { className, line, key: replayCapturePointKey(className, line) };
+}
+
+function capturePointMatchesClass(ruleClass, className) {
+  return className === ruleClass || className.startsWith(`${ruleClass}$`);
+}
+
+function refreshReplayCapturePointDecorations() {
+  if (!replayCapturePointDecoration) return;
+  const points = replayCapturePoints().map(parseReplayCapturePoint).filter(Boolean);
+  for (const editor of vscode.window.visibleTextEditors) {
+    const target = activeJavaInstrumentationTarget(editor);
+    if (!target?.className) {
+      editor.setDecorations(replayCapturePointDecoration, []);
+      continue;
+    }
+    const ranges = points
+      .filter(point => capturePointMatchesClass(point.className, target.className) && point.line <= editor.document.lineCount)
+      .map(point => ({
+        range: editor.document.lineAt(point.line - 1).range,
+        hoverMessage: `Replay Capture Point — deep state captured at ${point.className}:${point.line}`
+      }));
+    editor.setDecorations(replayCapturePointDecoration, ranges);
+  }
+}
+
+async function toggleReplayCapturePoint() {
+  const point = replayCapturePointAtEditor();
+  if (!point) return vscode.window.showWarningMessage('Open a Java source file and place the cursor on a line to toggle a Replay Capture Point.');
+  const current = replayCapturePoints();
+  const exists = current.includes(point.key);
+
+  if (!exists) {
+    // A capture point can only fire in transformed code. Make the selected source
+    // file an explicit instrumentation target so the point works even when the user
+    // navigated into code outside the currently included packages.
+    if (flowExcludeClassNames().includes(point.className)) {
+      await updateFlowPrefixSetting('flowExcludeClassNames', values => values.filter(v => v !== point.className));
+    }
+    const blockingPackage = flowExcludePackagePrefixes()
+      .filter(rule => flowPrefixMatches(point.className, rule))
+      .sort((a, b) => b.length - a.length)[0];
+    if (blockingPackage) {
+      const choice = await vscode.window.showWarningMessage(
+        `${point.simpleName}.java is excluded by package rule ${blockingPackage}. Remove that exclusion so this capture point can run?`,
+        'Remove Exclusion & Add Capture Point',
+        'Cancel'
+      );
+      if (choice !== 'Remove Exclusion & Add Capture Point') return;
+      await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => values.filter(v => v !== blockingPackage));
+    }
+    await updateFlowPrefixSetting('flowClassNames', values => [...values, point.className]);
+  }
+
+  await updateReplayCapturePoints(values => exists ? values.filter(value => value !== point.key) : [...values, point.key]);
+  vscode.window.setStatusBarMessage(
+    exists ? `Removed Replay Capture Point at ${point.simpleName}:${point.line}` : `Replay Capture Point added at ${point.simpleName}:${point.line} — deep state will be captured on the next run`,
+    2600
+  );
+}
+
+async function removeReplayCapturePoint(item) {
+  const key = String(item?.capturePointKey || item?.key || '').trim();
+  if (!key) return;
+  await updateReplayCapturePoints(values => values.filter(value => value !== key));
 }
 
 async function discoverReplayJavaCandidates() {
@@ -1468,6 +1572,10 @@ def cgtlFlowAgent = System.getProperty("cgtl.flow.agent")
 def cgtlFlowPackages = System.getProperty("cgtl.flow.packages", "")
 def cgtlFlowExcludes = System.getProperty("cgtl.flow.excludes", "")
 def cgtlFlowStateAdapters = System.getProperty("cgtl.flow.stateAdapters", "")
+def cgtlFlowCapturePoints = System.getProperty("cgtl.flow.capturePoints", "")
+def cgtlFlowCapturePointMaxDepth = System.getProperty("cgtl.flow.capturePoint.maxDepth", "8")
+def cgtlFlowCapturePointMaxFields = System.getProperty("cgtl.flow.capturePoint.maxFields", "200")
+def cgtlFlowCapturePointMaxItems = System.getProperty("cgtl.flow.capturePoint.maxCollectionItems", "200")
 def cgtlFlowLineState = System.getProperty("cgtl.flow.lineState", "receiver")
 def cgtlFlowLineStateMaxDepth = System.getProperty("cgtl.flow.lineState.maxDepth", "2")
 def cgtlFlowLineStateMaxFields = System.getProperty("cgtl.flow.lineState.maxFields", "30")
@@ -1484,6 +1592,10 @@ allprojects { project ->
             testTask.systemProperty("cgtl.flow.packages", cgtlFlowPackages)
             testTask.systemProperty("cgtl.flow.excludes", cgtlFlowExcludes)
             testTask.systemProperty("cgtl.flow.stateAdapters", cgtlFlowStateAdapters)
+            testTask.systemProperty("cgtl.flow.capturePoints", cgtlFlowCapturePoints)
+            testTask.systemProperty("cgtl.flow.capturePoint.maxDepth", cgtlFlowCapturePointMaxDepth)
+            testTask.systemProperty("cgtl.flow.capturePoint.maxFields", cgtlFlowCapturePointMaxFields)
+            testTask.systemProperty("cgtl.flow.capturePoint.maxCollectionItems", cgtlFlowCapturePointMaxItems)
             testTask.systemProperty("cgtl.flow.lineState", cgtlFlowLineState)
             testTask.systemProperty("cgtl.flow.lineState.maxDepth", cgtlFlowLineStateMaxDepth)
             testTask.systemProperty("cgtl.flow.lineState.maxFields", cgtlFlowLineStateMaxFields)
@@ -4082,6 +4194,7 @@ let replayTimelineProvider;
 let replayExecutedDecoration;
 let replayCurrentDecoration;
 let replayInlineValueDecoration;
+let replayCapturePointDecoration;
 let replayInlineValuesEnabled = true;
 let replayUpToHereEnabled = false;
 let replayUpToHereLocked = false;
@@ -4743,6 +4856,15 @@ class ReplayInstrumentationProvider {
       rulesRoot.tooltip = 'Instrumentation rules applied to the next Code Flow run.';
       roots.push(rulesRoot);
 
+      const capturePoints = replayCapturePoints().map(parseReplayCapturePoint).filter(Boolean);
+      const captureRoot = new vscode.TreeItem(`Capture Points (${capturePoints.length})`, capturePoints.length ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+      captureRoot.contextValue = 'replayCapturePointsRoot';
+      captureRoot.__kind = 'capturePointsRoot';
+      captureRoot.iconPath = new vscode.ThemeIcon('record');
+      captureRoot.description = capturePoints.length ? 'deep state snapshots' : 'none';
+      captureRoot.tooltip = 'Explicit source locations where the next Replay run captures a high-fidelity deep state snapshot.';
+      roots.push(captureRoot);
+
       const adapterClasses = flowStateAdapterClasses();
       const adaptersRoot = new vscode.TreeItem(`State Adapters (${adapterClasses.length} custom)`, vscode.TreeItemCollapsibleState.Expanded);
       adaptersRoot.contextValue = 'replayStateAdaptersRoot';
@@ -4791,6 +4913,22 @@ class ReplayInstrumentationProvider {
         ...excludeFiles.map(value => this.ruleItem(value, 'file', true))
       ];
     }
+    if (parent.__kind === 'capturePointsRoot') {
+      return replayCapturePoints().map(parseReplayCapturePoint).filter(Boolean).map(point => {
+        const simple = point.className.split('.').pop() || point.className;
+        const item = new vscode.TreeItem(`${simple}:${point.line}`, vscode.TreeItemCollapsibleState.None);
+        item.description = point.className.slice(0, Math.max(0, point.className.length - simple.length - 1));
+        item.iconPath = new vscode.ThemeIcon('record');
+        item.tooltip = `${point.className}:${point.line}\nDeep receiver/local state is captured every time this source line executes.`;
+        item.contextValue = 'replayCapturePoint';
+        item.__kind = 'capturePoint';
+        item.capturePointKey = point.key;
+        item.className = point.className;
+        item.line = point.line;
+        return item;
+      });
+    }
+
     if (parent.__kind === 'stateAdaptersRoot') {
       const builtIn = new vscode.TreeItem('Built-in adapters', vscode.TreeItemCollapsibleState.None);
       builtIn.description = 'Path, File, URI/URL, Optional, UUID, java.time, Pattern, Locale, Currency, socket address';
@@ -4952,6 +5090,15 @@ class ReplayStateProvider {
     const state=nativeReplaySession.stateForLine(e);
     const groups=[];
 
+    if (e.capturePoint === true) {
+      const captureDepth = Number(e.capturePointDepth || 0);
+      const captured = new vscode.TreeItem(`◆ DEEP CAPTURE${captureDepth > 0 ? ` · depth ${captureDepth}` : ''}`, vscode.TreeItemCollapsibleState.None);
+      captured.description = `${e.sourceFile || path.basename(e.sourcePath || '')}:${e.line}`;
+      captured.iconPath = new vscode.ThemeIcon('record');
+      captured.tooltip = `This event contains a high-fidelity Replay Capture Point snapshot${captureDepth > 0 ? ` captured with max depth ${captureDepth}` : ''}.`;
+      groups.push(captured);
+    }
+
     if (state.receiver !== undefined) {
       groups.push(new ReplayStateGroupItem('this', 'THIS', [['this', state.receiver]], replayValueLabel(state.receiver)));
     }
@@ -5024,7 +5171,7 @@ class ReplayTimelineProvider {
     const radius = 250;
     const start = searching ? 0 : Math.max(0, session.position - radius);
     const end = searching ? session.lineEvents.length : Math.min(session.lineEvents.length, session.position + radius + 1);
-    const events=session.lineEvents.slice(start,end).map((e,offset)=>({index:start+offset,sequence:e.sequence??e.__nativeIndex,file:e.sourceFile||path.basename(e.sourcePath||''),line:Number(e.line||0),method:`${replaySimpleClass(e)}.${e.methodName||'?'}()`,text:replaySourceText(e)}));
+    const events=session.lineEvents.slice(start,end).map((e,offset)=>({index:start+offset,sequence:e.sequence??e.__nativeIndex,file:e.sourceFile||path.basename(e.sourcePath||''),line:Number(e.line||0),method:`${e.capturePoint===true?'◆ ':''}${replaySimpleClass(e)}.${e.methodName||'?'}()`,text:replaySourceText(e),capturePoint:e.capturePoint===true}));
     const payload=JSON.stringify({events,position:session.position,total:session.lineEvents.length,title:session.result?.displayName||'Test',query:this.searchQuery}).replace(/</g,'\\u003c');
     this.view.webview.html=`<!doctype html><html><head><meta charset="UTF-8"><style>
       *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-panel-background,var(--vscode-editor-background));overflow:hidden}.app{height:100%;display:grid;grid-template-rows:auto 1fr}.bar{display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-editor-background) 72%,transparent)}input{flex:1;min-width:120px;height:27px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:2px;padding:4px 8px;outline:none}input:focus{border-color:var(--vscode-focusBorder)}.status{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}.rows{overflow:auto;font-family:var(--vscode-editor-font-family);font-size:12px;padding:2px 0}.row{position:relative;width:100%;display:grid;grid-template-columns:48px minmax(0,1fr);grid-template-areas:'seq head' '. code';column-gap:10px;row-gap:3px;padding:6px 10px 7px;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 42%,transparent);background:transparent;color:inherit;text-align:left;cursor:pointer;min-height:39px}.row:hover{background:var(--vscode-list-hoverBackground)}.row.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.row.active:before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--vscode-focusBorder)}.seq{grid-area:seq;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:1px}.head{grid-area:head;display:flex;align-items:baseline;gap:8px;min-width:0}.method{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;color:var(--vscode-foreground)}.loc{flex:0 1 auto;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground);font-size:11px}.loc:before{content:'·';margin-right:8px;opacity:.7}.code{grid-area:code;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--vscode-editor-foreground);opacity:.82;font-size:11px}.row.active .seq,.row.active .loc,.row.active .code{color:inherit;opacity:.86}@media(max-width:620px){.row{grid-template-columns:40px minmax(0,1fr);column-gap:7px;padding-left:8px;padding-right:8px}.loc{max-width:38%}.bar{padding-left:8px;padding-right:8px}}.hidden{display:none}</style></head><body><div class="app"><div class="bar"><input id="search" placeholder="Search replay — AND terms separated by spaces…"><span id="status" class="status"></span></div><div id="rows" class="rows"></div></div><script>
@@ -5139,6 +5286,7 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(editor => {
     const active = !!editor && !!debugEvaluateScratchUri && editor.document.uri.toString() === debugEvaluateScratchUri.toString();
     vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', active);
+    refreshReplayCapturePointDecorations();
   }));
   context.subscriptions.push(vscode.workspace.onDidCreateFiles(() => projectTestsProvider.refresh()));
   context.subscriptions.push(vscode.workspace.onDidDeleteFiles(() => projectTestsProvider.refresh()));
@@ -5176,17 +5324,25 @@ module.exports.activate = async function patchedActivate(context) {
       margin: '0 0 0 0.3em'
     }
   });
+  replayCapturePointDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: false,
+    gutterIconPath: vscode.Uri.joinPath(context.extensionUri, 'resources', 'capture-point.svg'),
+    gutterIconSize: 'contain',
+    overviewRulerColor: new vscode.ThemeColor('debugIcon.breakpointForeground'),
+    overviewRulerLane: vscode.OverviewRulerLane.Left
+  });
   replayFilesProvider = new ReplayFilesProvider();
   instrumentationProvider = new ReplayInstrumentationProvider();
   replayStateProvider = new ReplayStateProvider();
   replayCallStackProvider = new ReplayCallStackProvider();
   replayTimelineProvider = new ReplayTimelineProvider();
-  context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration, replayInlineValueDecoration);
+  context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration, replayInlineValueDecoration, replayCapturePointDecoration);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayFiles', replayFilesProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayInstrumentation', instrumentationProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayState', replayStateProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayCallStack', replayCallStackProvider));
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('compositeGradleTests.replayTimeline', replayTimelineProvider, { webviewOptions: { retainContextWhenHidden: true } }));
+  refreshReplayCapturePointDecorations();
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.toggleInlineValues', async () => {
     replayInlineValuesEnabled = !replayInlineValuesEnabled;
     await context.workspaceState.update('compositeGradleTests.replay.inlineValuesEnabled', replayInlineValuesEnabled);
@@ -5243,6 +5399,8 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.last', () => nativeReplaySession?.last()));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previousOccurrence', () => nativeReplaySession?.moveOccurrence(-1)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.nextOccurrence', () => nativeReplaySession?.moveOccurrence(1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.capturePoint.toggle', toggleReplayCapturePoint));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.capturePoint.remove', removeReplayCapturePoint));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeCurrentFile', includeCurrentReplayFile));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeCurrentPackage', includeCurrentReplayPackage));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addRule', async () => {
@@ -5415,7 +5573,10 @@ module.exports.activate = async function patchedActivate(context) {
     nativeReplaySession.seekToSourceLine(editor.document.uri.fsPath, line);
   }));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
-    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowClassNames') || event.affectsConfiguration('compositeGradleTests.flowExcludePackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowExcludeClassNames') || event.affectsConfiguration('compositeGradleTests.flowStateAdapterClasses')) instrumentationProvider?.refresh();
+    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowClassNames') || event.affectsConfiguration('compositeGradleTests.flowExcludePackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowExcludeClassNames') || event.affectsConfiguration('compositeGradleTests.flowStateAdapterClasses') || event.affectsConfiguration('compositeGradleTests.replayCapturePoints')) {
+      instrumentationProvider?.refresh();
+      refreshReplayCapturePointDecorations();
+    }
   }));
   context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(editors => { if(nativeReplaySession)for(const editor of editors)applyReplayDecorations(editor); }));
 };

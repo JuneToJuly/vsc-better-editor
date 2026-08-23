@@ -1,3 +1,10 @@
+
+## 0.4.39
+
+- Enforces Replay state `maxDepth` as a strict object-graph boundary for objects, maps, collections, arrays, and adapter-backed values.
+- Keeps normal Replay depth and Capture Point depth independent: normal snapshots stay shallow while explicit Capture Points may use a deeper configured limit.
+- Capture Point events now record their effective capture depth, and the State view labels them as `◆ DEEP CAPTURE · depth N`.
+
 # CGTL 0.4.35
 
 # Composite Gradle Test Launcher
@@ -427,3 +434,7 @@ Configure `compositeGradleTests.flowLineState` as `off`, `receiver`, `shallow`, 
 - Clicking an executed source line opens Replay at its first occurrence.
 - Source gutter shows execution occurrence counts.
 - Previous/next occurrence navigation for repeated source lines.
+
+## Replay Capture Points (0.4.38)
+
+Replay Capture Points are debugger-like source markers for high-fidelity state capture without pausing the JVM. Place the cursor on a Java source line and run **Replay: Toggle Capture Point**. The source file is automatically included in Replay instrumentation if necessary. On the next Code Flow / Analyze run, every execution of that source line records a deeper self-contained receiver/local snapshot using the `replayCapturePointMaxDepth`, `replayCapturePointMaxFields`, and `replayCapturePointMaxCollectionItems` limits. Capture points appear in the editor gutter and under **Instrumentation > Capture Points** and can be removed from either location.
