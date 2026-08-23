@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'local.cgtl'
-version = '0.3.21'
+version = '0.4.24'
 
 def byteBuddyVersion = providers.gradleProperty('byteBuddyVersion').getOrElse('1.18.7')
 def dependencyRepository = providers.gradleProperty('dependencyRepository').orNull
@@ -47,7 +47,8 @@ tasks.named('jar') {
         def required = [
             'local/cgtl/flow/BootstrapAgent.class',
             'local/cgtl/flow/FlowAgent.class',
-            'local/cgtl/flow/FlowAgent$Recorder.class'
+            'local/cgtl/flow/FlowAgent$Recorder.class',
+            'local/cgtl/flow/SnapshotAdapters.class'
         ]
         def zip = new java.util.zip.ZipFile(jarFile)
         try {

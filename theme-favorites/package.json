@@ -1,0 +1,55 @@
+{
+  "name": "theme-favorites",
+  "displayName": "Theme Favorites",
+  "description": "Rapidly preview every installed VS Code theme, mark favorites, and cycle through them.",
+  "version": "0.3.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:themeFavorites.reviewThemes",
+    "onCommand:themeFavorites.toggleFavorite",
+    "onCommand:themeFavorites.pickFavorite",
+    "onCommand:themeFavorites.nextFavorite",
+    "onCommand:themeFavorites.previousFavorite",
+    "onCommand:themeFavorites.manageFavorites"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "themeFavorites.reviewThemes", "title": "Theme Favorites: Review All Installed Themes", "icon": "$(preview)" },
+      { "command": "themeFavorites.toggleFavorite", "title": "Theme Favorites: Toggle Current Theme Favorite", "icon": "$(star-full)" },
+      { "command": "themeFavorites.pickFavorite", "title": "Theme Favorites: Switch to Favorite Theme" },
+      { "command": "themeFavorites.nextFavorite", "title": "Theme Favorites: Next Favorite Theme" },
+      { "command": "themeFavorites.previousFavorite", "title": "Theme Favorites: Previous Favorite Theme" },
+      { "command": "themeFavorites.manageFavorites", "title": "Theme Favorites: Remove Favorites" }
+    ],
+    "keybindings": [
+      { "command": "themeFavorites.reviewThemes", "key": "ctrl+alt+t", "mac": "cmd+alt+t" },
+      { "command": "themeFavorites.nextFavorite", "key": "ctrl+alt+]", "mac": "cmd+alt+]" },
+      { "command": "themeFavorites.previousFavorite", "key": "ctrl+alt+[", "mac": "cmd+alt+[" }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "themeFavorites.reviewThemes" },
+        { "command": "themeFavorites.toggleFavorite" },
+        { "command": "themeFavorites.pickFavorite" },
+        { "command": "themeFavorites.nextFavorite" },
+        { "command": "themeFavorites.previousFavorite" },
+        { "command": "themeFavorites.manageFavorites" }
+      ]
+    },
+    "configuration": {
+      "title": "Theme Favorites",
+      "properties": {
+        "themeFavorites.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when toggling the current theme as a favorite."
+        }
+      }
+    }
+  },
+  "scripts": { "package": "vsce package" },
+  "devDependencies": { "@vscode/vsce": "^3.6.0" }
+}

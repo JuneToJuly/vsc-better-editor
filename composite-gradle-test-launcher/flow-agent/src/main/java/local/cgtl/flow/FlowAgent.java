@@ -63,6 +63,7 @@ public final class FlowAgent {
       Object transformer = Proxy.newProxyInstance(loader, new Class<?>[]{transformerType}, handler);
       call(call(builder, "transform", transformer), "installOn", inst);
       System.err.println("[CGTL FLOW] Snapshot agent installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
+      System.err.println("[CGTL FLOW] Snapshot agent exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
     } catch (Throwable t) {
       System.err.println("[CGTL FLOW] Agent disabled: " + t);
       t.printStackTrace();
@@ -78,6 +79,33 @@ public final class FlowAgent {
       matcher = call(matcher, "or", staticCall(matchers, "nameStartsWith", pkg + "."));
       matcher = call(matcher, "or", staticCall(matchers, "named", pkg));
     }
+    String excludes = System.getProperty("cgtl.flow.excludes", "").trim();
+    Object excluded = staticCall(matchers, "none");
+    for (String token : excludes.split(",")) {
+      String rule = token.trim();
+      if (rule.isEmpty()) continue;
+      if (rule.startsWith("package:")) {
+        String pkg = rule.substring("package:".length()).trim();
+        if (!pkg.isEmpty()) {
+          excluded = call(excluded, "or", staticCall(matchers, "nameStartsWith", pkg + "."));
+          excluded = call(excluded, "or", staticCall(matchers, "named", pkg));
+        }
+      } else if (rule.startsWith("class:")) {
+        String cls = rule.substring("class:".length()).trim();
+        if (!cls.isEmpty()) {
+          excluded = call(excluded, "or", staticCall(matchers, "named", cls));
+          excluded = call(excluded, "or", staticCall(matchers, "nameStartsWith", cls + "$"));
+        }
+      }
+    }
+    String adapterClasses = System.getProperty("cgtl.flow.stateAdapters", "").trim();
+    for (String token : adapterClasses.split(",")) {
+      String adapterClass = token.trim();
+      if (adapterClass.isEmpty()) continue;
+      excluded = call(excluded, "or", staticCall(matchers, "named", adapterClass));
+      excluded = call(excluded, "or", staticCall(matchers, "nameStartsWith", adapterClass + "$"));
+    }
+    matcher = call(matcher, "and", staticCall(matchers, "not", excluded));
     // Test classes within the selected package are intentionally included.
     // This lets ordered replay begin at the actual test line that initiates the call.
     matcher = call(matcher, "and", staticCall(matchers, "not", staticCall(matchers, "isInterface")));
@@ -220,6 +248,8 @@ public final class FlowAgent {
       if (value instanceof String || value instanceof Character || value instanceof Enum<?>) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
       if (value instanceof Number || value instanceof Boolean) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(String.valueOf(value)) + "}";
       Class<?> type = value.getClass();
+      SnapshotAdapters.Adapted adapted = SnapshotAdapters.adapt(value);
+      if (adapted != null) return adaptedSnapshot(type, adapted, level, seen);
       if (type.isArray()) { int total = Array.getLength(value); int length = Math.min(total, snapshotMaxItems); StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"items\":["); for (int i=0;i<length;i++){if(i>0)out.append(',');out.append(snapshot(Array.get(value,i),level+1,seen));} return out.append("],\"size\":").append(total).append('}').toString(); }
       if (seen.put(value, Boolean.TRUE) != null) return "{\"type\":" + quote(type.getName()) + ",\"value\":\"<cycle>\"}";
       if (value instanceof Map<?,?> map) { StringBuilder out = new StringBuilder("{\"type\":" + quote(type.getName()) + ",\"entries\":["); int i=0; for (Map.Entry<?,?> entry : map.entrySet()) { if (i++ >= snapshotMaxItems) break; if (i > 1) out.append(','); out.append("{\"key\":").append(snapshot(entry.getKey(), level+1, seen)).append(",\"value\":").append(snapshot(entry.getValue(), level+1, seen)).append('}'); } return out.append("],\"size\":").append(map.size()).append('}').toString(); }
@@ -236,6 +266,25 @@ public final class FlowAgent {
         }
       }
       return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + ",\"fields\":{" + fields + "}}";
+    }
+
+    private static String adaptedSnapshot(Class<?> type, SnapshotAdapters.Adapted adapted, int level, IdentityHashMap<Object, Boolean> seen) {
+      Object adaptedValue = SnapshotAdapters.sanitizedAdapterValue(adapted);
+      StringBuilder out = new StringBuilder("{\"type\":").append(quote(type.getName())).append(",\"adapter\":").append(quote(adapted.adapter));
+      if (adapted.display != null) out.append(",\"value\":").append(quote(limit(adapted.display, 500)));
+      if (adaptedValue instanceof Map<?,?> map) out.append(",\"fields\":").append(structuredJson(map, level + 1, seen));
+      else if (adaptedValue instanceof Collection<?> || (adaptedValue != null && adaptedValue.getClass().isArray())) out.append(",\"items\":").append(structuredJson(adaptedValue, level + 1, seen));
+      else if (adapted.display == null) out.append(",\"value\":").append(structuredJson(adaptedValue, level + 1, seen));
+      return out.append('}').toString();
+    }
+
+    private static String structuredJson(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+      if (value == null) return "null";
+      if (SnapshotAdapters.isSimple(value)) return "{\"type\":" + quote(value.getClass().getName()) + ",\"value\":" + quote(limit(String.valueOf(value), 500)) + "}";
+      if (value instanceof Map<?,?> map) { StringBuilder out=new StringBuilder("{"); int i=0; for(Map.Entry<?,?> e:map.entrySet()){if(i++>=snapshotMaxFields)break;if(i>1)out.append(',');out.append(quote(String.valueOf(e.getKey()))).append(':').append(structuredJson(e.getValue(),level+1,seen));} return out.append('}').toString(); }
+      if (value instanceof Collection<?> collection) { StringBuilder out=new StringBuilder("["); int i=0; for(Object item:collection){if(i++>=snapshotMaxItems)break;if(i>1)out.append(',');out.append(structuredJson(item,level+1,seen));} return out.append(']').toString(); }
+      if (value.getClass().isArray()) { StringBuilder out=new StringBuilder("["); int n=Math.min(Array.getLength(value),snapshotMaxItems); for(int i=0;i<n;i++){if(i>0)out.append(',');out.append(structuredJson(Array.get(value,i),level+1,seen));} return out.append(']').toString(); }
+      return snapshot(value, level, seen);
     }
 
     private static String throwableSnapshot(Throwable thrown) {

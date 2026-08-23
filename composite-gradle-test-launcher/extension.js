@@ -291,7 +291,12 @@ async function createInvocation(documentUri, target, debug) {
     classDisplayName: target.classDisplayName || target.displayName,
     targetLine: target.range?.start?.line,
     targetCharacter: target.range?.start?.character,
-    captureCoverage: config.get('captureExecutedCode', false)
+    captureCoverage: config.get('captureExecutedCode', false),
+    // Instrumentation packages are intentionally workspace-wide. Replay can cross
+    // composite projects, so do not scope this list to the test source folder.
+    // Folder-scoped reads introduced a regression where an empty folder value
+    // shadowed the workspace package list.
+    flowConfiguredPrefixes: flowConfiguredInstrumentationPrefixes()
   };
 }
 
@@ -733,6 +738,29 @@ function refreshRuntimeInitScripts(invocation) {
 }
 
 async function executeInvocation(invocation) {
+  // Replay line numbers come from the bytecode Gradle compiles on disk. If the editor
+  // contains unsaved Java changes, the captured line table can point at a different
+  // line than the source currently visible in VS Code. Save dirty Java buffers before
+  // launching so the compiled source and the Replay editor always use the same text.
+  const dirtyJavaDocuments = vscode.workspace.textDocuments.filter(document =>
+    document.isDirty && !document.isUntitled && document.uri.scheme === 'file'
+      && document.languageId === 'java'
+  );
+  if (dirtyJavaDocuments.length) {
+    const failed = [];
+    for (const document of dirtyJavaDocuments) {
+      try {
+        if (!(await document.save())) failed.push(document.uri.fsPath);
+      } catch (_) {
+        failed.push(document.uri.fsPath);
+      }
+    }
+    if (failed.length) {
+      throw new Error(`Code Flow could not save ${failed.length} modified Java file${failed.length === 1 ? '' : 's'} before running. Save the files and try again.`);
+    }
+    output?.appendLine(`[CGTL FLOW] Saved ${dirtyJavaDocuments.length} modified Java file${dirtyJavaDocuments.length === 1 ? '' : 's'} before capture so Replay line numbers match the editor.`);
+  }
+
   // Init scripts live in VS Code global storage, which can be cleared independently
   // of saved/repeated invocations. Recreate them immediately before spawning Gradle
   // and replace any stale paths retained by Repeat Last or a copied invocation.
@@ -784,7 +812,9 @@ async function executeInvocation(invocation) {
     const flowArgs = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
     const taskIndex = flowArgs.indexOf(invocation.task);
     const testPackage = String(invocation.classFilter || invocation.filter || '').split('.').slice(0, -1).join('.');
-    const configuredPrefixes = flowPackagePrefixes();
+    const configuredPrefixes = Array.isArray(invocation.flowConfiguredPrefixes)
+      ? invocation.flowConfiguredPrefixes.map(normalizeFlowPrefix).filter(Boolean)
+      : flowConfiguredInstrumentationPrefixes();
     const tracedPrefixes = [...new Set([testPackage, ...configuredPrefixes].map(normalizeFlowPrefix).filter(Boolean))];
     if (!tracedPrefixes.length) {
       throw new Error('Code Flow could not determine a package to trace. Configure compositeGradleTests.flowPackagePrefixes.');
@@ -795,17 +825,43 @@ async function executeInvocation(invocation) {
       `-Dcgtl.flow.output=${flowFile}`,
       `-Dcgtl.flow.agent=${agentJar}`,
       `-Dcgtl.flow.packages=${tracedPrefixes.join(',')}`,
+      `-Dcgtl.flow.excludes=${flowEncodedExclusions().join(',')}`,
+      `-Dcgtl.flow.stateAdapters=${flowStateAdapterClasses().join(',')}`,
       `-Dcgtl.flow.lineState=${String(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineState', 'receiver') || 'receiver')}`,
       `-Dcgtl.flow.lineState.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxDepth', 2) || 2)}`,
       `-Dcgtl.flow.lineState.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxFields', 30) || 30)}`,
       `-Dcgtl.flow.lineState.maxCollectionItems=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxCollectionItems', 20) || 20)}`
     );
-    invocation = { ...invocation, flowDir, flowFile, captureFlow: true, args: flowArgs };
+    invocation = {
+      ...invocation,
+      flowDir,
+      flowFile,
+      captureFlow: true,
+      flowAutomaticPackage: testPackage,
+      flowConfiguredPrefixes: configuredPrefixes,
+      flowTracedPrefixes: tracedPrefixes,
+      args: flowArgs
+    };
   }
   lastInvocation = invocation;
   output.clear();
   output.appendLine(`> ${formatCommand(invocation.executable, invocation.args)}`);
   output.appendLine(`cwd: ${invocation.cwd}`);
+  if (invocation.captureFlow) {
+    output.appendLine(`[CGTL FLOW] Automatic package: ${invocation.flowAutomaticPackage || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Instrumentation packages: ${flowPackagePrefixes().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Instrumentation files/classes: ${flowClassNames().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Excluded packages: ${flowExcludePackagePrefixes().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Excluded files/classes: ${flowExcludeClassNames().join(', ') || '<none>'}`);
+    output.appendLine(`[CGTL FLOW] Custom state adapters: ${flowStateAdapterClasses().join(', ') || '<none>'}`);
+    for (const entry of flowPackagePrefixConfiguration().scopes) {
+      output.appendLine(`[CGTL FLOW] Package config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
+    }
+    for (const entry of flowClassNameConfiguration().scopes) {
+      output.appendLine(`[CGTL FLOW] File/class config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
+    }
+    output.appendLine(`[CGTL FLOW] Effective instrumentation: ${(invocation.flowTracedPrefixes || []).join(', ') || '<none>'}`);
+  }
   output.appendLine('');
   if (invocation.showOutput) output.show(true);
 
@@ -954,64 +1010,50 @@ async function createAnalysisFingerprint(invocation) {
 }
 
 async function executeCombinedAnalysis(baseInvocation) {
+  // Analyze used to execute the test twice: once under JaCoCo for a code report
+  // and once under the Replay agent for ordered execution/state capture. Replay now
+  // derives executed source lines directly from its LINE events, so a second test
+  // execution is both redundant and potentially misleading for stateful tests.
   const fingerprintBefore = await createAnalysisFingerprint(baseInvocation);
-  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: generating code report…');
-  const reportInvocation = { ...baseInvocation, captureCoverage: true, captureFlow: false, analysisMode: 'report' };
-  const report = await executeInvocationAndWait(reportInvocation);
-  const reportCompleted = report.status === 'passed' || report.status === 'failed';
-  if (!reportCompleted) {
-    await recordResult(report);
-    showResultsView(report);
-    throw new Error('Code Report could not complete, so Analyze could not continue. See the recorded test result.');
-  }
-  const fingerprintMiddle = await createAnalysisFingerprint(baseInvocation);
-  if (fingerprintMiddle !== fingerprintBefore) throw new Error('Source files changed during Code Report. Run Analyze again.');
-  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: capturing code flow…');
-  const flowInvocation = { ...baseInvocation, captureCoverage: false, captureFlow: true, analysisMode: 'flow' };
-  const flow = await executeInvocationAndWait(flowInvocation);
-  const flowCompleted = flow.status === 'passed' || flow.status === 'failed';
-  if (!flowCompleted) {
+  vscode.window.setStatusBarMessage('$(sync~spin) Composite Gradle: analyzing execution…');
+
+  const analysisInvocation = {
+    ...baseInvocation,
+    captureCoverage: false,
+    captureFlow: true,
+    analysisMode: 'analyze'
+  };
+  const flow = await executeInvocationAndWait(analysisInvocation);
+  const completed = flow.status === 'passed' || flow.status === 'failed';
+  if (!completed) {
     await recordResult(flow);
     showResultsView(flow);
-    throw new Error('Code Flow could not complete, so Analyze could not merge the result. See the recorded test result.');
+    throw new Error('Analyze could not complete. See the recorded test result.');
   }
+
   const fingerprintAfter = await createAnalysisFingerprint(baseInvocation);
-  if (fingerprintAfter !== fingerprintBefore) throw new Error('Source files changed during Code Flow. Run Analyze again.');
-  const combined = {
+  if (fingerprintAfter !== fingerprintBefore) {
+    throw new Error('Source files changed during Analyze. Run Analyze again.');
+  }
+
+  const analyzed = {
     ...flow,
     id: `${Date.now()}-analysis-${Math.random().toString(16).slice(2)}`,
-    displayName: flow.displayName || report.displayName,
-    status: flow.status === 'passed' && report.status === 'passed' ? 'passed' : (flow.status === 'failed' || report.status === 'failed' ? 'failed' : flow.status),
-    durationMs: Number(report.durationMs || 0) + Number(flow.durationMs || 0),
-    startedAt: report.startedAt,
-    finishedAt: flow.finishedAt,
-    executedCode: report.executedCode || [],
-    flowEvents: flow.flowEvents || [],
-    summary: report.summary || flow.summary,
-    testOutput: [report.testOutput, flow.testOutput].filter(Boolean).join('\n'),
-    failure: report.failure || flow.failure,
-    failures: (report.failures && report.failures.length ? report.failures : flow.failures) || [],
-    events: (report.events && report.events.length ? report.events : flow.events) || [],
-    exitCode: report.exitCode !== 0 ? report.exitCode : flow.exitCode,
-    reportStatus: report.status,
-    flowStatus: flow.status,
-    coverageCaptured: true,
+    coverageCaptured: false,
     flowCaptured: true,
     analysisMode: 'analyze',
     analysisFingerprint: fingerprintBefore,
-    reportRunId: report.id,
     flowRunId: flow.id,
-    output: `[CODE REPORT]\n${report.output || ''}\n\n[CODE FLOW]\n${flow.output || ''}`,
-    command: `${report.command}\n${flow.command}`,
     invocation: sanitizeInvocation(baseInvocation)
   };
-  await recordResult(combined);
-  if (combined.executedCode.length) await updateCoverageIndex(combined);
-  latestResults.set(combined.filter, combined);
-  showResultsView(combined);
-  const analysisIcon = combined.status === 'failed' ? '$(testing-failed-icon)' : '$(check)';
-  const analysisLabel = combined.status === 'failed' ? 'Analysis captured failed test' : 'Analysis complete';
-  vscode.window.setStatusBarMessage(`${analysisIcon} ${analysisLabel}: ${combined.displayName}`, combined.status === 'failed' ? 8000 : 5000);
+
+  await recordResult(analyzed);
+  if (analyzed.executedCode.length) await updateCoverageIndex(analyzed);
+  latestResults.set(analyzed.filter, analyzed);
+  showResultsView(analyzed);
+  const analysisIcon = analyzed.status === 'failed' ? '$(testing-failed-icon)' : '$(check)';
+  const analysisLabel = analyzed.status === 'failed' ? 'Analysis captured failed test' : 'Analysis complete';
+  vscode.window.setStatusBarMessage(`${analysisIcon} ${analysisLabel}: ${analyzed.displayName}`, analyzed.status === 'failed' ? 8000 : 5000);
 }
 
 function normalizeFlowPrefix(value) {
@@ -1021,12 +1063,220 @@ function normalizeFlowPrefix(value) {
     .replace(/\.+$/, '');
 }
 
-function flowPackagePrefixes() {
-  const config = vscode.workspace.getConfiguration('compositeGradleTests');
-  const configured = config.get('flowPackagePrefixes', []);
-  const values = Array.isArray(configured) ? configured : String(configured || '').split(',');
-  return [...new Set(values.map(normalizeFlowPrefix).filter(Boolean))];
+function asFlowPrefixValues(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : String(value || '').split(',');
 }
+
+function additiveFlowSettingConfiguration(key) {
+  // Instrumentation rules are additive across VS Code scopes. A package/file
+  // configured at workspace scope must not disappear because a folder has an
+  // empty or stale value for the same setting.
+  const values = [];
+  const scopes = [];
+  const seenScopes = new Set();
+
+  const collectInspect = (inspect, label) => {
+    if (!inspect) return;
+    const entries = [
+      ['default', inspect.defaultValue],
+      ['global', inspect.globalValue],
+      ['workspace', inspect.workspaceValue],
+      ['folder', inspect.workspaceFolderValue]
+    ];
+    for (const [scope, raw] of entries) {
+      const normalized = asFlowPrefixValues(raw).map(normalizeFlowPrefix).filter(Boolean);
+      if (!normalized.length) continue;
+      values.push(...normalized);
+      const scopeKey = `${label}:${scope}:${normalized.join(',')}`;
+      if (!seenScopes.has(scopeKey)) {
+        seenScopes.add(scopeKey);
+        scopes.push({ label, scope, values: normalized });
+      }
+    }
+  };
+
+  collectInspect(vscode.workspace.getConfiguration('compositeGradleTests').inspect(key), 'workspace');
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    collectInspect(vscode.workspace.getConfiguration('compositeGradleTests', folder.uri).inspect(key), folder.name);
+  }
+  return { values: [...new Set(values)], scopes };
+}
+
+function flowPackagePrefixConfiguration() {
+  return additiveFlowSettingConfiguration('flowPackagePrefixes');
+}
+
+function flowPackagePrefixes() {
+  return flowPackagePrefixConfiguration().values;
+}
+
+function flowClassNameConfiguration() {
+  return additiveFlowSettingConfiguration('flowClassNames');
+}
+
+function flowClassNames() {
+  return flowClassNameConfiguration().values;
+}
+
+function flowStateAdapterClasses() {
+  return additiveFlowSettingConfiguration('flowStateAdapterClasses').values;
+}
+
+function flowConfiguredInstrumentationPrefixes() {
+  return [...new Set([...flowPackagePrefixes(), ...flowClassNames()])];
+}
+
+function replayInstrumentationResource() {
+  const replayPath = nativeReplaySession?.currentEvent?.sourcePath
+    || nativeReplaySession?.lineEvents?.[nativeReplaySession?.position]?.sourcePath;
+  if (replayPath) return vscode.Uri.file(replayPath);
+  return vscode.window.activeTextEditor?.document?.uri;
+}
+
+function flowExcludePackagePrefixConfiguration() {
+  return additiveFlowSettingConfiguration('flowExcludePackagePrefixes');
+}
+
+function flowExcludePackagePrefixes() {
+  return flowExcludePackagePrefixConfiguration().values;
+}
+
+function flowExcludeClassNameConfiguration() {
+  return additiveFlowSettingConfiguration('flowExcludeClassNames');
+}
+
+function flowExcludeClassNames() {
+  return flowExcludeClassNameConfiguration().values;
+}
+
+function flowEncodedExclusions() {
+  return [
+    ...flowExcludePackagePrefixes().map(value => `package:${value}`),
+    ...flowExcludeClassNames().map(value => `class:${value}`)
+  ];
+}
+
+function flowPrefixMatches(className, prefix) {
+  const name = String(className || '');
+  const normalized = normalizeFlowPrefix(prefix);
+  return !!normalized && (name === normalized || name.startsWith(normalized + '.') || name.startsWith(normalized + '$'));
+}
+
+function flowInstrumentationStatus(className) {
+  const name = normalizeFlowPrefix(className);
+  const excludedFileRule = flowExcludeClassNames().find(rule => name === rule || name.startsWith(rule + '$'));
+  if (excludedFileRule) return { kind: 'excludedFile', rule: excludedFileRule };
+  const excludedPackageRule = flowExcludePackagePrefixes()
+    .filter(rule => flowPrefixMatches(name, rule))
+    .sort((a, b) => b.length - a.length)[0];
+  if (excludedPackageRule) return { kind: 'excludedPackage', rule: excludedPackageRule };
+  const explicitFile = flowClassNames().some(rule => name === rule || name.startsWith(rule + '$'));
+  if (explicitFile) return { kind: 'file', rule: flowClassNames().find(rule => name === rule || name.startsWith(rule + '$')) };
+  const packageRule = flowPackagePrefixes()
+    .filter(rule => flowPrefixMatches(name, rule))
+    .sort((a, b) => b.length - a.length)[0];
+  if (packageRule) return { kind: 'package', rule: packageRule };
+  return { kind: 'automatic', rule: '' };
+}
+
+async function updateFlowPrefixSetting(key, updater) {
+  // Instrumentation configuration is workspace-wide. This deliberately mirrors
+  // flowPackagePrefixes() so the UI edits the exact setting used by the launcher.
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const current = config.get(key, []);
+  const values = Array.isArray(current)
+    ? current.map(normalizeFlowPrefix).filter(Boolean)
+    : String(current || '').split(',').map(normalizeFlowPrefix).filter(Boolean);
+  const next = [...new Set(updater(values).map(normalizeFlowPrefix).filter(Boolean))].sort();
+  await config.update(key, next, vscode.ConfigurationTarget.Workspace);
+  instrumentationProvider?.refresh();
+}
+
+async function discoverReplayJavaCandidates() {
+  const byClass = new Map();
+  for (const file of nativeReplaySession?.files || []) {
+    const className = normalizeFlowPrefix(file.primaryClass);
+    if (!className) continue;
+    byClass.set(className, {
+      label: file.name,
+      className,
+      packageName: normalizeFlowPrefix(file.packageName),
+      detail: file.relativePath,
+      source: 'previous run'
+    });
+  }
+  try {
+    const uris = await vscode.workspace.findFiles('**/*.java', '**/{build,.gradle,out,target,node_modules}/**', 2000);
+    await Promise.all(uris.map(async uri => {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        const text = Buffer.from(bytes).toString('utf8', 0, Math.min(bytes.length, 65536));
+        const match = text.match(/(?:^|\n)\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;/);
+        const packageName = normalizeFlowPrefix(match?.[1] || '');
+        const simpleName = path.basename(uri.fsPath, '.java');
+        if (!simpleName || simpleName === 'module-info' || simpleName === 'package-info') return;
+        const className = normalizeFlowPrefix(packageName ? `${packageName}.${simpleName}` : simpleName);
+        if (!className || byClass.has(className)) return;
+        byClass.set(className, {
+          label: path.basename(uri.fsPath),
+          className,
+          packageName,
+          detail: vscode.workspace.asRelativePath(uri, false),
+          source: 'workspace'
+        });
+      } catch (_) {}
+    }));
+  } catch (_) {}
+  return [...byClass.values()].sort((a, b) => a.className.localeCompare(b.className));
+}
+
+async function pickReplayInstrumentationPackage(title, prompt) {
+  const discovered = await discoverReplayJavaCandidates();
+  const packages = [...new Set(discovered.map(item => item.packageName).filter(Boolean))].sort();
+  if (packages.length) {
+    const selected = await vscode.window.showQuickPick([
+      { label: '$(edit) Enter package manually…', description: 'Use only when the package is outside this workspace', manual: true },
+      ...packages.map(packageName => ({ label: packageName, description: 'workspace package', packageName }))
+    ], { title, placeHolder: 'Choose a Java package', matchOnDescription: true });
+    if (!selected) return '';
+    if (!selected.manual) return normalizeFlowPrefix(selected.packageName);
+  }
+  return normalizeFlowPrefix(await vscode.window.showInputBox({
+    title,
+    prompt,
+    placeHolder: 'com.mycompany.orders',
+    validateInput: value => normalizeFlowPrefix(value) ? undefined : 'Enter a package name.'
+  }));
+}
+
+async function pickReplayInstrumentationClass(title, prompt) {
+  const candidates = await discoverReplayJavaCandidates();
+  if (candidates.length) {
+    const selected = await vscode.window.showQuickPick([
+      { label: '$(edit) Enter fully qualified class name manually…', description: 'Use only when the file is outside this workspace', manual: true },
+      ...candidates.map(item => ({
+        label: item.label,
+        description: item.className,
+        detail: `${item.detail}${item.source === 'previous run' ? '  • previous run' : ''}`,
+        className: item.className
+      }))
+    ], {
+      title,
+      placeHolder: 'Choose a Java source file / class',
+      matchOnDescription: true,
+      matchOnDetail: true
+    });
+    if (!selected) return '';
+    if (!selected.manual) return normalizeFlowPrefix(selected.className);
+  }
+  return normalizeFlowPrefix(await vscode.window.showInputBox({
+    title,
+    prompt,
+    placeHolder: 'com.mycompany.orders.OrderWorkflow'
+  }));
+}
+
 
 function dependencyResolutionSettings() {
   const config = vscode.workspace.getConfiguration('compositeGradleTests');
@@ -1157,6 +1407,8 @@ initscript {
 def cgtlFlowOutput = System.getProperty("cgtl.flow.output")
 def cgtlFlowAgent = System.getProperty("cgtl.flow.agent")
 def cgtlFlowPackages = System.getProperty("cgtl.flow.packages", "")
+def cgtlFlowExcludes = System.getProperty("cgtl.flow.excludes", "")
+def cgtlFlowStateAdapters = System.getProperty("cgtl.flow.stateAdapters", "")
 def cgtlFlowLineState = System.getProperty("cgtl.flow.lineState", "receiver")
 def cgtlFlowLineStateMaxDepth = System.getProperty("cgtl.flow.lineState.maxDepth", "2")
 def cgtlFlowLineStateMaxFields = System.getProperty("cgtl.flow.lineState.maxFields", "30")
@@ -1171,6 +1423,8 @@ allprojects { project ->
             testTask.systemProperty("cgtl.flow.output", cgtlFlowOutput)
             testTask.systemProperty("cgtl.flow.maxEvents", "200000")
             testTask.systemProperty("cgtl.flow.packages", cgtlFlowPackages)
+            testTask.systemProperty("cgtl.flow.excludes", cgtlFlowExcludes)
+            testTask.systemProperty("cgtl.flow.stateAdapters", cgtlFlowStateAdapters)
             testTask.systemProperty("cgtl.flow.lineState", cgtlFlowLineState)
             testTask.systemProperty("cgtl.flow.lineState.maxDepth", cgtlFlowLineStateMaxDepth)
             testTask.systemProperty("cgtl.flow.lineState.maxFields", cgtlFlowLineStateMaxFields)
@@ -1187,30 +1441,13 @@ allprojects { project ->
 function collectFlowEvents(flowFile) {
   if (!flowFile || !fs.existsSync(flowFile)) return [];
   try {
-    const events = fs.readFileSync(flowFile, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+    // Keep capture loading deliberately cheap. Snapshot checkpoint expansion used to
+    // recursively clone every captured object before Replay could even open. Replay
+    // navigation only needs event metadata, so state is left in its compact/raw form
+    // and hydrated by NativeReplaySession only when the State view asks for it.
+    return fs.readFileSync(flowFile, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
       try { return JSON.parse(line); } catch (_) { return undefined; }
     }).filter(Boolean).sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
-    const checkpoints = new Map();
-    const hydrate = value => {
-      if (!value || typeof value !== 'object') return value;
-      if (Array.isArray(value)) return value.map(hydrate);
-      if (value.snapshotRef) {
-        const prior = checkpoints.get(String(value.snapshotRef));
-        return prior ? { ...structuredClone(prior), __fromCheckpoint: true, __checkpointSequence: value.checkpointSequence } : value;
-      }
-      const result = {};
-      for (const [key, child] of Object.entries(value)) result[key] = hydrate(child);
-      if (result.snapshotId) checkpoints.set(String(result.snapshotId), structuredClone(result));
-      return result;
-    };
-    for (const event of events) {
-      for (const key of ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown']) {
-        if (event[key] !== undefined) event[key] = hydrate(event[key]);
-      }
-      if (Array.isArray(event.arguments)) event.arguments = event.arguments.map(hydrate);
-      if (event.frameLocals && typeof event.frameLocals === 'object') event.frameLocals = hydrate(event.frameLocals);
-    }
-    return events;
   } catch (_) { return []; }
 }
 
@@ -1352,7 +1589,7 @@ async function executedCodeFromFlow(events, preferredSourcePath) {
   return [...byFile.values()].map(item => ({ ...item, lines: [...item.lines].sort((a,b)=>a-b) }));
 }
 
-function showFlowReplayPanel(result) {
+function showLegacyFlowReplayPanel(result) {
   const lines = (result?.flowEvents || []).filter(event => event.event === 'line');
   const methods = (result?.flowEvents || []).filter(event => event.event === 'enter');
   if (!lines.length && !methods.length) {
@@ -1627,7 +1864,7 @@ function renderFlowReplayHtml(result) {
   const eventLabel=e=>e.event==='callsite'?'Call '+String(e.calleeClassName||'').split('.').pop()+'.'+e.calleeMethodName+'()':e.event==='enter'?'Enter '+simple(e)+'.'+e.methodName+'()':e.event==='exit'?(e.thrown?'Exception from ':'Exit ')+simple(e)+'.'+e.methodName+'()':e.event==='resume'?'Resume '+simple(e)+'.'+e.methodName+'()':'Line '+e.line;
   const eventKind=e=>e.event==='callsite'?'Call':e.event==='enter'?'Entry':e.event==='exit'?(e.thrown?'Exception':'Exit'):e.event==='resume'?'Resume':'Line';
   const valueText=v=>{if(v===undefined)return 'not available';if(v===null)return 'null';if(typeof v==='string'||typeof v==='number'||typeof v==='boolean')return String(v);if(v.display!==undefined)return String(v.display);if(v.value!==undefined&&typeof v.value!=='object')return String(v.value);if(v.summary!==undefined)return String(v.summary);if(Array.isArray(v))return '['+v.map(valueText).join(', ')+']';const type=objectType(v);return type+(objectCount(v)!==null?' ('+objectCount(v)+')':'')};
-  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
+  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
   const objectType=v=>{const raw=String(v?.type||v?.className||v?.summary||'Object');return raw.includes('@')?raw.slice(0,raw.indexOf('@')).split('.').pop():raw.split('.').pop()};
   const objectIdentity=v=>String(v?.identity||v?.identityHash||v?.id||v?.summary||'').match(/@([0-9a-fA-F]+)/)?.[1]||'';
   const objectCount=v=>v?.size!==undefined?Number(v.size):Array.isArray(v?.items)?v.items.length:Array.isArray(v?.entries)?v.entries.length:null;
@@ -1679,53 +1916,52 @@ function renderFlowReplayHtml(result) {
   function firstReplayLineForCall(callId,afterSequence=-Infinity){const id=String(callId||'');if(!id)return null;for(const e of replayEvents){if(replayCallId(e)!==id)continue;if(Number(e.sequence??e.__index??0)+0.0001<Number(afterSequence))continue;return e}return null}
   function nextReplayLineInFrame(current,afterSequence){if(!current)return null;const id=replayCallId(current),thread=eventThreadKey(current),depth=replayFrameDepth(current);const start=Number(afterSequence??current.sequence??current.__index??0);for(let i=replayPosition+1;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(Number(e.sequence??e.__index??0)<=start)continue;if(id&&replayCallId(e)===id)return e;if(!id&&replayFrameDepth(e)===depth&&sameMethodFrame(e,current))return e}return null}
   function replayCallsFromCurrentLine(current){if(!current)return[];const thread=eventThreadKey(current),currentSeq=Number(current.sequence??current.__index??0),currentId=replayCallId(current);const nextSameFrame=nextReplayLineInFrame(current,currentSeq);const upper=nextSameFrame?Number(nextSameFrame.sequence??nextSameFrame.__index??Infinity):Infinity;return model.events.filter(e=>{if(e.event!=='callsite'||eventThreadKey(e)!==thread)return false;if(String(e.sourcePath||'')!==String(current.sourcePath||'')||Number(e.line||0)!==Number(current.line||0))return false;const seq=Number(e.sequence??e.__index??0);if(seq<currentSeq-0.5||seq>=upper)return false;const entry=replayEntryFor(e);if(!entry)return false;const callerDepth=Number(entry.depth||0)-1;return !currentId||callerDepth===replayFrameDepth(current)||String(entry.callerClassName||'')===String(current.className||'')}) .sort((a,b)=>Number(a.sequence??a.__index??0)-Number(b.sequence??b.__index??0))}
-  function stepReplayInto(){const current=replayEvents[replayPosition];if(!current)return;const calls=replayCallsFromCurrentLine(current);for(const call of calls){const target=firstReplayLineForCall(replayCallId(call),Number(call.sequence??call.__index??0)-1);const index=replayIndexOfEvent(target);if(index>=0){setReplayPosition(index);return}}for(let i=replayPosition+1;i<replayEvents.length;i++){if(eventThreadKey(replayEvents[i])===eventThreadKey(current)){setReplayPosition(i);return}}}
-  function replayOwningEntry(lineEvent){if(!lineEvent)return null;const thread=eventThreadKey(lineEvent),seq=Number(lineEvent.sequence??lineEvent.__index??0),depth=Number(lineEvent.depth||0);let best=null;for(const e of model.events){if(e.event!=='enter'||eventThreadKey(e)!==thread)continue;if(String(e.className||'')!==String(lineEvent.className||'')||String(e.methodName||'')!==String(lineEvent.methodName||''))continue;if(String(e.descriptor||'')!==String(lineEvent.descriptor||''))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq>seq+0.25)continue;const exit=replayExitFor(e);const exitSeq=exit?Number(exit.sequence??exit.__index??Infinity):Infinity;if(exitSeq+0.25<seq)continue;if(!best||entrySeq>Number(best.sequence??best.__index??-Infinity))best=e}return best||replayEntryFor(lineEvent)}
+  function firstReplayLineForEntry(entry,current){if(!entry)return null;const thread=eventThreadKey(entry),currentSeq=Number(current?.sequence??current?.__index??-Infinity),entrySeq=Number(entry.sequence??entry.__index??0);for(const e of replayEvents){const seq=Number(e.sequence??e.__index??0);if(seq<=currentSeq||seq>entrySeq+0.0001)continue;if(eventThreadKey(e)!==thread)continue;if(String(e.className||'')!==String(entry.className||'')||String(e.methodName||'')!==String(entry.methodName||'')||String(e.descriptor||'')!==String(entry.descriptor||''))continue;return e}return firstReplayLineForCall(replayCallId(entry),entrySeq-1)}
+  function stepReplayInto(){const current=replayEvents[replayPosition];if(!current)return;const calls=replayCallsFromCurrentLine(current);for(const call of calls){const entry=replayEntryFor(call);const target=firstReplayLineForEntry(entry,current);const index=replayIndexOfEvent(target);if(index>=0){setReplayPosition(index);return}}for(let i=replayPosition+1;i<replayEvents.length;i++){if(eventThreadKey(replayEvents[i])===eventThreadKey(current)){setReplayPosition(i);return}}}
+  function replayOwningEntry(lineEvent){if(!lineEvent)return null;const thread=eventThreadKey(lineEvent),seq=Number(lineEvent.sequence??lineEvent.__index??0),depth=Number(lineEvent.depth||0);const matches=e=>e.event==='enter'&&eventThreadKey(e)===thread&&String(e.className||'')===String(lineEvent.className||'')&&String(e.methodName||'')===String(lineEvent.methodName||'')&&String(e.descriptor||'')===String(lineEvent.descriptor||'');let best=null;for(const e of model.events){if(!matches(e))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq>seq)continue;const exit=replayExitFor(e);const exitSeq=exit?Number(exit.sequence??exit.__index??Infinity):Infinity;if(exitSeq+0.25<seq)continue;if(!best||entrySeq>Number(best.sequence??best.__index??-Infinity))best=e}if(best)return best;let nextLineSeq=Infinity;for(let i=replayPosition+1;i<replayEvents.length;i++){const candidate=replayEvents[i];if(eventThreadKey(candidate)!==thread)continue;nextLineSeq=Number(candidate.sequence??candidate.__index??Infinity);break}let upcoming=null;for(const e of model.events){if(!matches(e))continue;if(Number(e.depth||0)!==depth)continue;const entrySeq=Number(e.sequence??e.__index??0);if(entrySeq<=seq||entrySeq>=nextLineSeq)continue;if(!upcoming||entrySeq<Number(upcoming.sequence??upcoming.__index??Infinity))upcoming=e}return upcoming||replayEntryFor(lineEvent)}
   function sameReplayOwningFrame(a,b){if(!a||!b||eventThreadKey(a)!==eventThreadKey(b))return false;const ae=replayOwningEntry(a),be=replayOwningEntry(b);if(ae&&be){const aid=replayCallId(ae),bid=replayCallId(be);if(aid&&bid)return aid===bid;return ae.__index===be.__index}return sameMethodFrame(a,b)}
   function sameReplayMethod(a,b){return !!a&&!!b&&eventThreadKey(a)===eventThreadKey(b)&&String(a.sourcePath||'')===String(b.sourcePath||'')&&String(a.className||'')===String(b.className||'')&&String(a.methodName||'')===String(b.methodName||'')&&String(a.descriptor||'')===String(b.descriptor||'')}
   function nextReplayLineInSameMethod(current,fromPosition=replayPosition+1,minSequence=-Infinity){if(!current)return null;for(let i=Math.max(0,fromPosition);i<replayEvents.length;i++){const e=replayEvents[i];if(Number(e.sequence??e.__index??0)<=Number(minSequence))continue;if(sameReplayMethod(current,e))return {event:e,index:i}}return null}
   function stepReplayOver(){
     const current=replayEvents[replayPosition];if(!current)return;
     const thread=eventThreadKey(current),currentSeq=Number(current.sequence??current.__index??0);
+    const owner=replayOwningEntry(current);
+    const ownerExit=owner?replayExitFor(owner):null;
+    const invocationEnd=ownerExit?Number(ownerExit.sequence??ownerExit.__index??Infinity):Infinity;
 
-    // Step Over is source-frame navigation: remain in the method that owns the
-    // highlighted line. Do not use the next LINE event's callId/depth to decide
-    // whether it belongs to the caller; the first callee LINE can be emitted
-    // before ENTER and therefore temporarily carries misleading frame metadata.
-    const nextCallerLine=nextReplayLineInSameMethod(current,replayPosition+1,currentSeq);
-    if(nextCallerLine){
-      // If this line recursively invokes the same method, a child invocation can
-      // also look like the same source method. Skip through any child call(s)
-      // launched from this exact source-line occurrence before accepting it.
-      const upperSeq=Number(nextCallerLine.event.sequence??nextCallerLine.event.__index??Infinity);
-      let skipThrough=currentSeq;
-      for(const call of model.events){
-        if(call.event!=='callsite'||eventThreadKey(call)!==thread)continue;
-        if(String(call.sourcePath||'')!==String(current.sourcePath||'')||Number(call.line||0)!==Number(current.line||0))continue;
-        const callSeq=Number(call.sequence??call.__index??0);
-        if(callSeq<currentSeq-0.5||callSeq>=upperSeq)continue;
-        const exit=replayExitFor(call);
-        if(exit)skipThrough=Math.max(skipThrough,Number(exit.sequence??exit.__index??skipThrough));
-      }
-      const target=nextReplayLineInSameMethod(current,replayPosition+1,skipThrough);
-      if(target){setReplayPosition(target.index);return}
-      setReplayPosition(nextCallerLine.index);return;
+    // Step Over is line-centric: skip only calls made by THIS source line and
+    // stop on the next source line in the current invocation. Do not trust the
+    // first callee LINE's callId/depth; it can be emitted before ENTER advice.
+    // Instead, use source-method identity and bound the search by this
+    // invocation's EXIT so a later invocation of the same method is not used.
+    let skipThrough=currentSeq;
+    for(const call of model.events){
+      if(call.event!=='callsite'||eventThreadKey(call)!==thread)continue;
+      if(String(call.sourcePath||'')!==String(current.sourcePath||'')||Number(call.line||0)!==Number(current.line||0))continue;
+      const callSeq=Number(call.sequence??call.__index??0);
+      if(callSeq<currentSeq-0.5||callSeq>invocationEnd)continue;
+      const exit=replayExitFor(call);
+      if(exit)skipThrough=Math.max(skipThrough,Number(exit.sequence??exit.__index??skipThrough));
     }
 
-    // No later line exists in this method (for example we are at its final
-    // executable line). In that case behave like a debugger and continue at the
-    // first replay line after this invocation exits.
-    const owner=replayOwningEntry(current)||replayEntryFor(current);
-    const exit=owner?replayExitFor(owner):null;
-    const boundary=exit?Number(exit.sequence??exit.__index??currentSeq):currentSeq;
     for(let i=replayPosition+1;i<replayEvents.length;i++){
-      const e=replayEvents[i];
-      if(eventThreadKey(e)!==thread)continue;
-      if(Number(e.sequence??e.__index??0)<=boundary)continue;
-      setReplayPosition(i);return;
+      const candidate=replayEvents[i];
+      if(eventThreadKey(candidate)!==thread)continue;
+      const seq=Number(candidate.sequence??candidate.__index??0);
+      if(seq<=skipThrough)continue;
+      if(seq>invocationEnd)break;
+      if(sameReplayMethod(current,candidate)){setReplayPosition(i);return}
+    }
+
+    // There is no next source line in this method invocation. At a method's
+    // final line, Step Over must not skip anything else: simply continue to the
+    // next visible instrumented LINE on this thread. This is important when the
+    // caller is excluded and therefore has no recorded location.
+    for(let i=replayPosition+1;i<replayEvents.length;i++){
+      if(eventThreadKey(replayEvents[i])===thread){setReplayPosition(i);return}
     }
   }
-  function stepReplayOut(){const current=replayEvents[replayPosition];if(!current)return;const entry=replayEntryFor(current);if(!entry)return;const callerPath=entry.callerSourcePath,callerLine=Number(entry.callerLine||0),thread=eventThreadKey(current);if(callerPath&&callerLine>0){const boundary=Number(entry.sequence??entry.__index??Infinity);let target=-1;for(let i=0;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(String(e.sourcePath||'')!==String(callerPath)||Number(e.line||0)!==callerLine)continue;if(Number(e.sequence??e.__index??0)>=boundary)continue;target=i}if(target>=0){setReplayPosition(target);return}}const currentDepth=replayFrameDepth(current);for(let i=replayPosition-1;i>=0;i--){const e=replayEvents[i];if(eventThreadKey(e)===thread&&replayFrameDepth(e)<currentDepth){setReplayPosition(i);return}}}
+  function stepReplayOut(){const current=replayEvents[replayPosition];if(!current)return;const entry=replayOwningEntry(current);if(!entry)return;const callerPath=entry.callerSourcePath,callerLine=Number(entry.callerLine||0),thread=eventThreadKey(current);if(callerPath&&callerLine>0){const boundary=Number(entry.sequence??entry.__index??Infinity);let target=-1;for(let i=0;i<replayEvents.length;i++){const e=replayEvents[i];if(eventThreadKey(e)!==thread)continue;if(String(e.sourcePath||'')!==String(callerPath)||Number(e.line||0)!==callerLine)continue;if(Number(e.sequence??e.__index??0)>=boundary)continue;target=i}if(target>=0){setReplayPosition(target);return}}const currentDepth=replayFrameDepth(current);for(let i=replayPosition-1;i>=0;i--){const e=replayEvents[i];if(eventThreadKey(e)===thread&&replayFrameDepth(e)<currentDepth){setReplayPosition(i);return}}}
   function currentLineOccurrences(){const e=replayEvents[replayPosition];return e?replayOccurrences(e.sourcePath,e.line):[]}
   function seekLineOccurrence(delta){const occurrences=currentLineOccurrences();if(!occurrences.length)return;let index=occurrences.indexOf(replayPosition);if(index<0)index=0;index=Math.max(0,Math.min(occurrences.length-1,index+delta));setReplayPosition(occurrences[index])}
 
@@ -2460,9 +2696,14 @@ function renderResultDetail(result) {
   const flowSection = flowEntryCount
     ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3><button class="coverage-expand" data-command="openFlow" data-id="${escapeHtml(result.id)}">Open replay</button></div><div class="empty-output">${flowLineCount ? `${flowLineCount} ordered source-line events` : `${flowMethodCount} ordered method calls with source locations`} captured. Open replay to walk through the execution.</div></div>`
     : (result.flowCaptured ? `<div class="section flow-section"><div class="section-title"><h3>Execution flow</h3></div><div class="empty-output">Flow capture completed, but no flow events were recorded.</div></div>` : '');
-  const executedSection = executedFileCount
-    ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><div class="coverage-title-actions"><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span>${canExpandExecuted ? `<button class="coverage-expand" data-command="expandExecuted" data-id="${escapeHtml(result.id)}">Open expanded</button>` : ''}</div></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
-    : (result.coverageCaptured ? `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>` : '');
+  // The inline Executed Code report belongs only to explicit JaCoCo Code Report runs.
+  // Flow/Analyze still derive executedCode from ordered LINE events for native Replay
+  // (Where Did Execution Go?, decorations, navigation), but do not duplicate it here.
+  const executedSection = result.coverageCaptured
+    ? (executedFileCount
+        ? `<div class="section executed-section"><div class="section-title"><h3>Executed code</h3><div class="coverage-title-actions"><span class="coverage-file-meta">${executedFileCount} ${executedFileCount === 1 ? 'file' : 'files'} · ${executedLineCount} ${executedLineCount === 1 ? 'line' : 'lines'}</span>${canExpandExecuted ? `<button class="coverage-expand" data-command="expandExecuted" data-id="${escapeHtml(result.id)}">Open expanded</button>` : ''}</div></div><div class="coverage-files">${result.executedCode.map(file => renderExecutedFile(file, result)).join('')}</div></div>`
+        : `<div class="section"><div class="section-title"><h3>Executed code</h3></div><div class="empty-output">No executed-code report was produced. Open Raw output for the exact Gradle or JaCoCo error.</div></div>`)
+    : '';
   const resultSection = showResults && eventLines.length
     ? `<div class="section"><div class="section-title"><h3>Results · ${eventLines.length}</h3></div><div class="event-list">${eventLines.map(line => {
         const match = line.match(/\s(PASSED|FAILED|SKIPPED)$/);
@@ -3769,6 +4010,795 @@ function collectJavaProjects(value, results = []) {
   return results;
 }
 
+
+// ---- Native Execution Replay workbench -------------------------------------------------
+// Replay is intentionally modeled as workspace state, not as a Webview-local cursor. The
+// normal VS Code editor remains the source editor; sidebar/panel views observe this model.
+let nativeReplaySession;
+let replayFilesProvider;
+let instrumentationProvider;
+let replayStateProvider;
+let replayCallStackProvider;
+let replayTimelineProvider;
+let replayExecutedDecoration;
+let replayCurrentDecoration;
+let replayEditorColumn;
+
+function replayEventCallId(event) {
+  const value = event?.callId ?? event?.call ?? event?.invocationId;
+  return value === undefined || value === null ? '' : String(value);
+}
+function replayEventThread(event) { return String(event?.threadId ?? event?.thread ?? 'main'); }
+function replayEventSequence(event) {
+  const value = Number(event?.sequence ?? event?.__index ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+function replaySimpleClass(event) {
+  const value = String(event?.className || 'Unknown');
+  return value.split('.').pop() || value;
+}
+function replaySameMethod(a, b) {
+  return !!a && !!b && replayEventThread(a) === replayEventThread(b)
+    && String(a.sourcePath || '') === String(b.sourcePath || '')
+    && String(a.className || '') === String(b.className || '')
+    && String(a.methodName || '') === String(b.methodName || '')
+    && String(a.descriptor || '') === String(b.descriptor || '');
+}
+const replaySourceLinesCache = new Map();
+function replaySourceText(event) {
+  if (!event?.sourcePath || !event.line) return '';
+  try {
+    const key = normalizePath(event.sourcePath);
+    let lines = replaySourceLinesCache.get(key);
+    if (!lines) {
+      lines = fs.readFileSync(event.sourcePath, 'utf8').split(/\r?\n/);
+      replaySourceLinesCache.set(key, lines);
+    }
+    return String(lines[Math.max(0, Number(event.line) - 1)] || '').trim();
+  } catch (_) { return ''; }
+}
+function replayValueLabel(value) {
+  if (value === undefined) return 'not captured';
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `Array (${value.length})`;
+  if (typeof value === 'object') {
+    if (value.display !== undefined) return String(value.display);
+    if (value.value !== undefined && typeof value.value !== 'object') return String(value.value);
+    if (value.summary !== undefined) return String(value.summary);
+    const type = String(value.type || value.className || '').split('.').pop();
+    if (type) return type;
+  }
+  return String(value);
+}
+function replayObjectFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  if (value.fields && typeof value.fields === 'object' && !Array.isArray(value.fields)) return Object.entries(value.fields);
+  const ignored = new Set(['type','className','display','identity','identityHash','id','value','summary','size','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence']);
+  return Object.entries(value).filter(([key]) => !ignored.has(key));
+}
+
+class NativeReplaySession {
+  constructor(result) {
+    this.result = result;
+    this.rawEvents = (result?.flowEvents || []).map((event, index) => ({ ...event, __nativeIndex: index }));
+    this.normalizeBoundaryLines();
+    this.entries = this.rawEvents.filter(e => e.event === 'enter').sort((a,b) => replayEventSequence(a)-replayEventSequence(b));
+    this.exits = this.rawEvents.filter(e => e.event === 'exit').sort((a,b) => replayEventSequence(a)-replayEventSequence(b));
+    this.entryByCallId = new Map();
+    this.exitByCallId = new Map();
+    for (const e of this.entries) { const id = replayEventCallId(e); if (id) this.entryByCallId.set(id, e); }
+    for (const e of this.exits) { const id = replayEventCallId(e); if (id) this.exitByCallId.set(id, e); }
+    this.lineEvents = this.rawEvents.filter(e => e.event === 'line' && e.sourcePath && Number(e.line || 0) > 0)
+      .sort((a,b) => replayEventSequence(a)-replayEventSequence(b) || a.__nativeIndex-b.__nativeIndex);
+    this.files = this.buildFiles();
+    this.position = 0;
+    // State checkpoint expansion is intentionally lazy. Most Replay sessions jump to
+    // a handful of interesting lines, so paying to reconstruct every object graph at
+    // startup is wasted work. Hydrated events are cached as they are inspected.
+    this.stateCheckpoints = undefined;
+    this.hydratedStateEvents = new Map();
+  }
+
+  normalizeBoundaryLines() {
+    // Byte Buddy entry advice can follow the first ASM line callback. Re-home that
+    // first line to the callee invocation so Into/Out and state ownership agree.
+    const bySequence = new Map(this.rawEvents.map(e => [replayEventSequence(e), e]));
+    for (const entry of this.rawEvents) {
+      if (entry.event !== 'enter') continue;
+      const preceding = bySequence.get(replayEventSequence(entry) - 1);
+      if (!preceding || preceding.event !== 'line') continue;
+      const sameMethod = String(preceding.className || '') === String(entry.className || '')
+        && String(preceding.methodName || '') === String(entry.methodName || '')
+        && String(preceding.descriptor || '') === String(entry.descriptor || '');
+      const sameThread = replayEventThread(preceding) === replayEventThread(entry);
+      const sameDepth = Number(preceding.depth || 0) === Number(entry.depth || 0);
+      const id = replayEventCallId(entry);
+      if (sameMethod && sameThread && sameDepth && id) {
+        preceding.__originalCallId = replayEventCallId(preceding);
+        preceding.callId = id;
+        preceding.invocationId = id;
+      }
+    }
+  }
+
+  buildFiles() {
+    const map = new Map();
+    for (const event of this.lineEvents) {
+      const key = normalizePath(event.sourcePath);
+      let file = map.get(key);
+      if (!file) {
+        file = { sourcePath: event.sourcePath, name: path.basename(event.sourcePath), relativePath: vscode.workspace.asRelativePath(event.sourcePath, false), lines: new Set(), classNames: new Set(), events: 0, test: /[\\/]src[\\/]test[\\/]/i.test(event.sourcePath) };
+        map.set(key, file);
+      }
+      file.lines.add(Number(event.line));
+      if (event.className) file.classNames.add(String(event.className));
+      file.events++;
+    }
+    return [...map.values()].map(file => {
+      const classNames = [...file.classNames];
+      const primaryClass = classNames[0] || '';
+      const packageName = primaryClass.includes('.') ? primaryClass.split('.').slice(0, -1).join('.') : '';
+      return { ...file, classNames, primaryClass, packageName, lineCount: file.lines.size };
+    }).sort((a,b) => Number(b.test)-Number(a.test) || b.events-a.events || a.name.localeCompare(b.name));
+  }
+
+  get current() { return this.lineEvents[this.position]; }
+  setPosition(position, options = {}) {
+    if (!this.lineEvents.length) return;
+    this.position = Math.max(0, Math.min(this.lineEvents.length - 1, Number(position) || 0));
+    // Editor-originated seeks must not rewrite the user's caret position. This keeps
+    // the symbol they clicked selected for native editor commands such as Go to
+    // Definition. Replay controls/timeline navigation still move the caret to the
+    // beginning of the destination line.
+    this.preserveEditorSelectionOnce = Boolean(options.preserveEditorSelection);
+    updateNativeReplayWorkbench().catch(error => output?.appendLine(`[replay] ${error?.stack || error}`));
+  }
+  first() { this.setPosition(0); }
+  last() { this.setPosition(this.lineEvents.length - 1); }
+  previous() { this.setPosition(this.position - 1); }
+  next() { this.setPosition(this.position + 1); }
+
+  firstLineForCall(callId, minimum = -Infinity) {
+    if (!callId) return null;
+    return this.lineEvents.find(e => replayEventCallId(e) === callId && replayEventSequence(e) >= minimum) || null;
+  }
+  indexOf(event) { return event ? this.lineEvents.indexOf(event) : -1; }
+  entryForLine(event) {
+    if (!event) return undefined;
+    const sameIdentity = entry => replayEventThread(entry) === replayEventThread(event)
+      && String(entry.className || '') === String(event.className || '')
+      && String(entry.methodName || '') === String(event.methodName || '')
+      && String(entry.descriptor || '') === String(event.descriptor || '');
+
+    // A LINE emitted at method entry can still carry the caller's callId because
+    // ASM visits the first line before Byte Buddy ENTER advice runs. Never trust
+    // that callId unless it actually identifies the same source method.
+    const direct = this.entryByCallId.get(replayEventCallId(event));
+    if (direct && sameIdentity(direct)) return direct;
+
+    const seq = replayEventSequence(event);
+    const thread = replayEventThread(event);
+    let previous;
+    for (const entry of this.entries) {
+      if (!sameIdentity(entry)) continue;
+      const start = replayEventSequence(entry);
+      const exit = this.exitByCallId.get(replayEventCallId(entry));
+      const end = exit ? replayEventSequence(exit) : Infinity;
+      if (start <= seq && end + .25 >= seq && (!previous || start > replayEventSequence(previous))) previous = entry;
+    }
+    if (previous) return previous;
+
+    // If this is the boundary LINE immediately before ENTER, the owning ENTER
+    // must occur before the next recorded LINE on this thread. This avoids a
+    // numeric sequence tolerance and, importantly, avoids accidentally treating
+    // the caller frame as the current method during Step Out.
+    let nextLineSeq = Infinity;
+    for (const line of this.lineEvents || []) {
+      const lineSeq = replayEventSequence(line);
+      if (replayEventThread(line) === thread && lineSeq > seq) { nextLineSeq = lineSeq; break; }
+    }
+    let upcoming;
+    for (const entry of this.entries) {
+      if (!sameIdentity(entry)) continue;
+      const start = replayEventSequence(entry);
+      if (start <= seq || start >= nextLineSeq) continue;
+      if (!upcoming || start < replayEventSequence(upcoming)) upcoming = entry;
+    }
+    return upcoming;
+  }
+  ensureStateCheckpointIndex() {
+    if (this.stateCheckpoints) return;
+    const checkpoints = new Map();
+    const visit = value => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const child of value) visit(child); return; }
+      if (value.snapshotId) checkpoints.set(String(value.snapshotId), value);
+      for (const child of Object.values(value)) visit(child);
+    };
+    const stateKeys = ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown','arguments','frameLocals'];
+    for (const event of this.rawEvents) for (const key of stateKeys) if (event[key] !== undefined) visit(event[key]);
+    this.stateCheckpoints = checkpoints;
+  }
+
+  hydrateStateValue(value, seen = new Set()) {
+    if (!value || typeof value !== 'object') return value;
+    if (Array.isArray(value)) return value.map(child => this.hydrateStateValue(child, seen));
+    if (value.snapshotRef) {
+      this.ensureStateCheckpointIndex();
+      const id = String(value.snapshotRef);
+      const prior = this.stateCheckpoints.get(id);
+      if (!prior || seen.has(id)) return value;
+      const nextSeen = new Set(seen); nextSeen.add(id);
+      const hydrated = this.hydrateStateValue(prior, nextSeen);
+      return hydrated && typeof hydrated === 'object' ? { ...hydrated, __fromCheckpoint: true, __checkpointSequence: value.checkpointSequence } : hydrated;
+    }
+    const result = {};
+    for (const [key, child] of Object.entries(value)) result[key] = this.hydrateStateValue(child, seen);
+    return result;
+  }
+
+  hydratedEvent(event) {
+    if (!event) return event;
+    const index = Number(event.__nativeIndex);
+    if (!Number.isFinite(index) || index < 0) return event;
+    const cached = this.hydratedStateEvents.get(index);
+    if (cached) return cached;
+    const hydrated = { ...event };
+    const stateKeys = ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown'];
+    for (const key of stateKeys) if (event[key] !== undefined) hydrated[key] = this.hydrateStateValue(event[key]);
+    if (Array.isArray(event.arguments)) hydrated.arguments = event.arguments.map(value => this.hydrateStateValue(value));
+    if (event.frameLocals && typeof event.frameLocals === 'object') hydrated.frameLocals = this.hydrateStateValue(event.frameLocals);
+    this.hydratedStateEvents.set(index, hydrated);
+    // Bound retained expanded state. Raw compact capture remains available for rehydration.
+    if (this.hydratedStateEvents.size > 200) this.hydratedStateEvents.delete(this.hydratedStateEvents.keys().next().value);
+    return hydrated;
+  }
+
+  stateForLine(event) {
+    if (!event) return { receiver: undefined, locals: undefined, arguments: undefined, entry: undefined };
+    const hydratedLine = this.hydratedEvent(event);
+    const rawEntry = this.entryForLine(event);
+    const entry = rawEntry ? this.hydratedEvent(rawEntry) : rawEntry;
+    const receiver = hydratedLine.frameReceiver !== undefined ? hydratedLine.frameReceiver
+      : (hydratedLine.receiver !== undefined ? hydratedLine.receiver : entry?.receiver);
+    const locals = hydratedLine.frameLocals !== undefined ? hydratedLine.frameLocals
+      : (hydratedLine.locals !== undefined ? hydratedLine.locals : hydratedLine.localVariables);
+    const args = hydratedLine.arguments !== undefined ? hydratedLine.arguments : entry?.arguments;
+    return { receiver, locals, arguments: args, entry };
+  }
+
+  childEntriesFromCurrentLine(current) {
+    const nextCaller = this.lineEvents.slice(this.position + 1).find(e => replaySameMethod(current, e));
+    const upper = nextCaller ? replayEventSequence(nextCaller) : Infinity;
+    const currentSeq = replayEventSequence(current);
+    return this.entries.filter(entry => replayEventThread(entry) === replayEventThread(current)
+      && String(entry.callerSourcePath || '') === String(current.sourcePath || '')
+      && Number(entry.callerLine || 0) === Number(current.line || 0)
+      && replayEventSequence(entry) >= currentSeq - .5 && replayEventSequence(entry) < upper)
+      .sort((a,b) => replayEventSequence(a)-replayEventSequence(b));
+  }
+  firstLineForEntry(entry, current) {
+    if (!entry) return null;
+    const thread = replayEventThread(entry);
+    const currentSeq = current ? replayEventSequence(current) : -Infinity;
+    const entrySeq = replayEventSequence(entry);
+
+    // The ASM line callback for the first source line can fire before Byte Buddy's
+    // ENTER advice. In that case the line may still carry the caller's callId.
+    // Resolve that boundary line by callee source identity and execution interval
+    // rather than requiring the ENTER callId to already be present.
+    for (const event of this.lineEvents) {
+      const seq = replayEventSequence(event);
+      if (seq <= currentSeq || seq > entrySeq + 0.0001) continue;
+      if (replayEventThread(event) !== thread) continue;
+      if (String(event.className || '') !== String(entry.className || '')
+          || String(event.methodName || '') !== String(entry.methodName || '')
+          || String(event.descriptor || '') !== String(entry.descriptor || '')) continue;
+      return event;
+    }
+
+    return this.firstLineForCall(replayEventCallId(entry), entrySeq - 1);
+  }
+  stepInto() {
+    const current = this.current; if (!current) return;
+    for (const entry of this.childEntriesFromCurrentLine(current)) {
+      const target = this.firstLineForEntry(entry, current);
+      const index = this.indexOf(target);
+      if (index >= 0) { this.setPosition(index); return; }
+    }
+    const thread = replayEventThread(current);
+    for (let i=this.position+1;i<this.lineEvents.length;i++) if (replayEventThread(this.lineEvents[i]) === thread) { this.setPosition(i); return; }
+  }
+  stepOver() {
+    const current = this.current; if (!current) return;
+    const thread = replayEventThread(current);
+    const currentSeq = replayEventSequence(current);
+    const owner = this.entryForLine(current);
+    const ownerExit = owner ? this.exitByCallId.get(replayEventCallId(owner)) : null;
+    const invocationEnd = ownerExit ? replayEventSequence(ownerExit) : Infinity;
+
+    // Step Over is line-centric. Skip child calls launched from the highlighted
+    // source line, then stop at the next line in this source method. Source
+    // identity is intentional here: the first callee LINE can precede ENTER and
+    // temporarily carry caller-like frame metadata.
+    let skipThrough = currentSeq;
+    for (const entry of this.childEntriesFromCurrentLine(current)) {
+      const exit = this.exitByCallId.get(replayEventCallId(entry));
+      if (exit) skipThrough = Math.max(skipThrough, replayEventSequence(exit));
+    }
+
+    for (let i=this.position+1;i<this.lineEvents.length;i++) {
+      const event = this.lineEvents[i];
+      if (replayEventThread(event) !== thread) continue;
+      const seq = replayEventSequence(event);
+      if (seq <= skipThrough) continue;
+      if (seq > invocationEnd) break;
+      if (replaySameMethod(current, event)) { this.setPosition(i); return; }
+    }
+
+    // If this is the final recorded line of the method, do not perform another
+    // implicit step-over. Just continue to the next visible instrumented line.
+    // This naturally handles excluded callers between two instrumented methods.
+    for (let i=this.position+1;i<this.lineEvents.length;i++) {
+      const event = this.lineEvents[i];
+      if (replayEventThread(event) === thread) { this.setPosition(i); return; }
+    }
+  }
+  stepOut() {
+    const current = this.current; if (!current) return;
+    const entry = this.entryForLine(current); if (!entry) return;
+    const callerPath = entry.callerSourcePath, callerLine = Number(entry.callerLine || 0), boundary = replayEventSequence(entry), thread = replayEventThread(current);
+    if (callerPath && callerLine > 0) {
+      let target = -1;
+      for (let i=0;i<this.lineEvents.length;i++) {
+        const event = this.lineEvents[i];
+        if (replayEventThread(event) !== thread || String(event.sourcePath || '') !== String(callerPath) || Number(event.line || 0) !== callerLine) continue;
+        if (replayEventSequence(event) >= boundary) continue;
+        target = i;
+      }
+      if (target >= 0) { this.setPosition(target); return; }
+    }
+  }
+  occurrencesForLocation(sourcePath, line) {
+    const source = normalizePath(sourcePath || '');
+    const targetLine = Number(line || 0);
+    if (!source || targetLine <= 0) return [];
+    return this.lineEvents
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => normalizePath(event.sourcePath || '') === source && Number(event.line || 0) === targetLine)
+      .map(({ index }) => index);
+  }
+  seekToSourceLine(sourcePath, line) {
+    const occurrences = this.occurrencesForLocation(sourcePath, line);
+    if (!occurrences.length) return false;
+
+    // A source click is random-access navigation. For repeated lines (loops, retries,
+    // recursion), land on the occurrence closest to the replay position the developer
+    // is currently investigating instead of arbitrarily rewinding to occurrence #1.
+    let target = occurrences[0];
+    let distance = Math.abs(target - this.position);
+    for (const candidate of occurrences.slice(1)) {
+      const candidateDistance = Math.abs(candidate - this.position);
+      if (candidateDistance < distance || (candidateDistance === distance && candidate >= this.position && target < this.position)) {
+        target = candidate;
+        distance = candidateDistance;
+      }
+    }
+    this.setPosition(target, { preserveEditorSelection: true });
+    return true;
+  }
+  occurrences() {
+    const current = this.current; if (!current) return [];
+    return this.occurrencesForLocation(current.sourcePath, current.line);
+  }
+  moveOccurrence(delta) {
+    const occurrences = this.occurrences(); if (!occurrences.length) return;
+    let cursor = occurrences.indexOf(this.position); if (cursor < 0) cursor = 0;
+    cursor = Math.max(0, Math.min(occurrences.length - 1, cursor + delta)); this.setPosition(occurrences[cursor]);
+  }
+  callStack() {
+    const current = this.current; if (!current) return [];
+    const seq = replayEventSequence(current), thread = replayEventThread(current);
+    return this.entries.filter(entry => {
+      if (replayEventThread(entry)!==thread) return false;
+      const start=replayEventSequence(entry), exit=this.exitByCallId.get(replayEventCallId(entry)), end=exit?replayEventSequence(exit):Infinity;
+      return start <= seq + .25 && end + .25 >= seq;
+    }).sort((a,b)=>Number(a.depth||0)-Number(b.depth||0) || replayEventSequence(a)-replayEventSequence(b));
+  }
+}
+
+class ReplayFilesProvider {
+  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData = this.emitter.event; }
+  refresh() { this.emitter.fire(); }
+  getTreeItem(item) { return item; }
+  getChildren() {
+    if (!nativeReplaySession) return [];
+    return nativeReplaySession.files.map(file => {
+      const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
+      item.description = `${file.lineCount} lines · ${file.events} events`;
+      item.tooltip = `${file.relativePath}\n${file.lineCount} executed lines · ${file.events} replay events`;
+      item.iconPath = new vscode.ThemeIcon(file.test ? 'beaker' : 'file-code');
+      item.contextValue = file.test ? 'replayTestFile' : 'replaySourceFile';
+      item.command = { command:'compositeGradleTests.replay.openFile', title:'Open Executed File', arguments:[file] };
+      return item;
+    });
+  }
+}
+
+class ReplayInstrumentationProvider {
+  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData = this.emitter.event; }
+  refresh() { this.emitter.fire(); }
+  getTreeItem(item) { return item; }
+  getChildren(parent) {
+    const includePackages = flowPackagePrefixes();
+    const includeFiles = flowClassNames();
+    const excludePackages = flowExcludePackagePrefixes();
+    const excludeFiles = flowExcludeClassNames();
+    const ruleCount = includePackages.length + includeFiles.length + excludePackages.length + excludeFiles.length;
+
+    if (!parent) {
+      const roots = [];
+      const rulesRoot = new vscode.TreeItem(`Rules (${ruleCount})`, vscode.TreeItemCollapsibleState.Expanded);
+      rulesRoot.contextValue = 'replayInstrumentationRulesRoot';
+      rulesRoot.__kind = 'rulesRoot';
+      rulesRoot.tooltip = 'Instrumentation rules applied to the next Code Flow run.';
+      roots.push(rulesRoot);
+
+      const adapterClasses = flowStateAdapterClasses();
+      const adaptersRoot = new vscode.TreeItem(`State Adapters (${adapterClasses.length} custom)`, vscode.TreeItemCollapsibleState.Expanded);
+      adaptersRoot.contextValue = 'replayStateAdaptersRoot';
+      adaptersRoot.__kind = 'stateAdaptersRoot';
+      adaptersRoot.description = 'built-ins + project adapters';
+      adaptersRoot.tooltip = 'Semantic state capture for common JDK types and custom project types.';
+      roots.push(adaptersRoot);
+
+      if (nativeReplaySession?.files?.length) {
+        const previousRoot = new vscode.TreeItem(`Previous Run (${nativeReplaySession.files.length})`, vscode.TreeItemCollapsibleState.Expanded);
+        previousRoot.contextValue = 'replayInstrumentationPreviousRoot';
+        previousRoot.__kind = 'previousRoot';
+        previousRoot.description = 'captured files';
+        previousRoot.tooltip = 'Files that participated in the most recent captured execution. Click a file to open it; use the inline action or context menu to change its instrumentation rule.';
+        roots.push(previousRoot);
+      }
+      return roots;
+    }
+
+    if (parent.__kind === 'rulesRoot') {
+      const children = [];
+      const includeCount = includePackages.length + includeFiles.length;
+      const excludeCount = excludePackages.length + excludeFiles.length;
+      const includeRoot = new vscode.TreeItem(`Include (${includeCount})`, includeCount ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+      includeRoot.contextValue = 'replayInstrumentationIncludeRoot'; includeRoot.__kind = 'includeRoot';
+      includeRoot.iconPath = new vscode.ThemeIcon('check');
+      includeRoot.description = includeCount ? '' : 'none';
+      children.push(includeRoot);
+      const excludeRoot = new vscode.TreeItem(`Exclude (${excludeCount})`, excludeCount ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+      excludeRoot.contextValue = 'replayInstrumentationExcludeRoot'; excludeRoot.__kind = 'excludeRoot';
+      excludeRoot.iconPath = new vscode.ThemeIcon('circle-slash');
+      excludeRoot.description = excludeCount ? '' : 'none';
+      children.push(excludeRoot);
+      return children;
+    }
+
+    if (parent.__kind === 'includeRoot') {
+      return [
+        ...includePackages.map(value => this.ruleItem(value, 'package', false)),
+        ...includeFiles.map(value => this.ruleItem(value, 'file', false))
+      ];
+    }
+    if (parent.__kind === 'excludeRoot') {
+      return [
+        ...excludePackages.map(value => this.ruleItem(value, 'package', true)),
+        ...excludeFiles.map(value => this.ruleItem(value, 'file', true))
+      ];
+    }
+    if (parent.__kind === 'stateAdaptersRoot') {
+      const builtIn = new vscode.TreeItem('Built-in adapters', vscode.TreeItemCollapsibleState.None);
+      builtIn.description = 'Path, File, URI/URL, Optional, UUID, java.time, Pattern, Locale, Currency, socket address';
+      builtIn.iconPath = new vscode.ThemeIcon('library');
+      builtIn.tooltip = 'Built-in adapters use safe, known JDK accessors instead of reflecting into JDK implementation internals.';
+      const custom = flowStateAdapterClasses().map(className => {
+        const simple = className.split('.').pop() || className;
+        const item = new vscode.TreeItem(simple, vscode.TreeItemCollapsibleState.None);
+        item.description = className.slice(0, Math.max(0, className.length - simple.length - 1));
+        item.tooltip = `${className}\nLoaded from the test runtime classpath when Code Flow captures state.`;
+        item.iconPath = new vscode.ThemeIcon('symbol-structure');
+        item.contextValue = 'replayStateAdapterCustom';
+        item.__kind = 'stateAdapterCustom';
+        item.adapterClass = className;
+        return item;
+      });
+      return [builtIn, ...custom];
+    }
+
+    if (parent.__kind === 'previousRoot') {
+      const priority = { file: 0, package: 1, automatic: 2, excludedFile: 3, excludedPackage: 4 };
+      return nativeReplaySession.files
+        .map(file => ({ file, status: flowInstrumentationStatus(file.primaryClass || '') }))
+        .sort((a, b) => (priority[a.status.kind] ?? 9) - (priority[b.status.kind] ?? 9) || a.file.name.localeCompare(b.file.name))
+        .map(({ file, status }) => this.previousFileItem(file, status));
+    }
+    return [];
+  }
+
+  ruleItem(value, kind, excluded) {
+    const simpleName = value.split('.').pop() || value;
+    const packageName = kind === 'file' ? value.slice(0, Math.max(0, value.length - simpleName.length - 1)) : '';
+    const item = new vscode.TreeItem(kind === 'package' ? value : simpleName, vscode.TreeItemCollapsibleState.None);
+
+    if (kind === 'file') {
+      const covering = !excluded
+        ? flowPackagePrefixes().filter(rule => flowPrefixMatches(value, rule)).sort((a, b) => b.length - a.length)[0]
+        : flowExcludePackagePrefixes().filter(rule => flowPrefixMatches(value, rule)).sort((a, b) => b.length - a.length)[0];
+      item.description = covering ? `${packageName} · covered by ${covering}` : packageName;
+      item.tooltip = covering
+        ? `${value}\n${excluded ? 'Excluded' : 'Included'} directly, but this rule is already covered by package rule ${covering}.`
+        : `${excluded ? 'Exclude' : 'Instrument'} ${value} and nested classes from the same source file.`;
+    } else {
+      item.description = '';
+      item.tooltip = `${excluded ? 'Exclude' : 'Instrument'} package ${value}`;
+    }
+
+    item.iconPath = new vscode.ThemeIcon(excluded ? 'circle-slash' : (kind === 'package' ? 'package' : 'file-code'));
+    item.contextValue = excluded
+      ? (kind === 'package' ? 'replayInstrumentationExcludePackageRule' : 'replayInstrumentationExcludeFileRule')
+      : (kind === 'package' ? 'replayInstrumentationPackageRule' : 'replayInstrumentationFileRule');
+    item.__kind = kind;
+    item.prefix = value;
+    item.className = kind === 'file' ? value : '';
+    item.packageName = kind === 'package' ? value : packageName;
+    return item;
+  }
+
+  previousFileItem(file, status = flowInstrumentationStatus(file.primaryClass || '')) {
+    const className = file.primaryClass || '';
+    const packageName = file.packageName || '';
+    const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
+
+    const statusMeta = status.kind === 'excludedFile'
+      ? { text: 'excluded · file rule', icon: 'circle-slash' }
+      : status.kind === 'excludedPackage'
+        ? { text: `excluded · ${status.rule}`, icon: 'circle-slash' }
+        : status.kind === 'file'
+          ? { text: 'file rule', icon: 'check' }
+          : status.kind === 'package'
+            ? { text: `package rule · ${status.rule}`, icon: 'check' }
+            : { text: 'automatic', icon: 'circle-outline' };
+
+    item.description = [packageName, statusMeta.text].filter(Boolean).join(' · ');
+    item.iconPath = new vscode.ThemeIcon(statusMeta.icon);
+    item.contextValue = `replayInstrumentationPreviousFile_${status.kind}`;
+    item.__kind = 'previousFile';
+    item.file = file;
+    item.className = className;
+    item.packageName = packageName;
+    item.command = { command: 'compositeGradleTests.replay.openFile', title: 'Open Executed File', arguments: [file] };
+
+    const statusText = status.kind === 'excludedFile' ? `Excluded by file rule ${status.rule}`
+      : status.kind === 'excludedPackage' ? `Excluded by package rule ${status.rule}`
+      : status.kind === 'file' ? 'Included by an explicit file/class rule'
+      : status.kind === 'package' ? `Included by package rule ${status.rule}`
+      : 'Included automatically because it is part of the test package';
+    item.tooltip = `${file.relativePath}\n${className || 'Class name unavailable'}\n${file.lineCount} executed lines · ${file.events} replay events\n${statusText}\n\nClick to open. Use the inline action or right-click to change instrumentation.`;
+    return item;
+  }
+}
+
+class ReplayValueItem extends vscode.TreeItem {
+  constructor(label, value, depth=0) {
+    const fields = depth < 5 ? replayObjectFields(value) : [];
+    const array = Array.isArray(value) && depth < 5 ? value.map((v,i)=>[`[${i}]`,v]) : [];
+    const children = fields.length ? fields : array;
+    super(String(label), children.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+    this.value = value; this.depth = depth; this.children = children;
+    this.description = replayValueLabel(value);
+    this.tooltip = `${label}: ${replayValueLabel(value)}`;
+    this.iconPath = new vscode.ThemeIcon(children.length ? 'symbol-object' : 'symbol-field');
+  }
+}
+class ReplayStateGroupItem extends vscode.TreeItem {
+  constructor(kind, label, entries, description='') {
+    super(label, entries.length ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+    this.kind = kind;
+    this.entries = entries;
+    this.description = description || (entries.length ? String(entries.length) : 'none');
+    this.contextValue = `replayStateGroup.${kind}`;
+    this.iconPath = new vscode.ThemeIcon(kind === 'this' ? 'symbol-object' : kind === 'arguments' ? 'symbol-parameter' : 'symbol-variable');
+    this.tooltip = kind === 'this'
+      ? 'Receiver state for this invocation'
+      : kind === 'arguments'
+        ? 'Arguments passed to this method invocation'
+        : 'Source locals currently in scope, excluding method parameters';
+  }
+}
+
+function replayVisibleLocalEntries(locals) {
+  if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return [];
+  return Object.entries(locals).filter(([name])=>{
+    const text=String(name||'');
+    if(!text.startsWith('slot')) return true;
+    const suffix=text.slice(4);
+    return !suffix || String(Number(suffix))!==suffix;
+  });
+}
+
+function replayArgumentEntries(args, locals) {
+  if (args === undefined) return [];
+  if (!Array.isArray(args)) {
+    if (args && typeof args === 'object') return Object.entries(args);
+    return [['arguments', args]];
+  }
+
+  // LINE snapshots expose source locals in JVM-slot order. Because `this` is omitted,
+  // the first named locals are the method parameters. Use those names to make the
+  // argument section useful while keeping the captured ENTER argument values as the
+  // source of truth. This also lets us remove parameters from the Locals section.
+  const localEntries = replayVisibleLocalEntries(locals);
+  return args.map((value, index) => {
+    const localName = localEntries[index]?.[0];
+    return [localName || `arg ${index}`, value];
+  });
+}
+
+class ReplayStateProvider {
+  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData=this.emitter.event; }
+  refresh(){this.emitter.fire();}
+  getTreeItem(item){return item;}
+  getChildren(parent) {
+    if (!nativeReplaySession?.current) return [];
+    if (parent instanceof ReplayValueItem) return parent.children.map(([k,v])=>new ReplayValueItem(k,v,parent.depth+1));
+    if (parent instanceof ReplayStateGroupItem) return parent.entries.map(([k,v])=>new ReplayValueItem(k,v,0));
+
+    const e=nativeReplaySession.current;
+    const state=nativeReplaySession.stateForLine(e);
+    const groups=[];
+
+    if (state.receiver !== undefined) {
+      groups.push(new ReplayStateGroupItem('this', 'THIS', [['this', state.receiver]], replayValueLabel(state.receiver)));
+    }
+
+    const allLocals = replayVisibleLocalEntries(state.locals);
+    const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
+    if (argumentEntries.length) {
+      groups.push(new ReplayStateGroupItem('arguments', `ARGUMENTS (${argumentEntries.length})`, argumentEntries));
+    }
+
+    // Parameters are present in frameLocals as well as the ENTER argument array.
+    // Keep them out of LOCALS so the UI clearly answers "arguments vs locals".
+    const parameterNames = new Set(argumentEntries.map(([name])=>String(name)));
+    const localEntries = allLocals.filter(([name])=>!parameterNames.has(String(name)));
+    if (localEntries.length) {
+      groups.push(new ReplayStateGroupItem('locals', `LOCALS (${localEntries.length})`, localEntries));
+    }
+
+    if (!groups.length) {
+      const empty=new vscode.TreeItem('No state captured');
+      empty.description='for this line';
+      empty.iconPath=new vscode.ThemeIcon('info');
+      groups.push(empty);
+    }
+    return groups;
+  }
+}
+class ReplayCallStackProvider {
+  constructor(){this.emitter=new vscode.EventEmitter();this.onDidChangeTreeData=this.emitter.event;}
+  refresh(){this.emitter.fire();}
+  getTreeItem(item){return item;}
+  getChildren(){
+    if(!nativeReplaySession)return[];
+    return nativeReplaySession.callStack().map(entry=>{
+      const label=`${replaySimpleClass(entry)}.${entry.methodName || '?'}()`;
+      const item=new vscode.TreeItem(label,vscode.TreeItemCollapsibleState.None);
+      item.description=entry.sourceFile && entry.line ? `${entry.sourceFile}:${entry.line}` : `depth ${entry.depth || 0}`;
+      item.iconPath=new vscode.ThemeIcon('debug-stackframe');
+      if(entry.sourcePath && entry.line)item.command={command:'compositeGradleTests.replay.openLocation',title:'Open Replay Frame',arguments:[entry.sourcePath,Number(entry.line)]};
+      return item;
+    });
+  }
+}
+
+class ReplayTimelineProvider {
+  constructor(){this.view=undefined;this.searchQuery='';}
+  resolveWebviewView(view){
+    this.view=view; view.webview.options={enableScripts:true};
+    view.webview.onDidReceiveMessage(message=>{
+      if(message.command==='search'){this.searchQuery=String(message.query||'');return;}
+      if(!nativeReplaySession)return;
+      if(message.command==='seek')nativeReplaySession.setPosition(Number(message.index));
+      else if(message.command==='into')nativeReplaySession.stepInto();
+      else if(message.command==='over')nativeReplaySession.stepOver();
+      else if(message.command==='out')nativeReplaySession.stepOut();
+      else if(message.command==='previous')nativeReplaySession.previous();
+      else if(message.command==='next')nativeReplaySession.next();
+    });
+    this.render();
+  }
+  render(){
+    if(!this.view)return;
+    const session=nativeReplaySession;
+    if(!session){this.view.webview.html='<!doctype html><body style="font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:12px">Run a test with Code Flow, then open Execution Replay.</body>';return;}
+    // Do not build/render the entire timeline for every step. With no search active,
+    // send only a window around the current position; absolute indices are preserved.
+    // Search still spans the complete lightweight line index, with source text served
+    // from a per-file cache instead of rereading a file once per event.
+    const searching = Boolean(String(this.searchQuery || '').trim());
+    const radius = 250;
+    const start = searching ? 0 : Math.max(0, session.position - radius);
+    const end = searching ? session.lineEvents.length : Math.min(session.lineEvents.length, session.position + radius + 1);
+    const events=session.lineEvents.slice(start,end).map((e,offset)=>({index:start+offset,sequence:e.sequence??e.__nativeIndex,file:e.sourceFile||path.basename(e.sourcePath||''),line:Number(e.line||0),method:`${replaySimpleClass(e)}.${e.methodName||'?'}()`,text:replaySourceText(e)}));
+    const payload=JSON.stringify({events,position:session.position,total:session.lineEvents.length,title:session.result?.displayName||'Test',query:this.searchQuery}).replace(/</g,'\\u003c');
+    this.view.webview.html=`<!doctype html><html><head><meta charset="UTF-8"><style>
+      *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-panel-background,var(--vscode-editor-background));overflow:hidden}.app{height:100%;display:grid;grid-template-rows:auto 1fr}.bar{display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-editor-background) 72%,transparent)}input{flex:1;min-width:120px;height:27px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:2px;padding:4px 8px;outline:none}input:focus{border-color:var(--vscode-focusBorder)}.status{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}.rows{overflow:auto;font-family:var(--vscode-editor-font-family);font-size:12px;padding:2px 0}.row{position:relative;width:100%;display:grid;grid-template-columns:48px minmax(0,1fr);grid-template-areas:'seq head' '. code';column-gap:10px;row-gap:3px;padding:6px 10px 7px;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 42%,transparent);background:transparent;color:inherit;text-align:left;cursor:pointer;min-height:39px}.row:hover{background:var(--vscode-list-hoverBackground)}.row.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.row.active:before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--vscode-focusBorder)}.seq{grid-area:seq;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:1px}.head{grid-area:head;display:flex;align-items:baseline;gap:8px;min-width:0}.method{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;color:var(--vscode-foreground)}.loc{flex:0 1 auto;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground);font-size:11px}.loc:before{content:'·';margin-right:8px;opacity:.7}.code{grid-area:code;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--vscode-editor-foreground);opacity:.82;font-size:11px}.row.active .seq,.row.active .loc,.row.active .code{color:inherit;opacity:.86}@media(max-width:620px){.row{grid-template-columns:40px minmax(0,1fr);column-gap:7px;padding-left:8px;padding-right:8px}.loc{max-width:38%}.bar{padding-left:8px;padding-right:8px}}.hidden{display:none}</style></head><body><div class="app"><div class="bar"><input id="search" placeholder="Search replay — AND terms separated by spaces…"><span id="status" class="status"></span></div><div id="rows" class="rows"></div></div><script>
+      const vscode=acquireVsCodeApi(),model=${payload},root=document.getElementById('rows'),search=document.getElementById('search'),status=document.getElementById('status');let query=String(model.query||'');
+      const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+      function terms(){return query.trim().toLowerCase().split(/\\s+/).filter(Boolean)}
+      function render(){root.innerHTML='';let shown=0;const needles=terms();for(const e of model.events){const hay=[e.sequence,e.method,e.file,e.line,e.text,e.file+':'+e.line].join(' ').toLowerCase();if(needles.length&&!needles.every(term=>hay.includes(term)))continue;shown++;const b=document.createElement('button');b.className='row '+(e.index===model.position?'active':'');b.title=e.method+'  '+e.file+':'+e.line+'\\n'+e.text;b.innerHTML='<span class="seq">#'+esc(e.sequence)+'</span><span class="head"><span class="method">'+esc(e.method)+'</span><span class="loc">'+esc(e.file)+':'+e.line+'</span></span><span class="code">'+esc(e.text)+'</span>';b.onclick=()=>vscode.postMessage({command:'seek',index:e.index});root.appendChild(b)}status.textContent=(model.position+1)+' / '+model.total+(needles.length?' · '+shown+' matches':'');requestAnimationFrame(()=>root.querySelector('.active')?.scrollIntoView({block:'center'}))}
+      search.value=query;search.oninput=()=>{query=search.value;vscode.postMessage({command:'search',query});render()};render();</script></body></html>`;
+  }
+}
+
+async function openReplayEditorLocation(sourcePath, line, preserveFocus=false) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) return;
+  const document=await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+  const targetLine=Math.max(0,Math.min(document.lineCount-1,Number(line||1)-1));
+  const targetColumn = replayEditorColumn || vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
+  const editor=await vscode.window.showTextDocument(document,{preview:true,preserveFocus,viewColumn:targetColumn});
+  const position=new vscode.Position(targetLine,Math.min(document.lineAt(targetLine).firstNonWhitespaceCharacterIndex,document.lineAt(targetLine).text.length));
+  editor.selection=new vscode.Selection(position,position);
+  editor.revealRange(document.lineAt(targetLine).range,vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  applyReplayDecorations(editor);
+}
+function applyReplayDecorations(editor) {
+  if(!nativeReplaySession||!editor)return;
+  const source=normalizePath(editor.document.uri.fsPath);
+  const lines=[...new Set(nativeReplaySession.lineEvents.filter(e=>normalizePath(e.sourcePath)===source).map(e=>Number(e.line||0)).filter(Boolean))];
+  editor.setDecorations(replayExecutedDecoration,lines.map(line=>editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,line-1))).range));
+  const current=nativeReplaySession.current;
+  const currentRanges=current&&normalizePath(current.sourcePath)===source?[editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,Number(current.line||1)-1))).range]:[];
+  editor.setDecorations(replayCurrentDecoration,currentRanges);
+}
+async function updateNativeReplayWorkbench() {
+  const session=nativeReplaySession;if(!session)return;
+  replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
+  for(const editor of vscode.window.visibleTextEditors)applyReplayDecorations(editor);
+  const current=session.current;
+  const preserveEditorSelection = Boolean(session.preserveEditorSelectionOnce);
+  session.preserveEditorSelectionOnce = false;
+  if(current && !preserveEditorSelection) await openReplayEditorLocation(current.sourcePath,current.line,false);
+  vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
+  const occ=session.occurrences(),occIndex=occ.indexOf(session.position);
+  const status=`Replay ${session.position+1}/${session.lineEvents.length}${occ.length>1?` · occurrence ${occIndex+1}/${occ.length}`:''}`;
+  vscode.window.setStatusBarMessage(status,1800);
+}
+async function openNativeReplay(result) {
+  if(!result?.flowEvents?.some(event=>event.event==='line')){
+    vscode.window.showWarningMessage('Composite Gradle Tests: this result has no ordered replay lines. Run the test with Code Flow first.');return;
+  }
+  // Remember the editor group the developer is currently working in before any Replay
+  // sidebar/panel receives focus. All replay source navigation stays in that group.
+  replayEditorColumn = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
+  replaySourceLinesCache.clear();
+  nativeReplaySession=new NativeReplaySession(result);
+  await vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
+  const first=nativeReplaySession.current;
+  if(first) await openReplayEditorLocation(first.sourcePath,first.line,false);
+  // Custom view containers are public workbench surfaces. VS Code exposes the generated
+  // workbench.view.extension.<container id> command for revealing them.
+  await vscode.commands.executeCommand('workbench.view.extension.compositeGradleTests.replay');
+  try{await vscode.commands.executeCommand('workbench.view.extension.compositeGradleTests.replayPanel');}catch(_){}
+  await updateNativeReplayWorkbench();
+}
+function closeNativeReplay() {
+  nativeReplaySession=undefined;
+  replayEditorColumn=undefined;
+  replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
+  for(const editor of vscode.window.visibleTextEditors){editor.setDecorations(replayExecutedDecoration,[]);editor.setDecorations(replayCurrentDecoration,[]);}
+  vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',false);
+}
+function showFlowReplayPanel(result){ return openNativeReplay(result); }
+
+
 function deactivate() {
   if (runningProcess) terminateProcessTree(runningProcess);
   debugEvaluatePanel?.panel?.dispose();
@@ -3801,4 +4831,223 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.workspace.onDidCreateFiles(() => projectTestsProvider.refresh()));
   context.subscriptions.push(vscode.workspace.onDidDeleteFiles(() => projectTestsProvider.refresh()));
   context.subscriptions.push(vscode.workspace.onDidRenameFiles(() => projectTestsProvider.refresh()));
+
+  replayExecutedDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
+    overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.infoForeground'),
+    overviewRulerLane: vscode.OverviewRulerLane.Left
+  });
+  replayCurrentDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: new vscode.ThemeColor('editor.stackFrameHighlightBackground'),
+    borderWidth: '0 0 0 3px',
+    borderStyle: 'solid',
+    borderColor: new vscode.ThemeColor('debugIcon.startForeground'),
+    overviewRulerColor: new vscode.ThemeColor('debugIcon.startForeground'),
+    overviewRulerLane: vscode.OverviewRulerLane.Full,
+    after: { contentText: '  ◀ REPLAY', color: new vscode.ThemeColor('debugIcon.startForeground'), fontStyle: 'italic' }
+  });
+  replayFilesProvider = new ReplayFilesProvider();
+  instrumentationProvider = new ReplayInstrumentationProvider();
+  replayStateProvider = new ReplayStateProvider();
+  replayCallStackProvider = new ReplayCallStackProvider();
+  replayTimelineProvider = new ReplayTimelineProvider();
+  context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayFiles', replayFilesProvider));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayInstrumentation', instrumentationProvider));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayState', replayStateProvider));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayCallStack', replayCallStackProvider));
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider('compositeGradleTests.replayTimeline', replayTimelineProvider, { webviewOptions: { retainContextWhenHidden: true } }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.open', async () => {
+    const result = testHistory.find(item => item?.flowEvents?.some(event => event.event === 'line'));
+    if (result) await openNativeReplay(result); else vscode.window.showWarningMessage('Composite Gradle Tests: no captured execution replay is available yet.');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.openLegacy', () => {
+    const result = nativeReplaySession?.result || testHistory.find(item => item?.flowEvents?.some(event => event.event === 'line'));
+    if (result) showLegacyFlowReplayPanel(result);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.exit', closeNativeReplay));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.first', () => nativeReplaySession?.first()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previous', () => nativeReplaySession?.previous()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.stepInto', () => nativeReplaySession?.stepInto()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.stepOver', () => nativeReplaySession?.stepOver()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.stepOut', () => nativeReplaySession?.stepOut()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.next', () => nativeReplaySession?.next()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.last', () => nativeReplaySession?.last()));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previousOccurrence', () => nativeReplaySession?.moveOccurrence(-1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.nextOccurrence', () => nativeReplaySession?.moveOccurrence(1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addRule', async () => {
+    const choice = await vscode.window.showQuickPick([
+      { label: '$(package) Include Package', description: 'Instrument every class in a package', command: 'compositeGradleTests.replay.instrumentation.addPackage' },
+      { label: '$(file-code) Include File / Class', description: 'Instrument one source file/class and its nested classes', command: 'compositeGradleTests.replay.instrumentation.addFile' },
+      { label: '$(circle-slash) Exclude Package', description: 'Do not instrument classes in a package', command: 'compositeGradleTests.replay.instrumentation.addExcludePackage' },
+      { label: '$(circle-slash) Exclude File / Class', description: 'Do not instrument one source file/class', command: 'compositeGradleTests.replay.instrumentation.addExcludeFile' }
+    ], { title: 'Add Replay Instrumentation Rule', placeHolder: 'Choose a rule type' });
+    if (choice?.command) await vscode.commands.executeCommand(choice.command);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.configureFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.file?.primaryClass);
+    const packageName = normalizeFlowPrefix(item?.packageName || item?.file?.packageName);
+    if (!className && !packageName) return;
+    const status = flowInstrumentationStatus(className);
+    const choices = [];
+    if (className && status.kind !== 'file') choices.push({ label: '$(file-code) Include This File', description: className, action: 'includeFile' });
+    if (packageName && status.kind !== 'package') choices.push({ label: '$(package) Include This Package', description: packageName, action: 'includePackage' });
+    if (className && status.kind !== 'excludedFile') choices.push({ label: '$(circle-slash) Exclude This File', description: className, action: 'excludeFile' });
+    if (packageName && status.kind !== 'excludedPackage') choices.push({ label: '$(circle-slash) Exclude This Package', description: packageName, action: 'excludePackage' });
+    if (flowClassNames().includes(className)) choices.push({ label: '$(trash) Remove File Include Rule', description: className, action: 'removeFile' });
+    if (flowPackagePrefixes().includes(packageName)) choices.push({ label: '$(trash) Remove Package Include Rule', description: packageName, action: 'removePackage' });
+    if (flowExcludeClassNames().includes(className)) choices.push({ label: '$(trash) Remove File Exclusion', description: className, action: 'removeExcludeFile' });
+    if (flowExcludePackagePrefixes().includes(packageName)) choices.push({ label: '$(trash) Remove Package Exclusion', description: packageName, action: 'removeExcludePackage' });
+    const choice = await vscode.window.showQuickPick(choices, { title: `Instrumentation: ${item?.file?.name || className}`, placeHolder: 'Choose how this code should be instrumented' });
+    if (!choice) return;
+    const commands = {
+      includeFile: 'compositeGradleTests.replay.instrumentation.includeFile',
+      includePackage: 'compositeGradleTests.replay.instrumentation.includePackage',
+      excludeFile: 'compositeGradleTests.replay.instrumentation.excludeFile',
+      excludePackage: 'compositeGradleTests.replay.instrumentation.excludePackage',
+      removeFile: 'compositeGradleTests.replay.instrumentation.removeFile',
+      removePackage: 'compositeGradleTests.replay.instrumentation.removePackage',
+      removeExcludeFile: 'compositeGradleTests.replay.instrumentation.removeExcludeFile',
+      removeExcludePackage: 'compositeGradleTests.replay.instrumentation.removeExcludePackage'
+    };
+    await vscode.commands.executeCommand(commands[choice.action], item);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addPackage', async () => {
+    const prefix = await pickReplayInstrumentationPackage('Add Replay Instrumentation Package', 'Java package to instrument on the next Code Flow run');
+    if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addFile', async () => {
+    const className = await pickReplayInstrumentationClass('Add Replay Instrumentation File / Class', 'Fully qualified top-level class name. Nested classes from the same source file are included.');
+    if (!className) return;
+    await updateFlowPrefixSetting('flowClassNames', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addExcludePackage', async () => {
+    const prefix = await pickReplayInstrumentationPackage('Exclude Replay Instrumentation Package', 'Java package to exclude from the next Code Flow run');
+    if (!prefix) return;
+    await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addExcludeFile', async () => {
+    const className = await pickReplayInstrumentationClass('Exclude Replay Instrumentation File / Class', 'Fully qualified top-level class to exclude. Nested classes from the same source file are excluded too.');
+    if (!className) return;
+    await updateFlowPrefixSetting('flowExcludeClassNames', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.addExisting', async () => {
+    const className = normalizeFlowPrefix(await vscode.window.showInputBox({
+      title: 'Register Replay State Adapter',
+      prompt: 'Fully qualified adapter class on the test runtime classpath',
+      placeHolder: 'cgtl.replay.adapters.MoneyReplayAdapter',
+      validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java class name.'
+    }));
+    if (!className) return;
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.remove', async item => {
+    const className = normalizeFlowPrefix(item?.adapterClass || item?.label);
+    if (!className) return;
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => values.filter(v => v !== className));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.create', async () => {
+    const activeUri = vscode.window.activeTextEditor?.document?.uri;
+    const folder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : (vscode.workspace.workspaceFolders || [])[0];
+    if (!folder) return vscode.window.showWarningMessage('Open a workspace before creating a Replay state adapter.');
+    const targetType = normalizeFlowPrefix(await vscode.window.showInputBox({
+      title: 'Create Replay State Adapter',
+      prompt: 'Fully qualified type this adapter should display',
+      placeHolder: 'com.example.order.Money',
+      validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java type name.'
+    }));
+    if (!targetType) return;
+    const targetSimple = targetType.split('.').pop().replace(/[^A-Za-z0-9_$]/g, '') || 'Value';
+    const adapterSimple = await vscode.window.showInputBox({
+      title: 'Create Replay State Adapter', prompt: 'Adapter class name', value: `${targetSimple}ReplayAdapter`,
+      validateInput: value => /^[A-Za-z_$][\w$]*$/.test(String(value || '').trim()) ? undefined : 'Enter a valid Java class name.'
+    });
+    if (!adapterSimple) return;
+    const packageName = 'cgtl.replay.adapters';
+    const adapterClass = `${packageName}.${adapterSimple.trim()}`;
+    let projectRoot = folder.uri.fsPath;
+    if (activeUri?.scheme === 'file') {
+      let cursor = path.dirname(activeUri.fsPath);
+      while (cursor && cursor.startsWith(folder.uri.fsPath)) {
+        if (fs.existsSync(path.join(cursor, 'build.gradle')) || fs.existsSync(path.join(cursor, 'build.gradle.kts'))) { projectRoot = cursor; break; }
+        const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
+      }
+    }
+    const directory = path.join(projectRoot, 'src', 'test', 'java', ...packageName.split('.'));
+    fs.mkdirSync(directory, { recursive: true });
+    const filePath = path.join(directory, `${adapterSimple.trim()}.java`);
+    if (fs.existsSync(filePath)) return vscode.window.showWarningMessage(`Replay adapter already exists: ${filePath}`);
+    const source = `package ${packageName};\n\nimport java.util.LinkedHashMap;\nimport java.util.Map;\n\n/** CGTL Replay state adapter for ${targetType}. */\npublic final class ${adapterSimple.trim()} {\n    private ${adapterSimple.trim()}() {}\n\n    public static boolean supports(Class<?> type) {\n        return \"${targetType}\".equals(type.getName());\n    }\n\n    public static Object snapshot(Object value) {\n        Map<String, Object> state = new LinkedHashMap<>();\n        // Cast value to ${targetType} and add the state that matters to you.\n        // state.put(\"$display\", \"compact label shown in Replay\");\n        // state.put(\"fieldName\", typedValue.someSafeAccessor());\n        state.put(\"runtimeType\", value.getClass().getName());\n        return state;\n    }\n}\n`;
+    fs.writeFileSync(filePath, source, 'utf8');
+    await updateFlowPrefixSetting('flowStateAdapterClasses', values => [...values, adapterClass]);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+    await vscode.window.showTextDocument(document, { preview: false });
+    instrumentationProvider?.refresh();
+  }));
+
+  // Backward-compatible alias for older command palette/menu references.
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addInclude', () => vscode.commands.executeCommand('compositeGradleTests.replay.instrumentation.addPackage')));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addExclude', () => vscode.commands.executeCommand('compositeGradleTests.replay.instrumentation.addExcludePackage')));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removePrefix', async item => {
+    if (!item?.prefix) return;
+    const key = item.__kind === 'file' ? 'flowClassNames' : 'flowPackagePrefixes';
+    await updateFlowPrefixSetting(key, values => values.filter(v => v !== item.prefix));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.file?.primaryClass); if (!className) return;
+    await updateFlowPrefixSetting('flowClassNames', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removeFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.file?.primaryClass); if (!className) return;
+    await updateFlowPrefixSetting('flowClassNames', values => values.filter(v => v !== className));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includePackage', async item => {
+    const prefix = normalizeFlowPrefix(item?.packageName || item?.file?.packageName); if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removePackage', async item => {
+    const prefix = normalizeFlowPrefix(item?.packageName || item?.file?.packageName); if (!prefix) return;
+    await updateFlowPrefixSetting('flowPackagePrefixes', values => values.filter(v => v !== prefix));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.excludeFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.file?.primaryClass); if (!className) return;
+    await updateFlowPrefixSetting('flowExcludeClassNames', values => [...values, className]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.excludePackage', async item => {
+    const prefix = normalizeFlowPrefix(item?.packageName || item?.file?.packageName); if (!prefix) return;
+    await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => [...values, prefix]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removeExcludeFile', async item => {
+    const className = normalizeFlowPrefix(item?.className || item?.prefix); if (!className) return;
+    await updateFlowPrefixSetting('flowExcludeClassNames', values => values.filter(v => v !== className));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.removeExcludePackage', async item => {
+    const prefix = normalizeFlowPrefix(item?.packageName || item?.prefix); if (!prefix) return;
+    await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => values.filter(v => v !== prefix));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.openFile', async file => {
+    if (!nativeReplaySession || !file?.sourcePath) return;
+    const index=nativeReplaySession.lineEvents.findIndex(event=>normalizePath(event.sourcePath)===normalizePath(file.sourcePath));
+    if(index>=0)nativeReplaySession.setPosition(index);else await openReplayEditorLocation(file.sourcePath,1,false);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.openLocation', (sourcePath,line) => openReplayEditorLocation(sourcePath,line,false)));
+  context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
+    if (!nativeReplaySession || event.kind !== vscode.TextEditorSelectionChangeKind.Mouse) return;
+    const editor = event.textEditor;
+    if (!editor || editor.document.uri.scheme !== 'file') return;
+
+    // The normal editor is the Replay navigation surface: clicking an executed line
+    // seeks the captured execution directly to that source location. Non-executed
+    // lines retain normal VS Code cursor behavior and do not alter Replay.
+    const line = Number(event.selections?.[0]?.active?.line ?? -1) + 1;
+    if (line <= 0) return;
+    nativeReplaySession.seekToSourceLine(editor.document.uri.fsPath, line);
+  }));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('compositeGradleTests.flowPackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowClassNames') || event.affectsConfiguration('compositeGradleTests.flowExcludePackagePrefixes') || event.affectsConfiguration('compositeGradleTests.flowExcludeClassNames') || event.affectsConfiguration('compositeGradleTests.flowStateAdapterClasses')) instrumentationProvider?.refresh();
+  }));
+  context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(editors => { if(nativeReplaySession)for(const editor of editors)applyReplayDecorations(editor); }));
 };

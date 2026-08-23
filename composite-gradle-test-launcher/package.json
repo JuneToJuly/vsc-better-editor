@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.3.29",
+  "version": "0.4.28",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -41,7 +41,11 @@
     "onCommand:compositeGradleTests.runMethodWithReport",
     "onCommand:compositeGradleTests.runClassWithReport",
     "onCommand:compositeGradleTests.runMethodWithFlow",
-    "onCommand:compositeGradleTests.runClassWithFlow"
+    "onCommand:compositeGradleTests.runClassWithFlow",
+    "onView:compositeGradleTests.replayFiles",
+    "onView:compositeGradleTests.replayTimeline",
+    "onCommand:compositeGradleTests.replay.open",
+    "onView:compositeGradleTests.replayInstrumentation"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -170,6 +174,166 @@
         "command": "compositeGradleTests.projectTests.clearAffected",
         "title": "Composite Gradle: Clear Affected Tests",
         "icon": "$(close)"
+      },
+      {
+        "command": "compositeGradleTests.replay.open",
+        "title": "Composite Gradle: Open Execution Replay",
+        "icon": "$(debug-alt-small)"
+      },
+      {
+        "command": "compositeGradleTests.replay.openLegacy",
+        "title": "Composite Gradle: Open Legacy Execution Replay",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "compositeGradleTests.replay.exit",
+        "title": "Composite Gradle: Exit Execution Replay",
+        "icon": "$(close)"
+      },
+      {
+        "command": "compositeGradleTests.replay.first",
+        "title": "Replay: First Step",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "compositeGradleTests.replay.previous",
+        "title": "Replay: Previous Line",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepInto",
+        "title": "Replay: Step Into",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOver",
+        "title": "Replay: Step Over",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOut",
+        "title": "Replay: Step Out",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "compositeGradleTests.replay.next",
+        "title": "Replay: Next Line",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "compositeGradleTests.replay.last",
+        "title": "Replay: Last Step",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "compositeGradleTests.replay.previousOccurrence",
+        "title": "Replay: Previous Occurrence",
+        "icon": "$(chevron-left)"
+      },
+      {
+        "command": "compositeGradleTests.replay.nextOccurrence",
+        "title": "Replay: Next Occurrence",
+        "icon": "$(chevron-right)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addInclude",
+        "title": "Replay Instrumentation: Add Package / Class",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExclude",
+        "title": "Replay Instrumentation: Add Exclusion",
+        "icon": "$(exclude)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removePrefix",
+        "title": "Replay Instrumentation: Remove Rule",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.includeFile",
+        "title": "Replay Instrumentation: Include File",
+        "icon": "$(check)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.excludeFile",
+        "title": "Replay Instrumentation: Exclude File",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.includePackage",
+        "title": "Replay Instrumentation: Include Package",
+        "icon": "$(package)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.excludePackage",
+        "title": "Replay Instrumentation: Exclude Package",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addPackage",
+        "title": "Replay Instrumentation: Add Package",
+        "icon": "$(package)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addFile",
+        "title": "Replay Instrumentation: Add File / Class",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeFile",
+        "title": "Replay Instrumentation: Remove File / Class",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExcludePackage",
+        "title": "Replay Instrumentation: Exclude Package",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addExcludeFile",
+        "title": "Replay Instrumentation: Exclude File / Class",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeExcludePackage",
+        "title": "Replay Instrumentation: Remove Package Exclusion",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removeExcludeFile",
+        "title": "Replay Instrumentation: Remove File / Class Exclusion",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.removePackage",
+        "title": "Replay Instrumentation: Remove Package",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.addRule",
+        "title": "Replay Instrumentation: Add Rule",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.configureFile",
+        "title": "Replay Instrumentation: Configure File",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.create",
+        "title": "Replay State: Create Custom Adapter",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.addExisting",
+        "title": "Replay State: Register Existing Adapter",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.adapters.remove",
+        "title": "Replay State: Remove Custom Adapter",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -255,6 +419,51 @@
           "command": "compositeGradleTests.projectTests.runAffected",
           "when": "view == compositeGradleTests.projectTestsView",
           "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.first",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.previous",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepInto",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOver",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@4"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOut",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@5"
+        },
+        {
+          "command": "compositeGradleTests.replay.next",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@6"
+        },
+        {
+          "command": "compositeGradleTests.replay.exit",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@9"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.addRule",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.create",
+          "when": "view == compositeGradleTests.replayInstrumentation",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -282,6 +491,66 @@
           "command": "compositeGradleTests.projectTests.run",
           "when": "view == compositeGradleTests.projectTestsView && viewItem == compositeGradleTests.affectedMethod",
           "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removePrefix",
+          "when": "view == compositeGradleTests.replayInstrumentation && (viewItem == replayInstrumentationPackageRule || viewItem == replayInstrumentationFileRule)",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removeExcludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationExcludePackageRule",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removeExcludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationExcludeFileRule",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_(automatic|package)/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile_file",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_(automatic|file)/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.removePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayInstrumentationPreviousFile_package",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludeFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.excludePackage",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.configureFile",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem =~ /replayInstrumentationPreviousFile_.+/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.addExisting",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayStateAdaptersRoot",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.adapters.remove",
+          "when": "view == compositeGradleTests.replayInstrumentation && viewItem == replayStateAdapterCustom",
+          "group": "inline@1"
         }
       ],
       "editor/title": [
@@ -289,6 +558,26 @@
           "command": "compositeGradleTests.evaluateCurrentExpression",
           "when": "compositeGradleTests.evaluateEditorActive",
           "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepInto",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@20"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOver",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@21"
+        },
+        {
+          "command": "compositeGradleTests.replay.stepOut",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@22"
+        },
+        {
+          "command": "compositeGradleTests.replay.exit",
+          "when": "compositeGradleTests.replayActive",
+          "group": "navigation@29"
         }
       ]
     },
@@ -309,6 +598,21 @@
         "key": "ctrl+enter",
         "mac": "cmd+enter",
         "when": "editorTextFocus && inDebugMode"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepInto",
+        "key": "f11",
+        "when": "compositeGradleTests.replayActive"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOver",
+        "key": "f10",
+        "when": "compositeGradleTests.replayActive"
+      },
+      {
+        "command": "compositeGradleTests.replay.stepOut",
+        "key": "shift+f11",
+        "when": "compositeGradleTests.replayActive"
       }
     ],
     "configuration": {
@@ -454,7 +758,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional fully qualified class or package prefixes traced by Code Flow and Analyze. Prefixes are matched against every class loaded by the test JVM, including classes from dependency JARs. Examples: org.myorganization or org.myorganization.shared. A trailing .* is optional."
+          "description": "Additional Java packages traced by Code Flow and Analyze. Package rules instrument classes beneath the package. Use flowClassNames when you only want one source file/class."
         },
         "compositeGradleTests.flowLineState": {
           "type": "string",
@@ -502,6 +806,46 @@
           "minimum": 1,
           "maximum": 200,
           "description": "Maximum collection, map, or array items captured in each checkpoint."
+        },
+        "compositeGradleTests.flowExcludePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Reserved instrumentation exclusions. Temporarily not applied in 0.4.9 while the known-good additional-package matcher is restored."
+        },
+        "compositeGradleTests.flowClassNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified top-level classes traced by Code Flow and Analyze. Each class rule instruments that class and its nested/anonymous classes without instrumenting the rest of its package."
+        },
+        "compositeGradleTests.flowExcludePackagePrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Java packages excluded from Code Flow instrumentation even when covered by an included package."
+        },
+        "compositeGradleTests.flowExcludeClassNames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified top-level classes excluded from Code Flow instrumentation. Nested/anonymous classes from the same source file are excluded too."
+        },
+        "compositeGradleTests.flowStateAdapterClasses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fully qualified custom Replay state adapter classes available on the test runtime classpath. Recommended location: src/test/java/cgtl/replay/adapters. Each class exposes public static boolean supports(Class<?>) and public static Object snapshot(Object)."
         }
       }
     },
@@ -511,6 +855,11 @@
           "id": "compositeGradleTests",
           "title": "Gradle Tests",
           "icon": "resources/gradle-tests.svg"
+        },
+        {
+          "id": "compositeGradleTests.replay",
+          "title": "Execution Replay",
+          "icon": "resources/replay.svg"
         }
       ],
       "panel": [
@@ -518,6 +867,11 @@
           "id": "compositeGradleTests.evaluatePanel",
           "title": "Evaluate",
           "icon": "resources/gradle-tests.svg"
+        },
+        {
+          "id": "compositeGradleTests.replayPanel",
+          "title": "Replay",
+          "icon": "resources/replay.svg"
         }
       ]
     },
@@ -538,6 +892,31 @@
           "type": "webview",
           "id": "compositeGradleTests.evaluateView",
           "name": "Expressions"
+        }
+      ],
+      "compositeGradleTests.replay": [
+        {
+          "id": "compositeGradleTests.replayFiles",
+          "name": "Where Did Execution Go?"
+        },
+        {
+          "id": "compositeGradleTests.replayInstrumentation",
+          "name": "Instrumentation"
+        },
+        {
+          "id": "compositeGradleTests.replayState",
+          "name": "State"
+        },
+        {
+          "id": "compositeGradleTests.replayCallStack",
+          "name": "Call Stack"
+        }
+      ],
+      "compositeGradleTests.replayPanel": [
+        {
+          "type": "webview",
+          "id": "compositeGradleTests.replayTimeline",
+          "name": "Replay Timeline"
         }
       ]
     }

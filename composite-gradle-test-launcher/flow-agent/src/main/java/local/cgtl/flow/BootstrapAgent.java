@@ -208,6 +208,8 @@ public final class BootstrapAgent {
     if (value == null) return "null";
     if (isScalar(value)) return scalarSnapshot(value);
     Class<?> type = value.getClass();
+    SnapshotAdapters.Adapted adapted = SnapshotAdapters.adapt(value);
+    if (adapted != null) return adaptedSnapshot(value, type, adapted, level, seen, forceRoot);
     if (seen.put(value, Boolean.TRUE) != null) {
       SnapshotCacheEntry cached = cacheEntry(value, type);
       return refSnapshot(cached, type, "cycle");
@@ -269,6 +271,78 @@ public final class BootstrapAgent {
     return "{\"snapshotId\":" + quote(cache.id) + ",\"checkpointSequence\":" + cache.checkpointSequence + ",\"type\":" + quote(type.getName()) + "," + body + "}";
   }
 
+
+  private static String adaptedSnapshot(Object original, Class<?> type, SnapshotAdapters.Adapted adapted, int level, IdentityHashMap<Object, Boolean> seen, boolean forceRoot) {
+    SnapshotCacheEntry cache = cacheEntry(original, type);
+    Object adaptedValue = SnapshotAdapters.sanitizedAdapterValue(adapted);
+    String fingerprint = "adapter:" + adapted.adapter + ":" + structuredFingerprint(adaptedValue, level, new IdentityHashMap<>());
+    boolean unchanged = !forceRoot && fingerprint.equals(cache.fingerprint);
+    if (unchanged) return refSnapshot(cache, type, "unchanged");
+    cache.fingerprint = fingerprint;
+    cache.checkpointSequence = sharedSequence == null ? 0 : sharedSequence.get();
+    StringBuilder out = new StringBuilder("{\"snapshotId\":").append(quote(cache.id))
+        .append(",\"checkpointSequence\":").append(cache.checkpointSequence)
+        .append(",\"type\":").append(quote(type.getName()))
+        .append(",\"adapter\":").append(quote(adapted.adapter));
+    if (adapted.display != null) out.append(",\"value\":").append(quote(limit(adapted.display, 500)));
+    if (adaptedValue instanceof Map<?,?> map) {
+      out.append(",\"fields\":").append(structuredJson(map, level + 1, seen));
+    } else if (adaptedValue instanceof Collection<?> || (adaptedValue != null && adaptedValue.getClass().isArray())) {
+      out.append(",\"items\":").append(structuredJson(adaptedValue, level + 1, seen));
+    } else if (adapted.display == null) {
+      out.append(",\"value\":").append(structuredJson(adaptedValue, level + 1, seen));
+    }
+    return out.append('}').toString();
+  }
+
+  private static String structuredJson(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+    if (value == null) return "null";
+    if (SnapshotAdapters.isSimple(value)) return scalarSnapshot(value);
+    if (level > snapshotMaxDepth + 2) return summary(value);
+    if (value instanceof Map<?,?> map) {
+      StringBuilder out = new StringBuilder("{"); int i = 0;
+      for (Map.Entry<?,?> entry : map.entrySet()) {
+        if (i++ >= snapshotMaxFields) break;
+        if (i > 1) out.append(',');
+        out.append(quote(String.valueOf(entry.getKey()))).append(':').append(structuredJson(entry.getValue(), level + 1, seen));
+      }
+      return out.append('}').toString();
+    }
+    if (value instanceof Collection<?> collection) {
+      StringBuilder out = new StringBuilder("["); int i = 0;
+      for (Object item : collection) { if (i++ >= snapshotMaxItems) break; if (i > 1) out.append(','); out.append(structuredJson(item, level + 1, seen)); }
+      return out.append(']').toString();
+    }
+    if (value.getClass().isArray()) {
+      StringBuilder out = new StringBuilder("["); int n = Math.min(Array.getLength(value), snapshotMaxItems);
+      for (int i = 0; i < n; i++) { if (i > 0) out.append(','); out.append(structuredJson(Array.get(value, i), level + 1, seen)); }
+      return out.append(']').toString();
+    }
+    return snapshot(value, level, seen, false);
+  }
+
+  private static String structuredFingerprint(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+    if (value == null) return "null";
+    if (SnapshotAdapters.isSimple(value)) return value.getClass().getName() + ':' + String.valueOf(value);
+    if (seen.put(value, Boolean.TRUE) != null) return "cycle@" + System.identityHashCode(value);
+    if (value instanceof Map<?,?> map) {
+      StringBuilder out = new StringBuilder("map"); int i = 0;
+      for (Map.Entry<?,?> entry : map.entrySet()) { if (i++ >= snapshotMaxFields) break; out.append('|').append(entry.getKey()).append('=').append(structuredFingerprint(entry.getValue(), level + 1, seen)); }
+      return out.toString();
+    }
+    if (value instanceof Collection<?> collection) {
+      StringBuilder out = new StringBuilder("collection"); int i = 0;
+      for (Object item : collection) { if (i++ >= snapshotMaxItems) break; out.append('|').append(structuredFingerprint(item, level + 1, seen)); }
+      return out.toString();
+    }
+    if (value.getClass().isArray()) {
+      StringBuilder out = new StringBuilder("array"); int n = Math.min(Array.getLength(value), snapshotMaxItems);
+      for (int i = 0; i < n; i++) out.append('|').append(structuredFingerprint(Array.get(value, i), level + 1, seen));
+      return out.toString();
+    }
+    return fingerprint(value, level, seen);
+  }
+
   private static boolean isScalar(Object value) {
     return value instanceof String || value instanceof Character || value instanceof Enum<?> || value instanceof Number || value instanceof Boolean;
   }
@@ -297,6 +371,8 @@ public final class BootstrapAgent {
   private static String fingerprint(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
     if (value == null) return "null";
     if (isScalar(value)) return value.getClass().getName() + ":" + String.valueOf(value);
+    SnapshotAdapters.Adapted adapted = SnapshotAdapters.adapt(value);
+    if (adapted != null) return "adapter:" + adapted.adapter + ":" + structuredFingerprint(SnapshotAdapters.sanitizedAdapterValue(adapted), level, seen);
     if (seen.put(value, Boolean.TRUE) != null) return "cycle@" + System.identityHashCode(value);
     Class<?> type = value.getClass();
     StringBuilder out = new StringBuilder(type.getName()).append('@').append(System.identityHashCode(value));
@@ -397,6 +473,7 @@ public final class BootstrapAgent {
     Class<?> generated = Class.forName("local.cgtl.flow.generated.OrderedLineAgent", true, loader);
     generated.getMethod("install", Instrumentation.class).invoke(null, instrumentation);
     System.err.println("[CGTL FLOW] Ordered line replay installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
+    System.err.println("[CGTL FLOW] Ordered line replay exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
   }
 
   private static String generatedSource() {
@@ -450,9 +527,29 @@ public final class BootstrapAgent {
             if (prefix.isEmpty()) continue;
             matcher = matcher.or(ElementMatchers.nameStartsWith(prefix + ".")).or(ElementMatchers.named(prefix));
           }
+          String excludes = System.getProperty("cgtl.flow.excludes", "").trim();
+          ElementMatcher.Junction<TypeDescription> excluded = ElementMatchers.none();
+          for (String token : excludes.split(",")) {
+            String rule = token.trim();
+            if (rule.isEmpty()) continue;
+            if (rule.startsWith("package:")) {
+              String pkg = rule.substring("package:".length()).trim();
+              if (!pkg.isEmpty()) excluded = excluded.or(ElementMatchers.nameStartsWith(pkg + ".")).or(ElementMatchers.named(pkg));
+            } else if (rule.startsWith("class:")) {
+              String cls = rule.substring("class:".length()).trim();
+              if (!cls.isEmpty()) excluded = excluded.or(ElementMatchers.named(cls)).or(ElementMatchers.nameStartsWith(cls + "$"));
+            }
+          }
+          String adapterClasses = System.getProperty("cgtl.flow.stateAdapters", "").trim();
+          for (String token : adapterClasses.split(",")) {
+            String adapterClass = token.trim();
+            if (adapterClass.isEmpty()) continue;
+            excluded = excluded.or(ElementMatchers.named(adapterClass)).or(ElementMatchers.nameStartsWith(adapterClass + "$"));
+          }
           // Test classes are intentionally included. Ordered replay must begin in
           // the selected test method so its setup and initial call site are visible.
           return matcher
+              .and(ElementMatchers.not(excluded))
               .and(ElementMatchers.not(ElementMatchers.isInterface()))
               .and(ElementMatchers.not(ElementMatchers.isAnnotation()))
               .and(ElementMatchers.not(ElementMatchers.isSynthetic()));
