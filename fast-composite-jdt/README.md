@@ -20,6 +20,8 @@ A deliberately small Gradle composite-build adapter for VS Code's Red Hat Java/J
 - **Fast Composite JDT: Switch Composite Root** — make a registered root the active JDT dependency configuration. If cached, switching does not invoke Gradle.
 - **Fast Composite JDT: Remove Composite Root** — unregister a root and delete its cached model.
 - **Fast Composite JDT: Show Model Status**
+- **Fast Composite JDT: Inspect Project Model** — open a read-only editor report for one project: Gradle identity, source roots, local project references, and external compile dependencies.
+- **Fast Composite JDT: Inspect Dependency** — inspect one local/JAR dependency and see how it resolved.
 - **Fast Composite JDT: Clear Cached Model** — clears only the active root's cache.
 
 The status-bar item shows the active root and opens **Switch Composite Root** when clicked.
@@ -43,3 +45,9 @@ JDT project names are derived from Gradle build-tree project paths. For example,
 ## 0.2.3 behavior
 
 Model extraction resolves compile classpaths only. Runtime and annotation-processor classpaths are intentionally not resolved. Resync also removes Fast Composite JDT-owned `.project`, `.classpath`, and generated JDT prefs for projects that disappeared from the active composite model.
+
+## 0.3.0 diagnostics
+
+The model inspector reports the effective JDT compile model without invoking Gradle. Gradle-cache JAR paths are translated back to `group:module:version` coordinates when possible.
+
+Every resync writes phase timings to **Output → Fast Composite JDT** for Gradle extraction, model parse/merge, metadata cleanup/write, cache write, JDT synchronization, and total resync time.

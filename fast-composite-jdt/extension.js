@@ -26,6 +26,18 @@ function log(message) {
   output?.appendLine(line);
 }
 
+function elapsedMs(start) {
+  return Number(process.hrtime.bigint() - start) / 1_000_000;
+}
+
+function formatMs(ms) {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
+}
+
+function logTiming(label, ms) {
+  log(`Timing · ${label.padEnd(28)} ${formatMs(ms)}`);
+}
+
 function sha1(value) {
   return crypto.createHash('sha1').update(String(value)).digest('hex');
 }
@@ -198,6 +210,7 @@ async function setJdtGradleImportDisabled() {
 
 async function runProcess(command, args, cwd, env = {}) {
   return new Promise((resolve, reject) => {
+    const processStart = process.hrtime.bigint();
     log(`Executing: ${command} ${args.join(' ')}`);
     const child = cp.spawn(command, args, {
       cwd,
@@ -210,7 +223,9 @@ async function runProcess(command, args, cwd, env = {}) {
     child.stderr.on('data', d => { stderr += d; output?.append(d.toString()); });
     child.on('error', reject);
     child.on('close', code => {
-      if (code === 0) resolve({ stdout, stderr });
+      const ms = elapsedMs(processStart);
+      logTiming('Gradle process', ms);
+      if (code === 0) resolve({ stdout, stderr, elapsedMs: ms });
       else reject(new Error(`Gradle exited with code ${code}\n${stderr || stdout}`));
     });
   });
@@ -504,8 +519,11 @@ async function extractModel(context, root) {
   const wrapper = wrapperFor(root);
   const configuredArgs = vscode.workspace.getConfiguration('fastCompositeJdt').get('gradleArguments', ['--quiet', '--no-scan']);
   const args = ['--init-script', initScript, '__fastCompositeJdtExport', `-DfastCompositeJdt.outputDir=${extractionDir}`, ...configuredArgs];
+  const gradleStart = process.hrtime.bigint();
   await runProcess(wrapper, args, root);
+  const gradleMs = elapsedMs(gradleStart);
 
+  const parseStart = process.hrtime.bigint();
   const files = (await fsp.readdir(extractionDir)).filter(f => f.endsWith('.json'));
   if (!files.length) throw new Error('Gradle completed but produced no Java project model files.');
 
@@ -527,12 +545,14 @@ async function extractModel(context, root) {
   }
 
   if (!projects.length) throw new Error('No Java projects were discovered in the composite build.');
+  const parseMs = elapsedMs(parseStart);
   return {
     modelVersion: MODEL_VERSION,
     generatedAt: new Date().toISOString(),
     compositeRoot: normalize(root),
     builds: builds.map(b => ({ buildPath: b.buildPath, rootDir: b.rootDir, rootName: b.rootName })),
-    projects
+    projects,
+    timings: { gradleMs, parseMs }
   };
 }
 
@@ -549,10 +569,26 @@ async function resync(context, quiet = false) {
   try {
     const previousModel = await readCachedModel(context, root);
     const model = await extractModel(context, root);
+
+    const metadataStart = process.hrtime.bigint();
     const { changed, transition } = await applyModelTransition(context, root, model, previousModel);
+    const metadataMs = elapsedMs(metadataStart);
+
+    const cacheStart = process.hrtime.bigint();
     await writeCachedModel(context, root, model);
+    const cacheMs = elapsedMs(cacheStart);
+
+    const jdtStart = process.hrtime.bigint();
     await notifyJdtOfChanges(transition);
+    const jdtMs = elapsedMs(jdtStart);
+
     const ms = Date.now() - start;
+    logTiming('Gradle extraction', model.timings?.gradleMs || 0);
+    logTiming('Model parse / merge', model.timings?.parseMs || 0);
+    logTiming('Metadata cleanup / write', metadataMs);
+    logTiming('Cache write', cacheMs);
+    logTiming('JDT synchronization', jdtMs);
+    logTiming('Total resync', ms);
     status.text = `$(check) JDT: ${rootDisplayName(root)}`;
     status.tooltip = `${model.projects.length} projects · synced in ${(ms / 1000).toFixed(1)}s\n${root}`;
     log(`Resync complete [${rootDisplayName(root)}]: ${model.projects.length} Java projects, ${changed} metadata files changed, ${ms}ms.`);
@@ -706,6 +742,205 @@ async function showStatus(context) {
   vscode.window.showInformationMessage(`Fast Composite JDT: ${rootDisplayName(active)} · ${model.projects.length} projects, ${localDeps} project refs, ${jars} classpath files · ${roots.length} registered roots.`);
 }
 
+
+function projectForActiveEditor(model) {
+  const file = vscode.window.activeTextEditor?.document?.uri?.fsPath;
+  if (!file) return undefined;
+  const normalizedFile = normalize(file);
+  return (model.projects || [])
+    .filter(p => normalizedFile === normalize(p.directory) || normalizedFile.startsWith(normalize(p.directory) + path.sep))
+    .sort((a, b) => normalize(b.directory).length - normalize(a.directory).length)[0];
+}
+
+function effectiveExternalLibraries(model, project) {
+  const localOutputs = new Set();
+  for (const p of model.projects || []) {
+    for (const source of p.sources || []) {
+      if (source.output) localOutputs.add(normalize(source.output));
+    }
+  }
+  const seen = new Set();
+  const result = [];
+  for (const lib of project.libraries || []) {
+    if (!lib) continue;
+    const absolute = normalize(lib);
+    if (localOutputs.has(absolute) || seen.has(absolute)) continue;
+    seen.add(absolute);
+    result.push(absolute);
+  }
+  return result;
+}
+
+function externalDependencyInfo(file) {
+  const absolute = normalize(file);
+  const parts = absolute.split(/[\\/]+/);
+  const marker = parts.findIndex((part, i) => part === 'modules-2' && parts[i + 1] === 'files-2.1');
+  if (marker >= 0 && parts.length > marker + 4) {
+    const group = parts[marker + 2];
+    const module = parts[marker + 3];
+    const version = parts[marker + 4];
+    return {
+      label: `${group}:${module}:${version}`,
+      coordinate: `${group}:${module}:${version}`,
+      group,
+      module,
+      version,
+      file: absolute
+    };
+  }
+  return { label: path.basename(absolute), coordinate: undefined, file: absolute };
+}
+
+function assignEclipseNames(model) {
+  const used = new Set();
+  for (const p of model.projects || []) p.eclipseName = eclipseProjectName(p, used);
+  return model;
+}
+
+function projectInspectorText(model, project) {
+  assignEclipseNames(model);
+  const byTreePath = new Map((model.projects || []).map(p => [p.buildTreePath, p]));
+  const lines = [
+    'FAST COMPOSITE JDT — MODEL INSPECTOR',
+    '',
+    `Project:          ${project.eclipseName || project.name}`,
+    `Gradle project:   ${project.gradlePath || ':'}`,
+    `Build path:       ${project.buildPath || ':'}`,
+    `Build-tree path:  ${project.buildTreePath || project.gradlePath || ':'}`,
+    `Directory:        ${project.directory}`,
+    `Java version:     ${project.javaVersion || 'default JDT/JDK'}`,
+    '',
+    'SOURCE ROOTS'
+  ];
+  const sources = project.sources || [];
+  if (!sources.length) lines.push('  (none)');
+  for (const source of sources) {
+    lines.push(`  ${source.test ? '[test] ' : '       '}${relativeOrAbsolute(project.directory, source.path)}`);
+    if (source.output) lines.push(`         output → ${relativeOrAbsolute(project.directory, source.output)}`);
+  }
+
+  lines.push('', 'LOCAL PROJECT DEPENDENCIES');
+  const locals = project.projectDependencies || [];
+  if (!locals.length) lines.push('  (none)');
+  for (const dep of locals) {
+    const target = byTreePath.get(dep.buildTreePath);
+    lines.push(`  ${target?.eclipseName || dep.projectName || dep.buildTreePath}`);
+    lines.push('    Resolution:      LOCAL PROJECT');
+    lines.push(`    Gradle path:     ${dep.projectPath || ':'}`);
+    lines.push(`    Build-tree path: ${dep.buildTreePath}`);
+    if (target) lines.push(`    Directory:       ${target.directory}`);
+  }
+
+  lines.push('', 'EXTERNAL COMPILE DEPENDENCIES');
+  const external = effectiveExternalLibraries(model, project).map(externalDependencyInfo);
+  if (!external.length) lines.push('  (none)');
+  for (const dep of external) {
+    lines.push(`  ${dep.label}`);
+    lines.push('    Resolution: JAR');
+    lines.push(`    File:       ${dep.file}`);
+  }
+
+  lines.push('', 'MODEL');
+  lines.push(`  Generated: ${model.generatedAt || 'unknown'}`);
+  lines.push(`  Root:      ${model.compositeRoot || 'unknown'}`);
+  return lines.join('\n') + '\n';
+}
+
+async function pickModelProject(context, title) {
+  const root = getActiveRoot(context);
+  if (!root) {
+    vscode.window.showInformationMessage('Fast Composite JDT: no active composite root.');
+    return {};
+  }
+  const model = await readCachedModel(context, root);
+  if (!model) {
+    vscode.window.showInformationMessage('Fast Composite JDT: no cached model. Run Resync Java Model first.');
+    return {};
+  }
+  assignEclipseNames(model);
+  const current = projectForActiveEditor(model);
+  const ordered = [...model.projects].sort((a, b) => {
+    if (a === current) return -1;
+    if (b === current) return 1;
+    return (a.eclipseName || a.name).localeCompare(b.eclipseName || b.name);
+  });
+  const pick = await vscode.window.showQuickPick(ordered.map(p => ({
+    label: p.eclipseName || p.name,
+    description: p === current ? '$(file-code) current file' : p.gradlePath,
+    detail: `${p.buildTreePath} · ${p.directory}`,
+    project: p
+  })), { title, placeHolder: 'Select a Java project' });
+  return { model, project: pick?.project };
+}
+
+async function showInspectorDocument(content, title) {
+  const doc = await vscode.workspace.openTextDocument({ content, language: 'plaintext' });
+  await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Active });
+  log(`Opened model inspector: ${title}`);
+}
+
+async function inspectModel(context) {
+  const { model, project } = await pickModelProject(context, 'Fast Composite JDT: Inspect Project Model');
+  if (!model || !project) return;
+  await showInspectorDocument(projectInspectorText(model, project), project.eclipseName || project.name);
+}
+
+async function inspectDependency(context) {
+  const { model, project } = await pickModelProject(context, 'Fast Composite JDT: Inspect Dependency');
+  if (!model || !project) return;
+  assignEclipseNames(model);
+  const byTreePath = new Map(model.projects.map(p => [p.buildTreePath, p]));
+  const choices = [];
+  for (const dep of project.projectDependencies || []) {
+    const target = byTreePath.get(dep.buildTreePath);
+    choices.push({
+      label: target?.eclipseName || dep.projectName || dep.buildTreePath,
+      description: 'LOCAL PROJECT',
+      detail: dep.buildTreePath,
+      kind: 'local', dep, target
+    });
+  }
+  for (const file of effectiveExternalLibraries(model, project)) {
+    const info = externalDependencyInfo(file);
+    choices.push({
+      label: info.label,
+      description: 'JAR',
+      detail: info.file,
+      kind: 'jar', info
+    });
+  }
+  const pick = await vscode.window.showQuickPick(choices, {
+    title: `Dependencies · ${project.eclipseName || project.name}`,
+    placeHolder: 'Select a dependency to inspect'
+  });
+  if (!pick) return;
+
+  let lines;
+  if (pick.kind === 'local') {
+    lines = [
+      'FAST COMPOSITE JDT — DEPENDENCY INSPECTOR', '',
+      `From project:     ${project.eclipseName || project.name}`,
+      `Dependency:       ${pick.target?.eclipseName || pick.dep.projectName || pick.dep.buildTreePath}`,
+      'Resolution:       LOCAL PROJECT',
+      `Gradle path:      ${pick.dep.projectPath || ':'}`,
+      `Build-tree path:  ${pick.dep.buildTreePath}`,
+      `Project directory:${pick.target ? ' ' + pick.target.directory : ' (not present in current model)'}`
+    ];
+  } else {
+    lines = [
+      'FAST COMPOSITE JDT — DEPENDENCY INSPECTOR', '',
+      `From project: ${project.eclipseName || project.name}`,
+      `Dependency:   ${pick.info.coordinate || pick.info.label}`,
+      'Resolution:   JAR',
+      `File:         ${pick.info.file}`
+    ];
+    if (pick.info.coordinate) {
+      lines.splice(4, 0, `Coordinates:  ${pick.info.coordinate}`);
+    }
+  }
+  await showInspectorDocument(lines.join('\n') + '\n', pick.label);
+}
+
 async function clearModel(context) {
   const active = getActiveRoot(context);
   if (!active) return;
@@ -730,6 +965,8 @@ async function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.switchRoot', () => switchCompositeRoot(context)));
   context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.removeRoot', () => removeCompositeRoot(context)));
   context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.showStatus', () => showStatus(context)));
+  context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.inspectModel', () => inspectModel(context)));
+  context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.inspectDependency', () => inspectDependency(context)));
   context.subscriptions.push(vscode.commands.registerCommand('fastCompositeJdt.clearModel', () => clearModel(context)));
 
   await setJdtGradleImportDisabled();

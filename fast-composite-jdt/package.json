@@ -2,7 +2,7 @@
   "name": "fast-composite-jdt",
   "displayName": "Fast Composite JDT",
   "description": "Fast Gradle composite-build to JDT adapter with cached named composite roots and instant model switching.",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -19,7 +19,9 @@
     "onCommand:fastCompositeJdt.showStatus",
     "onCommand:fastCompositeJdt.addRoot",
     "onCommand:fastCompositeJdt.switchRoot",
-    "onCommand:fastCompositeJdt.removeRoot"
+    "onCommand:fastCompositeJdt.removeRoot",
+    "onCommand:fastCompositeJdt.inspectModel",
+    "onCommand:fastCompositeJdt.inspectDependency"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -47,6 +49,14 @@
       {
         "command": "fastCompositeJdt.clearModel",
         "title": "Fast Composite JDT: Clear Cached Model"
+      },
+      {
+        "command": "fastCompositeJdt.inspectModel",
+        "title": "Fast Composite JDT: Inspect Project Model"
+      },
+      {
+        "command": "fastCompositeJdt.inspectDependency",
+        "title": "Fast Composite JDT: Inspect Dependency"
       }
     ],
     "configuration": {
