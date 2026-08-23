@@ -6,6 +6,11 @@ Current version: **0.3.26**
 
 Run and debug Java tests through a **root Gradle composite build**, even when the standard VS Code Java test runner cannot model the build correctly.
 
+### Replay: Up To Here
+
+Replay now has an **Up To Here** display mode. Toggle it from the Replay Timeline toolbar to hide execution that occurs after the currently selected replay event. Editor execution shading and **Where Did Execution Go?** both follow the selected execution frontier, while the current Replay line remains highlighted. Switch back to **Full Run** with the same toggle.
+
+
 ## Features
 
 - Run the JUnit test method under the cursor.

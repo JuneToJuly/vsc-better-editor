@@ -4083,6 +4083,9 @@ let replayExecutedDecoration;
 let replayCurrentDecoration;
 let replayInlineValueDecoration;
 let replayInlineValuesEnabled = true;
+let replayUpToHereEnabled = false;
+let replayUpToHereLocked = false;
+let replayUpToHereLockPosition = undefined;
 let replayEditorColumn;
 
 function replayEventCallId(event) {
@@ -4414,6 +4417,44 @@ class NativeReplaySession {
   previous() { this.setPosition(this.position - 1); }
   next() { this.setPosition(this.position + 1); }
 
+  upToHerePosition() {
+    if (!replayUpToHereEnabled) return this.lineEvents.length - 1;
+    if (replayUpToHereLocked && Number.isInteger(replayUpToHereLockPosition)) {
+      return Math.max(0, Math.min(this.lineEvents.length - 1, replayUpToHereLockPosition));
+    }
+    return this.position;
+  }
+
+  displayLineEvents() {
+    if (!replayUpToHereEnabled) return this.lineEvents;
+    // lineEvents is already execution ordered. In Up To Here mode we deliberately
+    // hide knowledge from the future. A locked frontier remains anchored to the
+    // event where it was locked even while the developer navigates elsewhere.
+    return this.lineEvents.slice(0, this.upToHerePosition() + 1);
+  }
+
+  displayFiles() {
+    if (!replayUpToHereEnabled) return this.files;
+    const map = new Map();
+    for (const event of this.displayLineEvents()) {
+      const key = normalizePath(event.sourcePath);
+      let file = map.get(key);
+      if (!file) {
+        file = { sourcePath: event.sourcePath, name: path.basename(event.sourcePath), relativePath: vscode.workspace.asRelativePath(event.sourcePath, false), lines: new Set(), classNames: new Set(), events: 0, test: /[\\/]src[\\/]test[\\/]/i.test(event.sourcePath) };
+        map.set(key, file);
+      }
+      file.lines.add(Number(event.line));
+      if (event.className) file.classNames.add(String(event.className));
+      file.events++;
+    }
+    return [...map.values()].map(file => {
+      const classNames = [...file.classNames];
+      const primaryClass = classNames[0] || '';
+      const packageName = primaryClass.includes('.') ? primaryClass.split('.').slice(0, -1).join('.') : '';
+      return { ...file, classNames, primaryClass, packageName, lineCount: file.lines.size };
+    }).sort((a,b) => Number(b.test)-Number(a.test) || b.events-a.events || a.name.localeCompare(b.name));
+  }
+
   firstLineForCall(callId, minimum = -Infinity) {
     if (!callId) return null;
     return this.lineEvents.find(e => replayEventCallId(e) === callId && replayEventSequence(e) >= minimum) || null;
@@ -4669,10 +4710,12 @@ class ReplayFilesProvider {
   getTreeItem(item) { return item; }
   getChildren() {
     if (!nativeReplaySession) return [];
-    return nativeReplaySession.files.map(file => {
+    const files = nativeReplaySession.displayFiles();
+    return files.map(file => {
       const item = new vscode.TreeItem(file.name, vscode.TreeItemCollapsibleState.None);
-      item.description = `${file.lineCount} lines · ${file.events} events`;
-      item.tooltip = `${file.relativePath}\n${file.lineCount} executed lines · ${file.events} replay events`;
+      const upToHereSuffix = replayUpToHereEnabled ? (replayUpToHereLocked ? ` · locked #${nativeReplaySession.upToHerePosition()+1}` : ' · up to here') : '';
+      item.description = `${file.lineCount} lines · ${file.events} events${upToHereSuffix}`;
+      item.tooltip = `${file.relativePath}\n${file.lineCount} executed lines · ${file.events} replay events${replayUpToHereEnabled ? (replayUpToHereLocked ? `\nExecution frontier is locked at Replay event #${nativeReplaySession.upToHerePosition()+1}.` : '\nOnly execution through the selected Replay event is shown.') : ''}`;
       item.iconPath = new vscode.ThemeIcon(file.test ? 'beaker' : 'file-code');
       item.contextValue = file.test ? 'replayTestFile' : 'replaySourceFile';
       item.command = { command:'compositeGradleTests.replay.openFile', title:'Open Executed File', arguments:[file] };
@@ -5007,7 +5050,8 @@ async function openReplayEditorLocation(sourcePath, line, preserveFocus=false) {
 function applyReplayDecorations(editor) {
   if(!nativeReplaySession||!editor)return;
   const source=normalizePath(editor.document.uri.fsPath);
-  const lines=[...new Set(nativeReplaySession.lineEvents.filter(e=>normalizePath(e.sourcePath)===source).map(e=>Number(e.line||0)).filter(Boolean))];
+  const displayEvents = nativeReplaySession.displayLineEvents();
+  const lines=[...new Set(displayEvents.filter(e=>normalizePath(e.sourcePath)===source).map(e=>Number(e.line||0)).filter(Boolean))];
   editor.setDecorations(replayExecutedDecoration,lines.map(line=>editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,line-1))).range));
   const current=nativeReplaySession.current;
   const currentOptions=[];
@@ -5030,7 +5074,7 @@ async function updateNativeReplayWorkbench() {
   if(current && !preserveEditorSelection) await openReplayEditorLocation(current.sourcePath,current.line,false);
   vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
   const occ=session.occurrences(),occIndex=occ.indexOf(session.position);
-  const status=`Replay ${session.position+1}/${session.lineEvents.length}${occ.length>1?` · occurrence ${occIndex+1}/${occ.length}`:''}`;
+  const status=`Replay ${session.position+1}/${session.lineEvents.length}${occ.length>1?` · occurrence ${occIndex+1}/${occ.length}`:''}${replayUpToHereEnabled?(replayUpToHereLocked?` · Up To Here locked #${session.upToHerePosition()+1}`:' · Up To Here'):''}`;
   vscode.window.setStatusBarMessage(status,1800);
 }
 async function openNativeReplay(result) {
@@ -5041,6 +5085,9 @@ async function openNativeReplay(result) {
   // sidebar/panel receives focus. All replay source navigation stays in that group.
   replayEditorColumn = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
   replaySourceLinesCache.clear();
+  replayUpToHereLocked = false;
+  replayUpToHereLockPosition = undefined;
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereLocked', false);
   nativeReplaySession=new NativeReplaySession(result);
   await vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
   const first=nativeReplaySession.current;
@@ -5053,6 +5100,9 @@ async function openNativeReplay(result) {
 }
 function closeNativeReplay() {
   nativeReplaySession=undefined;
+  replayUpToHereLocked = false;
+  replayUpToHereLockPosition = undefined;
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereLocked', false);
   replayEditorColumn=undefined;
   replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
   for(const editor of vscode.window.visibleTextEditors){editor.setDecorations(replayExecutedDecoration,[]);editor.setDecorations(replayCurrentDecoration,[]);editor.setDecorations(replayInlineValueDecoration,[]);}
@@ -5111,7 +5161,12 @@ module.exports.activate = async function patchedActivate(context) {
     after: { color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic', margin: '0 0 0 1.5em' }
   });
   replayInlineValuesEnabled = context.workspaceState.get('compositeGradleTests.replay.inlineValuesEnabled', true) !== false;
+  replayUpToHereEnabled = context.workspaceState.get('compositeGradleTests.replay.upToHereEnabled', false) === true;
+  replayUpToHereLocked = false;
+  replayUpToHereLockPosition = undefined;
   vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayInlineValuesEnabled', replayInlineValuesEnabled);
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereEnabled', replayUpToHereEnabled);
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereLocked', false);
 
   replayInlineValueDecoration = vscode.window.createTextEditorDecorationType({
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
@@ -5138,6 +5193,37 @@ module.exports.activate = async function patchedActivate(context) {
     await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayInlineValuesEnabled', replayInlineValuesEnabled);
     for (const editor of vscode.window.visibleTextEditors) applyReplayDecorations(editor);
     vscode.window.setStatusBarMessage(`Replay inline values ${replayInlineValuesEnabled ? 'shown' : 'hidden'}`, 1600);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.toggleUpToHere', async () => {
+    replayUpToHereEnabled = !replayUpToHereEnabled;
+    if (!replayUpToHereEnabled) {
+      replayUpToHereLocked = false;
+      replayUpToHereLockPosition = undefined;
+    }
+    await context.workspaceState.update('compositeGradleTests.replay.upToHereEnabled', replayUpToHereEnabled);
+    await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereEnabled', replayUpToHereEnabled);
+    await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereLocked', replayUpToHereLocked);
+    replayFilesProvider?.refresh();
+    for (const editor of vscode.window.visibleTextEditors) applyReplayDecorations(editor);
+    vscode.window.setStatusBarMessage(`Replay execution view: ${replayUpToHereEnabled ? 'Up To Here' : 'Full Run'}`, 1800);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.toggleUpToHereLock', async () => {
+    if (!nativeReplaySession) return;
+    if (!replayUpToHereEnabled) {
+      replayUpToHereEnabled = true;
+      await context.workspaceState.update('compositeGradleTests.replay.upToHereEnabled', true);
+      await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereEnabled', true);
+    }
+    replayUpToHereLocked = !replayUpToHereLocked;
+    replayUpToHereLockPosition = replayUpToHereLocked ? nativeReplaySession.position : undefined;
+    await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayUpToHereLocked', replayUpToHereLocked);
+    replayFilesProvider?.refresh();
+    for (const editor of vscode.window.visibleTextEditors) applyReplayDecorations(editor);
+    if (replayUpToHereLocked) {
+      vscode.window.setStatusBarMessage(`Replay Up To Here locked at event #${replayUpToHereLockPosition + 1}`, 2200);
+    } else {
+      vscode.window.setStatusBarMessage('Replay Up To Here unlocked — frontier follows the current Replay event', 2200);
+    }
   }));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.open', async () => {
     const result = testHistory.find(item => item?.flowEvents?.some(event => event.event === 'line'));

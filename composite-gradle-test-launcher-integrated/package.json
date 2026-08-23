@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.35",
+  "version": "0.4.37",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -194,6 +194,16 @@
         "command": "compositeGradleTests.replay.toggleInlineValues",
         "title": "Replay: Toggle Inline Values",
         "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "compositeGradleTests.replay.toggleUpToHere",
+        "title": "Replay: Toggle Up To Here",
+        "icon": "$(history)"
+      },
+      {
+        "command": "compositeGradleTests.replay.toggleUpToHereLock",
+        "title": "Replay: Lock / Unlock Up To Here",
+        "icon": "$(lock)"
       },
       {
         "command": "compositeGradleTests.replay.first",
@@ -489,6 +499,16 @@
           "command": "compositeGradleTests.replay.adapters.create",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.toggleUpToHere",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@7"
+        },
+        {
+          "command": "compositeGradleTests.replay.toggleUpToHereLock",
+          "when": "view == compositeGradleTests.replayTimeline && compositeGradleTests.replayUpToHereEnabled",
+          "group": "navigation@7.5"
         },
         {
           "command": "compositeGradleTests.replay.toggleInlineValues",
