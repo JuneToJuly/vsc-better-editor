@@ -9,7 +9,6 @@ const required = [
   'showTextDocument',
   'findFiles',
   'searchFiles',
-  'buildSearchGlob',
   'fileSearchMinChars',
   'fileSearchResultLimit',
   'createWebviewPanel',
@@ -22,7 +21,7 @@ if (source.includes('getAllFiles()')) throw new Error('Workspace files should no
 const pkg = require('./package.json');
 if (pkg.main !== './extension.js') throw new Error('Unexpected extension entrypoint');
 if (!pkg.contributes?.keybindings?.some(k => k.command === 'recentBuffers.show' && k.key === 'ctrl+e')) throw new Error('Ctrl+E keybinding missing');
-if (pkg.version !== '0.3.6') throw new Error('Expected version 0.3.6');
+if (pkg.version !== '0.3.7') throw new Error('Expected version 0.3.7');
 if (pkg.contributes.configuration.properties['recentBuffers.allFilesLimit']) throw new Error('Legacy allFilesLimit setting should be removed');
 console.log('Recent Buffers source/package checks passed.');
 
@@ -59,8 +58,15 @@ if (!source.includes("const currentUri = sourceUri ||")) throw new Error("Invoca
 if (!pkg.contributes.commands.some(c => c.command === "recentBuffers.previousBuffer")) throw new Error("Previous Buffer command not contributed");
 console.log("Previous-buffer regression checks passed.");
 
-if (!source.includes("function buildCandidateQueries(query)")) throw new Error("Missing progressive All Files discovery");
-if (!source.includes("candidateLimit")) throw new Error("All Files candidate search must stay bounded");
 if (!source.includes("buildFileRows(files, q, history)")) throw new Error("All Files must use shared fuzzy row scoring");
 if (!source.includes("minmax(190px, 275px)")) throw new Error("Filename column was not widened");
 console.log("Unified search/readability regression checks passed.");
+
+if (!source.includes("async function getWorkspaceFileIndex()")) throw new Error("Missing lazy workspace file index");
+if (!source.includes("searchText: `${label} ${path}`")) throw new Error("Indexed files must use filename + path");
+if (!source.includes("fuzzyScore(normalized, item.searchText)")) throw new Error("All Files must use the shared fuzzy matcher");
+if (!source.includes("addWorkspaceFilesToIndex")) throw new Error("Missing create-file index update");
+if (!source.includes("removeWorkspaceFilesFromIndex")) throw new Error("Missing delete-file index update");
+if (!source.includes("renameWorkspaceFilesInIndex")) throw new Error("Missing rename-file index update");
+if (!pkg.contributes.configuration.properties["recentBuffers.workspaceIndexLimit"]) throw new Error("Missing workspace index limit");
+console.log("Lazy-index regression checks passed.");

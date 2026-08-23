@@ -2,7 +2,7 @@
   "name": "recent-buffers",
   "displayName": "Recent Buffers",
   "description": "JetBrains-style recent buffer navigation for VS Code with cursor restoration and on-demand bounded file search.",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -105,6 +105,13 @@
           "minimum": 25,
           "maximum": 2000,
           "description": "Maximum file results requested for each on-demand workspace search."
+        },
+        "recentBuffers.workspaceIndexLimit": {
+          "type": "number",
+          "default": 50000,
+          "minimum": 1000,
+          "maximum": 250000,
+          "description": "Maximum number of workspace files kept in the lazy in-memory All Files index."
         }
       }
     }

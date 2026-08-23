@@ -6,7 +6,9 @@ const HISTORY_KEY = 'recentBuffers.history.v2';
 let activePanel;
 let searchRequestId = 0;
 const fileSearchCache = new Map();
-let fileSearchGeneration = 0;
+let workspaceFileIndex;
+let workspaceFileIndexPromise;
+let workspaceFileIndexGeneration = 0;
 let disposed = false;
 
 function activate(context) {
@@ -25,10 +27,10 @@ function activate(context) {
       if (e.textEditor !== vscode.window.activeTextEditor || !isNavigableDocument(e.textEditor.document)) return;
       history.touch(e.textEditor.document.uri, e.selections[0]);
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(invalidateFileCaches),
-    vscode.workspace.onDidCreateFiles(invalidateFileCaches),
-    vscode.workspace.onDidDeleteFiles(invalidateFileCaches),
-    vscode.workspace.onDidRenameFiles(invalidateFileCaches),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => invalidateWorkspaceFileIndex()),
+    vscode.workspace.onDidCreateFiles((e) => addWorkspaceFilesToIndex(e.files)),
+    vscode.workspace.onDidDeleteFiles((e) => removeWorkspaceFilesFromIndex(e.files)),
+    vscode.workspace.onDidRenameFiles((e) => renameWorkspaceFilesInIndex(e.files)),
     vscode.commands.registerCommand('recentBuffers.show', () => showRecentBuffers(context, history)),
     vscode.commands.registerCommand('recentBuffers.previousBuffer', () => openPreviousBuffer(history)),
     vscode.commands.registerCommand('recentBuffers.moveDown', () => {
@@ -197,7 +199,6 @@ async function showRecentBuffers(context, history) {
 async function sendState(panel, history, query, requestId = ++searchRequestId, sourceUri) {
   if (!panel || panel !== activePanel) return;
   const q = query.trim();
-  const generation = ++fileSearchGeneration;
   const recentRows = buildRecentRows(history, q, sourceUri).map(row => ({ ...row, section: 'recent' }));
   let fileRows = [];
   let searchedAllFiles = false;
@@ -206,7 +207,7 @@ async function sendState(panel, history, query, requestId = ++searchRequestId, s
   if (q.length >= minChars) {
     searchedAllFiles = true;
     const files = await searchFiles(q);
-    if (!activePanel || panel !== activePanel || generation !== fileSearchGeneration) return;
+    if (!activePanel || panel !== activePanel) return;
     const recentUris = new Set(recentRows.map(row => row.uri));
     fileRows = buildFileRows(files, q, history)
       .filter(row => !recentUris.has(row.uri))
@@ -338,92 +339,109 @@ async function searchFiles(query) {
   const cached = fileSearchCache.get(key);
   if (cached) return cached;
 
-  const config = vscode.workspace.getConfiguration('recentBuffers');
-  const resultLimit = config.get('fileSearchResultLimit', 200);
-  const exclude = config.get('exclude');
+  const files = await getWorkspaceFileIndex();
+  const limit = vscode.workspace.getConfiguration('recentBuffers').get('fileSearchResultLimit', 200);
 
-  // VS Code's findFiles is glob-based, while Recent Buffers uses our fuzzy
-  // score over "filename + path". A strict glob can therefore discard files
-  // that the fuzzy matcher would accept (for example filename text followed
-  // by workspace/path text). Discover a bounded candidate pool
-  // progressively, then let buildFileRows apply the exact same fuzzyScore.
-  const candidateLimit = Math.max(resultLimit * 3, 400);
-  const probes = buildCandidateQueries(normalized);
-  const seen = new Map();
-
-  for (const probe of probes) {
-    const remaining = candidateLimit - seen.size;
-    if (remaining <= 0) break;
-    const found = await vscode.workspace.findFiles(buildSearchGlob(probe), exclude, remaining);
-    for (const uri of found) {
-      seen.set(uri.toString(), uri);
-      if (seen.size >= candidateLimit) break;
-    }
-
-    // Once the exact/long probe gives us a useful candidate set, don't keep
-    // broadening unless it is sparse. This keeps large workspaces cheap.
-    if (seen.size >= Math.min(resultLimit, 80)) break;
+  const scored = [];
+  for (const item of files) {
+    const score = fuzzyScore(normalized, item.searchText);
+    if (score < 0) continue;
+    scored.push({ uri: item.uri, score, label: item.label, path: item.path });
   }
 
-  const files = [...seen.values()];
-  fileSearchCache.set(key, files);
-  while (fileSearchCache.size > 50) {
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    a.label.localeCompare(b.label) ||
+    a.path.localeCompare(b.path)
+  );
+
+  const result = scored.slice(0, limit).map(item => item.uri);
+  fileSearchCache.set(key, result);
+  while (fileSearchCache.size > 100) {
     fileSearchCache.delete(fileSearchCache.keys().next().value);
   }
-  return files;
+  return result;
 }
 
-function buildCandidateQueries(query) {
-  const compact = [...query].filter(ch => !/\s/.test(ch)).join('');
-  if (!compact) return [];
+async function getWorkspaceFileIndex() {
+  if (workspaceFileIndex) return workspaceFileIndex;
+  if (workspaceFileIndexPromise) return workspaceFileIndexPromise;
 
-  const probes = [compact];
+  const generation = workspaceFileIndexGeneration;
+  workspaceFileIndexPromise = (async () => {
+    const config = vscode.workspace.getConfiguration('recentBuffers');
+    const exclude = config.get('exclude');
+    const maxFiles = config.get('workspaceIndexLimit', 50000);
+    const uris = await vscode.workspace.findFiles('**/*', exclude, maxFiles);
+    const index = uris.map(makeIndexedFile);
 
-  // Progressively remove trailing context. This lets a query such as
-  // "build.gradleian" discover build.gradle candidates first; fuzzyScore then
-  // checks the complete query against "build.gradle ians/build.gradle".
-  const lengths = [
-    Math.floor(compact.length * 0.80),
-    Math.floor(compact.length * 0.65),
-    Math.floor(compact.length * 0.50)
-  ];
+    if (generation !== workspaceFileIndexGeneration) return undefined;
+    workspaceFileIndex = index;
+    return index;
+  })();
 
-  // If a recognizable filename extension is present, keep the filename-sized
-  // prefix as an especially useful discovery probe.
-  const extensionMatch = compact.match(/^(.+?\.(?:java|gradle|kts|json|ya?ml|xml|md|js|ts|properties))/i);
-  if (extensionMatch) probes.push(extensionMatch[1]);
-
-  for (const len of lengths) {
-    if (len >= 2) probes.push(compact.slice(0, len));
+  try {
+    const index = await workspaceFileIndexPromise;
+    if (index) return index;
+  } finally {
+    workspaceFileIndexPromise = undefined;
   }
 
-  // Preserve order while removing duplicates.
-  return [...new Set(probes)];
+  return getWorkspaceFileIndex();
 }
 
-function buildSearchGlob(query) {
-  const chars = [...query].filter(ch => !/\s/.test(ch));
-  const pieces = chars.map(ch => {
-    if (/[a-z]/i.test(ch)) {
-      const lower = ch.toLowerCase();
-      const upper = ch.toUpperCase();
-      return lower === upper ? escapeGlobChar(ch) : `[${lower}${upper}]`;
-    }
-    return escapeGlobChar(ch);
-  });
-  return `**/*${pieces.join('*')}*`;
+function makeIndexedFile(uri) {
+  const label = basename(uri.path);
+  const path = relativeDisplayPath(uri);
+  return {
+    uri,
+    uriString: uri.toString(),
+    label,
+    path,
+    searchText: `${label} ${path}`
+  };
 }
 
-function escapeGlobChar(ch) {
-  if (ch === '[') return '[[]';
-  if (ch === ']') return '[]]';
-  if ('*?{}!'.includes(ch)) return `\\${ch}`;
-  return ch;
-}
-
-function invalidateFileCaches() {
+function invalidateWorkspaceFileIndex() {
+  workspaceFileIndexGeneration += 1;
+  workspaceFileIndex = undefined;
+  workspaceFileIndexPromise = undefined;
   fileSearchCache.clear();
-  fileSearchGeneration += 1;
+}
+
+function addWorkspaceFilesToIndex(files) {
+  fileSearchCache.clear();
+  if (!workspaceFileIndex) return;
+  const existing = new Set(workspaceFileIndex.map(item => item.uriString));
+  for (const uri of files || []) {
+    const key = uri.toString();
+    if (existing.has(key)) continue;
+    workspaceFileIndex.push(makeIndexedFile(uri));
+    existing.add(key);
+  }
+}
+
+function removeWorkspaceFilesFromIndex(files) {
+  fileSearchCache.clear();
+  if (!workspaceFileIndex) return;
+  const removed = new Set((files || []).map(uri => uri.toString()));
+  workspaceFileIndex = workspaceFileIndex.filter(item => !removed.has(item.uriString));
+}
+
+function renameWorkspaceFilesInIndex(changes) {
+  fileSearchCache.clear();
+  if (!workspaceFileIndex) return;
+
+  const removed = new Set((changes || []).map(change => change.oldUri.toString()));
+  workspaceFileIndex = workspaceFileIndex.filter(item => !removed.has(item.uriString));
+
+  const existing = new Set(workspaceFileIndex.map(item => item.uriString));
+  for (const change of changes || []) {
+    const key = change.newUri.toString();
+    if (existing.has(key)) continue;
+    workspaceFileIndex.push(makeIndexedFile(change.newUri));
+    existing.add(key);
+  }
 }
 
 function fuzzyScore(query, candidate) {

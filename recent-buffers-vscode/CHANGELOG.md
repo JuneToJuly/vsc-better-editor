@@ -1,3 +1,12 @@
+## 0.3.7
+
+- Replaced progressive glob probing with a lazy in-memory workspace file index.
+- Recent Buffers and All Files now use the exact same fuzzy matcher over `filename + path`.
+- All Files search becomes pure in-memory scoring after the index is built.
+- The index is created only when All Files is first needed; opening Recent Buffers remains cheap.
+- Create/delete/rename events update an existing index incrementally; workspace-root changes invalidate it.
+- Added `recentBuffers.workspaceIndexLimit` with a default safety cap of 50,000 files.
+
 ## 0.3.6
 
 - All Files now uses bounded progressive candidate discovery followed by the same fuzzy `filename + path` scoring as Recent Buffers.
