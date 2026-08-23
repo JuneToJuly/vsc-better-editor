@@ -5022,12 +5022,18 @@ class ReplayInstrumentationProvider {
 }
 
 class ReplayValueItem extends vscode.TreeItem {
-  constructor(label, value, depth=0) {
+  constructor(label, value, depth=0, filteredChildren=null, searchActive=false) {
     const fields = depth < 5 ? replayObjectFields(value) : [];
     const array = Array.isArray(value) && depth < 5 ? value.map((v,i)=>[`[${i}]`,v]) : [];
-    const children = fields.length ? fields : array;
-    super(String(label), children.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
-    this.value = value; this.depth = depth; this.children = children;
+    const naturalChildren = fields.length ? fields : array;
+    const children = Array.isArray(filteredChildren) ? filteredChildren : naturalChildren;
+    super(
+      String(label),
+      children.length
+        ? (searchActive ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed)
+        : vscode.TreeItemCollapsibleState.None
+    );
+    this.value = value; this.depth = depth; this.children = children; this.searchActive = searchActive;
     this.description = replayValueLabel(value);
     this.tooltip = `${label}: ${replayValueLabel(value)}`;
     this.iconPath = new vscode.ThemeIcon(children.length ? 'symbol-object' : 'symbol-field');
@@ -5077,14 +5083,81 @@ function replayArgumentEntries(args, locals) {
   });
 }
 
+function replayStateSearchTerms(query) {
+  return String(query || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function replayStateSearchValueText(value) {
+  const parts = [replayValueLabel(value)];
+  if (value === null || value === undefined) return parts.join(' ').toLowerCase();
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    parts.push(String(value));
+  } else if (typeof value === 'object') {
+    for (const key of ['$display', 'type', 'className', 'value', 'text', 'name']) {
+      if (value[key] !== undefined && value[key] !== null && typeof value[key] !== 'object') parts.push(String(value[key]));
+    }
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+function replayStateFilteredEntry(label, value, terms, ancestors=[], depth=0) {
+  if (!terms.length) return { label, value, children: null };
+  const pathText = [...ancestors, String(label), replayStateSearchValueText(value)].join(' ').toLowerCase();
+  const selfMatches = terms.every(term => pathText.includes(term));
+
+  if (depth >= 5) return selfMatches ? { label, value, children: [] } : null;
+  const fields = replayObjectFields(value);
+  const array = Array.isArray(value) ? value.map((v,i)=>[`[${i}]`,v]) : [];
+  const children = fields.length ? fields : array;
+  const matchingChildren = [];
+  for (const [childLabel, childValue] of children) {
+    const child = replayStateFilteredEntry(childLabel, childValue, terms, [...ancestors, String(label)], depth + 1);
+    if (child) matchingChildren.push(child);
+  }
+
+  // If this exact path matches, keep it even when it is a leaf. For containers, retain
+  // matching descendants only so a search does not explode the tree with unrelated state.
+  if (selfMatches || matchingChildren.length) return { label, value, children: matchingChildren };
+  return null;
+}
+
 class ReplayStateProvider {
-  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData=this.emitter.event; }
+  constructor() {
+    this.emitter = new vscode.EventEmitter();
+    this.onDidChangeTreeData=this.emitter.event;
+    this.searchQuery='';
+  }
   refresh(){this.emitter.fire();}
+  async setSearchQuery(query) {
+    this.searchQuery=String(query || '').trim();
+    await vscode.commands.executeCommand('setContext','compositeGradleTests.replayStateSearchActive',Boolean(this.searchQuery));
+    this.refresh();
+  }
+  clearSearch(){return this.setSearchQuery('');}
   getTreeItem(item){return item;}
   getChildren(parent) {
     if (!nativeReplaySession?.current) return [];
-    if (parent instanceof ReplayValueItem) return parent.children.map(([k,v])=>new ReplayValueItem(k,v,parent.depth+1));
-    if (parent instanceof ReplayStateGroupItem) return parent.entries.map(([k,v])=>new ReplayValueItem(k,v,0));
+    const terms=replayStateSearchTerms(this.searchQuery);
+    const searchActive=terms.length>0;
+
+    if (parent instanceof ReplayValueItem) {
+      return parent.children.map(child=>{
+        if (child && !Array.isArray(child) && Object.prototype.hasOwnProperty.call(child,'label')) {
+          return new ReplayValueItem(child.label,child.value,parent.depth+1,child.children || [],true);
+        }
+        const [k,v]=child;
+        return new ReplayValueItem(k,v,parent.depth+1,null,parent.searchActive);
+      });
+    }
+    if (parent instanceof ReplayStateGroupItem) {
+      if (Array.isArray(parent.filteredMatches)) {
+        return parent.filteredMatches.map(match=>new ReplayValueItem(match.label,match.value,0,match.children || [],true));
+      }
+      if (!searchActive) return parent.entries.map(([k,v])=>new ReplayValueItem(k,v,0));
+      return parent.entries.map(([k,v])=>replayStateFilteredEntry(k,v,terms,[parent.label],0))
+        .filter(Boolean)
+        .map(match=>new ReplayValueItem(match.label,match.value,0,match.children || [],true));
+    }
 
     const e=nativeReplaySession.current;
     const state=nativeReplaySession.stateForLine(e);
@@ -5096,31 +5169,44 @@ class ReplayStateProvider {
       captured.description = `${e.sourceFile || path.basename(e.sourcePath || '')}:${e.line}`;
       captured.iconPath = new vscode.ThemeIcon('record');
       captured.tooltip = `This event contains a high-fidelity Replay Capture Point snapshot${captureDepth > 0 ? ` captured with max depth ${captureDepth}` : ''}.`;
+      // Keep the capture-point banner visible while searching; it explains why a deep result exists.
       groups.push(captured);
     }
 
+    const candidateGroups=[];
     if (state.receiver !== undefined) {
-      groups.push(new ReplayStateGroupItem('this', 'THIS', [['this', state.receiver]], replayValueLabel(state.receiver)));
+      candidateGroups.push(new ReplayStateGroupItem('this', 'THIS', [['this', state.receiver]], replayValueLabel(state.receiver)));
     }
 
     const allLocals = replayVisibleLocalEntries(state.locals);
     const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
     if (argumentEntries.length) {
-      groups.push(new ReplayStateGroupItem('arguments', `ARGUMENTS (${argumentEntries.length})`, argumentEntries));
+      candidateGroups.push(new ReplayStateGroupItem('arguments', `ARGUMENTS (${argumentEntries.length})`, argumentEntries));
     }
 
-    // Parameters are present in frameLocals as well as the ENTER argument array.
-    // Keep them out of LOCALS so the UI clearly answers "arguments vs locals".
     const parameterNames = new Set(argumentEntries.map(([name])=>String(name)));
     const localEntries = allLocals.filter(([name])=>!parameterNames.has(String(name)));
     if (localEntries.length) {
-      groups.push(new ReplayStateGroupItem('locals', `LOCALS (${localEntries.length})`, localEntries));
+      candidateGroups.push(new ReplayStateGroupItem('locals', `LOCALS (${localEntries.length})`, localEntries));
     }
 
-    if (!groups.length) {
-      const empty=new vscode.TreeItem('No state captured');
-      empty.description='for this line';
-      empty.iconPath=new vscode.ThemeIcon('info');
+    if (!searchActive) {
+      groups.push(...candidateGroups);
+    } else {
+      for (const group of candidateGroups) {
+        const filtered=group.entries.map(([k,v])=>replayStateFilteredEntry(k,v,terms,[group.label],0)).filter(Boolean);
+        if (!filtered.length) continue;
+        const filteredGroup=new ReplayStateGroupItem(group.kind, group.label.replace(/ \(\d+\)$/,''), filtered.map(m=>[m.label,m.value]), `${filtered.length} match${filtered.length===1?'':'es'}`);
+        filteredGroup.filteredMatches=filtered;
+        filteredGroup.collapsibleState=vscode.TreeItemCollapsibleState.Expanded;
+        groups.push(filteredGroup);
+      }
+    }
+
+    if (!groups.length || (searchActive && groups.every(g=>!(g instanceof ReplayStateGroupItem)))) {
+      const empty=new vscode.TreeItem(searchActive ? 'No matching state' : 'No state captured');
+      empty.description=searchActive ? `for “${this.searchQuery}”` : 'for this line';
+      empty.iconPath=new vscode.ThemeIcon(searchActive ? 'search-stop' : 'info');
       groups.push(empty);
     }
     return groups;
@@ -5340,9 +5426,34 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayFiles', replayFilesProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayInstrumentation', instrumentationProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayState', replayStateProvider));
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayStateSearchActive', false);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayCallStack', replayCallStackProvider));
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('compositeGradleTests.replayTimeline', replayTimelineProvider, { webviewOptions: { retainContextWhenHidden: true } }));
   refreshReplayCapturePointDecorations();
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.stateSearch', async () => {
+    if (!replayStateProvider) return;
+    const box = vscode.window.createInputBox();
+    box.title = 'Search Replay State';
+    box.prompt = 'Search variable names and values. Terms separated by spaces are ANDed.';
+    box.placeholder = 'customer ORD-1000';
+    box.value = replayStateProvider.searchQuery || '';
+    box.ignoreFocusOut = true;
+    const disposables=[];
+    let accepted=false;
+    disposables.push(box.onDidChangeValue(value => replayStateProvider.setSearchQuery(value)));
+    disposables.push(box.onDidAccept(() => { accepted=true; box.hide(); }));
+    disposables.push(box.onDidHide(() => {
+      // Keep the current query when the user accepts or simply dismisses the box.
+      // Clearing is an explicit action from the State view toolbar.
+      for (const d of disposables) d.dispose();
+      box.dispose();
+    }));
+    box.show();
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.stateSearchClear', async () => {
+    await replayStateProvider?.clearSearch();
+    vscode.window.setStatusBarMessage('Replay State search cleared', 1200);
+  }));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.toggleInlineValues', async () => {
     replayInlineValuesEnabled = !replayInlineValuesEnabled;
     await context.workspaceState.update('compositeGradleTests.replay.inlineValuesEnabled', replayInlineValuesEnabled);

@@ -438,3 +438,7 @@ Configure `compositeGradleTests.flowLineState` as `off`, `receiver`, `shallow`, 
 ## Replay Capture Points (0.4.38)
 
 Replay Capture Points are debugger-like source markers for high-fidelity state capture without pausing the JVM. Place the cursor on a Java source line and run **Replay: Toggle Capture Point**. The source file is automatically included in Replay instrumentation if necessary. On the next Code Flow / Analyze run, every execution of that source line records a deeper self-contained receiver/local snapshot using the `replayCapturePointMaxDepth`, `replayCapturePointMaxFields`, and `replayCapturePointMaxCollectionItems` limits. Capture points appear in the editor gutter and under **Instrumentation > Capture Points** and can be removed from either location.
+
+## 0.4.40 — Replay State Search
+
+The Replay **State** view now supports live search across variable names and captured values. Use the search icon in the State view title. Search terms are case-insensitive and whitespace-separated terms are combined with AND semantics, so `customer CUST-42` only keeps matching state paths that contain both terms. Matching nested paths remain visible and expand automatically. The query remains active while stepping through Replay until explicitly cleared with the State view's clear-search action.

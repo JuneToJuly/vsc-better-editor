@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.39",
+  "version": "0.4.40",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -45,7 +45,10 @@
     "onView:compositeGradleTests.replayFiles",
     "onView:compositeGradleTests.replayTimeline",
     "onCommand:compositeGradleTests.replay.open",
-    "onView:compositeGradleTests.replayInstrumentation"
+    "onView:compositeGradleTests.replayInstrumentation",
+    "onView:compositeGradleTests.replayState",
+    "onCommand:compositeGradleTests.replay.stateSearch",
+    "onCommand:compositeGradleTests.replay.stateSearchClear"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -189,6 +192,16 @@
         "command": "compositeGradleTests.replay.exit",
         "title": "Composite Gradle: Exit Execution Replay",
         "icon": "$(close)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stateSearch",
+        "title": "Replay State: Search Variables and Values",
+        "icon": "$(search)"
+      },
+      {
+        "command": "compositeGradleTests.replay.stateSearchClear",
+        "title": "Replay State: Clear Search",
+        "icon": "$(clear-all)"
       },
       {
         "command": "compositeGradleTests.replay.toggleInlineValues",
@@ -529,6 +542,16 @@
           "command": "compositeGradleTests.replay.toggleInlineValues",
           "when": "view == compositeGradleTests.replayTimeline",
           "group": "navigation@8"
+        },
+        {
+          "command": "compositeGradleTests.replay.stateSearch",
+          "when": "view == compositeGradleTests.replayState",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.stateSearchClear",
+          "when": "view == compositeGradleTests.replayState && compositeGradleTests.replayStateSearchActive",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
