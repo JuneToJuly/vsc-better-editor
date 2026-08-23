@@ -257,7 +257,8 @@ async function createInvocation(documentUri, target, debug) {
     config.get('gradleExecutable', 'gradle'),
     config.get('gradleWrapper', '')
   );
-  const task = resolveTask(documentUri.fsPath, root, config);
+  const resolvedProject = resolveTestProject(documentUri.fsPath, root, config);
+  const task = resolvedProject.task;
   // Make the command independent of the caller's current working directory.
   // This is especially important for copied commands run from a PowerShell prompt.
   const args = ['--project-dir', root, task, '--tests', target.filter, ...config.get('arguments', ['--console=plain'])];
@@ -284,7 +285,7 @@ async function createInvocation(documentUri, target, debug) {
     // selected this test. In composite builds java.project.getAll can expose
     // several projects beneath the same included-build root, so a path-only
     // lookup can select the wrong sibling project.
-    projectName: await resolveDebuggerProjectName(documentUri.fsPath, root, task, config),
+    projectName: await resolveDebuggerProjectName(documentUri.fsPath, root, resolvedProject, config),
     showOutput: config.get('showOutput', false),
     documentUri: documentUri.toString(),
     sourcePath: documentUri.fsPath,
@@ -553,31 +554,51 @@ function resolveMappedJavaProjectName(filePath, root, config) {
 }
 
 function resolveTask(filePath, root, config) {
-  const normalizedFile = normalizePath(path.resolve(filePath));
+  return resolveTestProject(filePath, root, config).task;
+}
+
+function resolveTestProject(filePath, root, config) {
+  const absoluteFile = path.resolve(filePath);
+  const normalizedFile = normalizePath(absoluteFile);
   const mappings = config.get('projects', []);
   let best;
 
-  // Explicit mappings remain the highest-priority escape hatch for unusual
-  // Gradle layouts, renamed projects, or custom test tasks.
+  // Explicit mappings remain the highest-priority escape hatch. Preserve the
+  // project identity as well as the task so debug does not have to rediscover it.
   for (const mapping of mappings) {
     if (!mapping || typeof mapping.sourceRoot !== 'string' || typeof mapping.task !== 'string') continue;
-    const sourceRoot = normalizePath(path.resolve(root, mapping.sourceRoot));
+    const sourceRootPath = path.resolve(root, mapping.sourceRoot);
+    const sourceRoot = normalizePath(sourceRootPath);
     if (isPathInside(normalizedFile, sourceRoot) && (!best || sourceRoot.length > best.sourceRoot.length)) {
-      best = { sourceRoot, task: mapping.task };
+      const projectDirectory = findProjectDirectoryFromSourcePath(absoluteFile);
+      best = {
+        task: mapping.task,
+        resolution: 'mapping',
+        sourceRoot: sourceRootPath,
+        projectDirectory,
+        configuredJavaProjectName: String(mapping.javaProjectName || mapping.projectName || '').trim() || undefined
+      };
     }
   }
-
-  if (best) return best.task;
+  if (best) return enrichResolvedProject(best, absoluteFile, root);
 
   if (config.get('autoDetectTask', true)) {
-    const detected = resolveAutomaticCompositeTask(filePath, root, config.get('defaultTask', 'test'));
+    const detected = resolveAutomaticCompositeProject(absoluteFile, root, config.get('defaultTask', 'test'));
     if (detected) return detected;
   }
 
-  return config.get('defaultTask', 'test');
+  return enrichResolvedProject({
+    task: config.get('defaultTask', 'test'),
+    resolution: 'default',
+    projectDirectory: findProjectDirectoryFromSourcePath(absoluteFile)
+  }, absoluteFile, root);
 }
 
 function resolveAutomaticCompositeTask(filePath, compositeRoot, defaultTask) {
+  return resolveAutomaticCompositeProject(filePath, compositeRoot, defaultTask)?.task;
+}
+
+function resolveAutomaticCompositeProject(filePath, compositeRoot, defaultTask) {
   const absoluteFile = path.resolve(filePath);
   const absoluteRoot = path.resolve(compositeRoot);
   const projectDirectory = findProjectDirectoryFromSourcePath(absoluteFile);
@@ -591,11 +612,35 @@ function resolveAutomaticCompositeTask(filePath, compositeRoot, defaultTask) {
 
   const sourceSet = findSourceSetName(absoluteFile, projectDirectory);
   const taskName = sourceSet && sourceSet !== 'test' ? sourceSet : String(defaultTask || 'test');
-  const projectParts = relativeProject === ''
-    ? []
-    : relativeProject.split(path.sep).filter(Boolean);
+  const projectParts = relativeProject === '' ? [] : relativeProject.split(path.sep).filter(Boolean);
+  const gradleProjectPath = projectParts.length ? `:${projectParts.join(':')}` : ':';
 
-  return [includedBuild.name, ...projectParts, taskName].filter(Boolean).join(':');
+  return {
+    task: [includedBuild.name, ...projectParts, taskName].filter(Boolean).join(':'),
+    resolution: 'automatic',
+    projectDirectory,
+    includedBuildRoot: includedBuild.root,
+    includedBuildName: includedBuild.name,
+    gradleProjectPath,
+    sourceSet,
+    taskName
+  };
+}
+
+function enrichResolvedProject(project, filePath, compositeRoot) {
+  const projectDirectory = project.projectDirectory || findProjectDirectoryFromSourcePath(filePath);
+  if (!projectDirectory) return project;
+  const includedBuild = findIncludedBuild(projectDirectory, compositeRoot);
+  if (!includedBuild) return { ...project, projectDirectory };
+  const relativeProject = path.relative(includedBuild.root, projectDirectory);
+  const projectParts = (!relativeProject || relativeProject === '.') ? [] : relativeProject.split(path.sep).filter(Boolean);
+  return {
+    ...project,
+    projectDirectory,
+    includedBuildRoot: includedBuild.root,
+    includedBuildName: includedBuild.name,
+    gradleProjectPath: projectParts.length ? `:${projectParts.join(':')}` : ':'
+  };
 }
 
 function findProjectDirectoryFromSourcePath(filePath) {
@@ -608,13 +653,6 @@ function findProjectDirectoryFromSourcePath(filePath) {
     }
   }
   return undefined;
-}
-
-function resolveJavaProjectName(filePath, task) {
-  const projectDirectory = findProjectDirectoryFromSourcePath(filePath);
-  if (projectDirectory) return path.basename(projectDirectory);
-  const parts = String(task || '').split(':').filter(Boolean);
-  return parts.length > 1 ? parts[parts.length - 2] : parts[0];
 }
 
 function findSourceSetName(filePath, projectDirectory) {
@@ -667,7 +705,7 @@ function readIncludedBuilds(compositeRoot) {
   while ((match = pattern.exec(text))) {
     const includedRoot = path.resolve(compositeRoot, match[1]);
     const body = match[2] || '';
-    const alias = body.match(/name\s*=\s*["']([^"']+)["']/)?.[1];
+    const alias = body.match(/\bname\s*=\s*["']([^"']+)["']/)?.[1];
     results.push({
       root: includedRoot,
       name: alias || readGradleBuildName(includedRoot) || path.basename(includedRoot)
@@ -4143,14 +4181,19 @@ class DebugEvaluateCompletionProvider {
   }
 }
 
-async function resolveDebuggerProjectName(filePath, root, task, config) {
-  const mapped = resolveMappedJavaProjectName(filePath, root, config);
-  if (mapped) return mapped;
+async function resolveDebuggerProjectName(filePath, root, resolvedProject, config) {
+  const task = resolvedProject?.task || '';
+  logResolvedProjectIdentity(filePath, resolvedProject);
 
-  // The Gradle task is already the authoritative result of composite project
-  // detection. Prefer a Java project whose name agrees with that task before
-  // falling back to the older path-only language-server lookup.
-  const detected = await resolveJavaProjectNameFromDetectedTask(filePath, task);
+  // An explicit per-source mapping is still the strongest escape hatch.
+  if (resolvedProject?.configuredJavaProjectName) {
+    output.appendLine(`[debug] Java project resolved by source mapping: ${resolvedProject.configuredJavaProjectName}`);
+    return resolvedProject.configuredJavaProjectName;
+  }
+
+  // The detected Gradle project directory is authoritative. Match JDT to that
+  // physical project before attempting any name-based heuristic.
+  const detected = await resolveJavaProjectNameFromResolvedProject(filePath, resolvedProject);
   if (detected) return detected;
 
   const configured = String(config.get('javaProjectName', '') || '').trim();
@@ -4162,10 +4205,92 @@ async function resolveDebuggerProjectName(filePath, root, task, config) {
   return resolveJavaProjectNameFromJavaExtension(filePath);
 }
 
+function logResolvedProjectIdentity(filePath, project) {
+  output.appendLine(`[project] source: ${filePath}`);
+  output.appendLine(`[project] resolution: ${project?.resolution || 'unknown'}`);
+  output.appendLine(`[project] Gradle project dir: ${project?.projectDirectory || '(unknown)'}`);
+  output.appendLine(`[project] included build: ${project?.includedBuildName || '(unknown)'}${project?.includedBuildRoot ? ` (${project.includedBuildRoot})` : ''}`);
+  output.appendLine(`[project] Gradle project path: ${project?.gradleProjectPath || '(unknown)'}`);
+  output.appendLine(`[project] test task: ${project?.task || '(unknown)'}`);
+}
+
+function canonicalProjectPath(value) {
+  if (!value) return '';
+  let resolved = path.resolve(value);
+  try { resolved = fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved); } catch (_) {}
+  return normalizePath(resolved);
+}
+
+async function resolveJavaProjectNameFromResolvedProject(filePath, resolvedProject) {
+  const task = resolvedProject?.task || '';
+  const projectParts = gradleProjectPartsFromTask(task);
+  const fullIdentity = normalizeProjectIdentity(projectParts.join('-'));
+  const leafIdentity = normalizeProjectIdentity(projectParts[projectParts.length - 1]);
+  const normalizedFile = normalizePath(filePath);
+  const detectedProjectPath = canonicalProjectPath(resolvedProject?.projectDirectory);
+
+  try {
+    const projects = await vscode.commands.executeCommand('java.project.getAll');
+    const candidates = collectJavaProjects(projects);
+    let best;
+
+    output.appendLine(`[debug] JDT project candidates: ${candidates.length}`);
+    for (const candidate of candidates) {
+      if (!candidate?.name) continue;
+      const nameIdentity = normalizeProjectIdentity(candidate.name);
+      const candidatePath = canonicalProjectPath(candidate.path);
+      let score = 0;
+      const reasons = [];
+
+      // Physical Gradle/JDT project identity is stronger than any naming convention.
+      if (detectedProjectPath && candidatePath && candidatePath === detectedProjectPath) {
+        score += 10000;
+        reasons.push('exact project directory');
+      } else if (detectedProjectPath && candidatePath
+          && (isPathInside(detectedProjectPath, candidatePath) || isPathInside(candidatePath, detectedProjectPath))) {
+        score += 1800;
+        reasons.push('related project directory');
+      }
+
+      // Names are useful fallbacks for JDT/Buildship models whose reported root
+      // is an imported workspace location rather than the Gradle project directory.
+      if (nameIdentity === fullIdentity) {
+        score += 1000;
+        reasons.push('full Gradle identity');
+      } else if (fullIdentity && (nameIdentity.endsWith(`-${fullIdentity}`) || fullIdentity.endsWith(`-${nameIdentity}`))) {
+        score += 700;
+        reasons.push('partial Gradle identity');
+      }
+      if (nameIdentity === leafIdentity) {
+        score += 450;
+        reasons.push('leaf Gradle identity');
+      }
+
+      if (candidatePath && isPathInside(normalizedFile, candidatePath)) {
+        score += 300;
+        reasons.push('contains source file');
+      }
+
+      output.appendLine(`[debug]   ${candidate.name} -> ${candidate.path || '(no path)'}${score ? ` [score ${score}: ${reasons.join(', ')}]` : ''}`);
+      if (!best || score > best.score) best = { ...candidate, score, reasons };
+    }
+
+    if (best && best.score >= 300) {
+      const reason = best.reasons?.join(', ') || 'positive match';
+      output.appendLine(`[debug] Java project resolved from detected Gradle project ${task}: ${best.name} (${reason})`);
+      return best.name;
+    }
+
+    output.appendLine(`[debug] Detected Gradle project ${task} did not map positively to a Java project name.`);
+  } catch (error) {
+    output.appendLine(`[debug] Gradle-project Java lookup unavailable for ${task}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return undefined;
+}
+
 function gradleProjectPartsFromTask(task) {
   const parts = String(task || '').split(':').map(value => value.trim()).filter(Boolean);
   if (parts.length <= 1) return [];
-  // The final segment is the test/source-set task (test, integrationTest, etc.).
   return parts.slice(0, -1);
 }
 
@@ -4176,57 +4301,6 @@ function normalizeProjectIdentity(value) {
     .replace(/[\\/:._\s]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-}
-
-async function resolveJavaProjectNameFromDetectedTask(filePath, task) {
-  const projectParts = gradleProjectPartsFromTask(task);
-  if (!projectParts.length) return undefined;
-
-  const fullIdentity = normalizeProjectIdentity(projectParts.join('-'));
-  const leafIdentity = normalizeProjectIdentity(projectParts[projectParts.length - 1]);
-  const normalizedFile = normalizePath(filePath);
-
-  try {
-    const projects = await vscode.commands.executeCommand('java.project.getAll');
-    const candidates = collectJavaProjects(projects);
-    let best;
-
-    for (const candidate of candidates) {
-      if (!candidate?.name) continue;
-      const nameIdentity = normalizeProjectIdentity(candidate.name);
-      let score = 0;
-
-      // Typical Red Hat Java/Buildship composite name: order-service-app for
-      // Gradle task :order-service:app:test.
-      if (nameIdentity === fullIdentity) score += 1000;
-      else if (fullIdentity && (nameIdentity.endsWith(`-${fullIdentity}`) || fullIdentity.endsWith(`-${nameIdentity}`))) score += 700;
-
-      // A few Gradle/JDT layouts expose only the leaf project name ("app").
-      if (nameIdentity === leafIdentity) score += 450;
-
-      if (candidate.path) {
-        const normalizedProjectPath = normalizePath(candidate.path);
-        if (isPathInside(normalizedFile, normalizedProjectPath)) score += 300;
-        // Prefer the deepest matching project root when several Java projects
-        // are reported for one included build.
-        score += Math.min(200, normalizedProjectPath.length / 10);
-      }
-
-      if (!best || score > best.score) best = { ...candidate, score };
-    }
-
-    // Require an actual task/name or source-path signal. Do not invent a
-    // projectName just because java.project.getAll returned something.
-    if (best && best.score >= 300) {
-      output.appendLine(`[debug] Java project resolved from detected Gradle task ${task}: ${best.name}`);
-      return best.name;
-    }
-
-    output.appendLine(`[debug] Detected Gradle task ${task} did not map positively to a Java project name.`);
-  } catch (error) {
-    output.appendLine(`[debug] Task-based Java project lookup unavailable for ${task}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return undefined;
 }
 
 async function resolveJavaProjectNameFromJavaExtension(filePath) {

@@ -449,3 +449,10 @@ The Replay **State** view now supports live search across variable names and cap
 - Composite tasks such as `:order-service:app:test` are matched against Java project identities such as `order-service-app`, with the source path used as an additional disambiguator.
 - Explicit per-source `projects[].javaProjectName` mappings remain highest priority. The legacy global `javaProjectName` is now a fallback after automatic task-based project resolution.
 - Added debug output showing the detected Gradle task and the Java project selected from it.
+
+## 0.4.42
+
+- Carries the resolved Gradle project identity (project directory, included build, Gradle project path, source set, and task) forward from test selection into debugger attach instead of reconstructing it from the task name.
+- Java debugger project resolution now strongly prefers an exact canonical directory match between the detected Gradle project and JDT, with Gradle/JDT name matching retained as a fallback.
+- Added detailed project/JDT candidate diagnostics to make composite-project resolution failures directly inspectable.
+- Fixed `includeBuild { name = "..." }` alias parsing so renamed included builds participate correctly in automatic task/project detection.
