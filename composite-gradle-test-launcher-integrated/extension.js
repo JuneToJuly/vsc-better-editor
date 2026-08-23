@@ -812,9 +812,12 @@ async function executeInvocation(invocation) {
     const flowArgs = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
     const taskIndex = flowArgs.indexOf(invocation.task);
     const testPackage = String(invocation.classFilter || invocation.filter || '').split('.').slice(0, -1).join('.');
-    const configuredPrefixes = Array.isArray(invocation.flowConfiguredPrefixes)
-      ? invocation.flowConfiguredPrefixes.map(normalizeFlowPrefix).filter(Boolean)
-      : flowConfiguredInstrumentationPrefixes();
+    // Always resolve instrumentation rules at launch time. Invocations are cached for
+    // Recent Runs / Repeat Last and may have been created before the user changed the
+    // Replay instrumentation UI. Reusing invocation.flowConfiguredPrefixes here made
+    // newly included packages/classes appear in Settings and diagnostics but not in
+    // -Dcgtl.flow.packages for the actual JVM.
+    const configuredPrefixes = flowConfiguredInstrumentationPrefixes();
     const tracedPrefixes = [...new Set([testPackage, ...configuredPrefixes].map(normalizeFlowPrefix).filter(Boolean))];
     if (!tracedPrefixes.length) {
       throw new Error('Code Flow could not determine a package to trace. Configure compositeGradleTests.flowPackagePrefixes.');
@@ -1193,6 +1196,62 @@ async function updateFlowPrefixSetting(key, updater) {
   instrumentationProvider?.refresh();
 }
 
+function activeJavaInstrumentationTarget(editor = vscode.window.activeTextEditor) {
+  if (!editor || editor.document?.uri?.scheme !== 'file') return undefined;
+  if (editor.document.languageId !== 'java' && !editor.document.uri.fsPath.toLowerCase().endsWith('.java')) return undefined;
+  const filePath = editor.document.uri.fsPath;
+  const simpleName = path.basename(filePath, '.java');
+  if (!simpleName || simpleName === 'module-info' || simpleName === 'package-info') return undefined;
+  const text = editor.document.getText();
+  const packageMatch = text.match(/(?:^|\n)\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;/);
+  const packageName = normalizeFlowPrefix(packageMatch?.[1] || '');
+  const className = normalizeFlowPrefix(packageName ? `${packageName}.${simpleName}` : simpleName);
+  return { filePath, simpleName, packageName, className };
+}
+
+async function includeCurrentReplayFile() {
+  const target = activeJavaInstrumentationTarget();
+  if (!target?.className) {
+    return vscode.window.showWarningMessage('Open a Java source file to add it to Replay instrumentation.');
+  }
+
+  // An exact file exclusion is clearly superseded by the user's explicit include action.
+  if (flowExcludeClassNames().includes(target.className)) {
+    await updateFlowPrefixSetting('flowExcludeClassNames', values => values.filter(v => v !== target.className));
+  }
+
+  const blockingPackage = flowExcludePackagePrefixes()
+    .filter(rule => flowPrefixMatches(target.className, rule))
+    .sort((a, b) => b.length - a.length)[0];
+  if (blockingPackage) {
+    const choice = await vscode.window.showWarningMessage(
+      `${target.simpleName}.java is excluded by package rule ${blockingPackage}. Remove that exclusion so this file can be instrumented?`,
+      'Remove Exclusion & Include',
+      'Cancel'
+    );
+    if (choice !== 'Remove Exclusion & Include') return;
+    await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => values.filter(v => v !== blockingPackage));
+  }
+
+  await updateFlowPrefixSetting('flowClassNames', values => [...values, target.className]);
+  vscode.window.showInformationMessage(`Replay will instrument ${target.className} on the next Analyze / Code Flow run.`);
+}
+
+async function includeCurrentReplayPackage() {
+  const target = activeJavaInstrumentationTarget();
+  if (!target?.packageName) {
+    return vscode.window.showWarningMessage('Open a Java source file with a package declaration to add its package to Replay instrumentation.');
+  }
+
+  // An exact package exclusion is superseded by this explicit action. More-specific
+  // file/package exclusions remain intentional and continue to win.
+  if (flowExcludePackagePrefixes().includes(target.packageName)) {
+    await updateFlowPrefixSetting('flowExcludePackagePrefixes', values => values.filter(v => v !== target.packageName));
+  }
+  await updateFlowPrefixSetting('flowPackagePrefixes', values => [...values, target.packageName]);
+  vscode.window.showInformationMessage(`Replay will instrument package ${target.packageName} on the next Analyze / Code Flow run.`);
+}
+
 async function discoverReplayJavaCandidates() {
   const byClass = new Map();
   for (const file of nativeReplaySession?.files || []) {
@@ -1441,30 +1500,13 @@ allprojects { project ->
 function collectFlowEvents(flowFile) {
   if (!flowFile || !fs.existsSync(flowFile)) return [];
   try {
-    const events = fs.readFileSync(flowFile, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+    // Keep capture loading deliberately cheap. Snapshot checkpoint expansion used to
+    // recursively clone every captured object before Replay could even open. Replay
+    // navigation only needs event metadata, so state is left in its compact/raw form
+    // and hydrated by NativeReplaySession only when the State view asks for it.
+    return fs.readFileSync(flowFile, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
       try { return JSON.parse(line); } catch (_) { return undefined; }
     }).filter(Boolean).sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
-    const checkpoints = new Map();
-    const hydrate = value => {
-      if (!value || typeof value !== 'object') return value;
-      if (Array.isArray(value)) return value.map(hydrate);
-      if (value.snapshotRef) {
-        const prior = checkpoints.get(String(value.snapshotRef));
-        return prior ? { ...structuredClone(prior), __fromCheckpoint: true, __checkpointSequence: value.checkpointSequence } : value;
-      }
-      const result = {};
-      for (const [key, child] of Object.entries(value)) result[key] = hydrate(child);
-      if (result.snapshotId) checkpoints.set(String(result.snapshotId), structuredClone(result));
-      return result;
-    };
-    for (const event of events) {
-      for (const key of ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown']) {
-        if (event[key] !== undefined) event[key] = hydrate(event[key]);
-      }
-      if (Array.isArray(event.arguments)) event.arguments = event.arguments.map(hydrate);
-      if (event.frameLocals && typeof event.frameLocals === 'object') event.frameLocals = hydrate(event.frameLocals);
-    }
-    return events;
   } catch (_) { return []; }
 }
 
@@ -4039,6 +4081,8 @@ let replayCallStackProvider;
 let replayTimelineProvider;
 let replayExecutedDecoration;
 let replayCurrentDecoration;
+let replayInlineValueDecoration;
+let replayInlineValuesEnabled = true;
 let replayEditorColumn;
 
 function replayEventCallId(event) {
@@ -4061,10 +4105,16 @@ function replaySameMethod(a, b) {
     && String(a.methodName || '') === String(b.methodName || '')
     && String(a.descriptor || '') === String(b.descriptor || '');
 }
+const replaySourceLinesCache = new Map();
 function replaySourceText(event) {
   if (!event?.sourcePath || !event.line) return '';
   try {
-    const lines = fs.readFileSync(event.sourcePath, 'utf8').split(/\r?\n/);
+    const key = normalizePath(event.sourcePath);
+    let lines = replaySourceLinesCache.get(key);
+    if (!lines) {
+      lines = fs.readFileSync(event.sourcePath, 'utf8').split(/\r?\n/);
+      replaySourceLinesCache.set(key, lines);
+    }
     return String(lines[Math.max(0, Number(event.line) - 1)] || '').trim();
   } catch (_) { return ''; }
 }
@@ -4089,6 +4139,200 @@ function replayObjectFields(value) {
   return Object.entries(value).filter(([key]) => !ignored.has(key));
 }
 
+function replayInlineValueText(value) {
+  const label = replayValueLabel(value);
+  if (label === 'not captured') return '';
+  if (typeof value === 'string') return `"${String(label).replace(/"/g, '\"')}"`;
+  const text = String(label).replace(/\s+/g, ' ').trim();
+  return text.length > 42 ? `${text.slice(0, 39)}…` : text;
+}
+
+function replayInlineStateText(event) {
+  if (!nativeReplaySession || !event) return '';
+  const state = nativeReplaySession.stateForLine(event);
+  const source = replaySourceText(event);
+  const identifiers = new Set((source.match(/[A-Za-z_$][\w$]*/g) || []).map(String));
+
+  const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
+  const argumentNames = new Set(argumentEntries.map(([name]) => String(name)));
+  const localEntries = replayVisibleLocalEntries(state.locals).filter(([name]) => !argumentNames.has(String(name)));
+  const receiverEntries = replayObjectFields(state.receiver);
+
+  const byName = new Map();
+  for (const [name, value] of [...localEntries, ...argumentEntries, ...receiverEntries]) {
+    const key = String(name || '');
+    if (key && !byName.has(key)) byName.set(key, value);
+  }
+
+  const selected = [];
+  const selectedNames = new Set();
+  const add = (name, value) => {
+    name = String(name || '');
+    if (!name || selectedNames.has(name)) return;
+    const valueText = replayInlineValueText(value);
+    if (!valueText) return;
+    selectedNames.add(name);
+    selected.push(`${name} = ${valueText}`);
+  };
+
+  // First show state for symbols that actually appear on the current source line.
+  for (const name of identifiers) if (byName.has(name)) add(name, byName.get(name));
+
+  // Receiver state such as phase/status is often the most useful context even when
+  // the current line doesn't reference it directly. Prefer compact scalar state.
+  const importantField = /^(phase|state|status|mode|result|score|count|index|size|total|processedCount)$/i;
+  for (const [name, value] of receiverEntries) {
+    if (selected.length >= 4) break;
+    if (!importantField.test(String(name))) continue;
+    if (value === null || ['string','number','boolean'].includes(typeof value) || replayInlineValueText(value).length <= 30) add(name, value);
+  }
+
+  // Fill remaining room with simple locals/arguments so stepping through ordinary
+  // arithmetic/control flow feels like debugger inline values without flooding code.
+  for (const [name, value] of [...localEntries, ...argumentEntries]) {
+    if (selected.length >= 4) break;
+    if (value === null || ['string','number','boolean'].includes(typeof value)) add(name, value);
+  }
+
+  let text = selected.slice(0, 4).join('   ·   ');
+  if (text.length > 120) text = `${text.slice(0, 117)}…`;
+  return text;
+}
+
+
+
+function replayCurrentStateValueMap(event) {
+  if (!nativeReplaySession || !event) return new Map();
+  const state = nativeReplaySession.stateForLine(event);
+  const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
+  const argumentNames = new Set(argumentEntries.map(([name]) => String(name)));
+  const localEntries = replayVisibleLocalEntries(state.locals).filter(([name]) => !argumentNames.has(String(name)));
+  const receiverEntries = replayObjectFields(state.receiver);
+  const values = new Map();
+  // Locals shadow arguments, and both shadow fields, just like Java source lookup.
+  for (const [name, value] of receiverEntries) {
+    const key = String(name || '');
+    if (key) values.set(key, value);
+  }
+  for (const [name, value] of argumentEntries) {
+    const key = String(name || '');
+    if (key) values.set(key, value);
+  }
+  for (const [name, value] of localEntries) {
+    const key = String(name || '');
+    if (key) values.set(key, value);
+  }
+  return values;
+}
+
+function replayInlineValueOptions(editor, event) {
+  if (!event || normalizePath(event.sourcePath) !== normalizePath(editor.document.uri.fsPath)) return [];
+  const values = replayCurrentStateValueMap(event);
+  if (!values.size) return [];
+
+  const currentLine = Math.max(0, Math.min(editor.document.lineCount - 1, Number(event.line || 1) - 1));
+  // Project the CURRENT frame state onto nearby source lines, but keep the source
+  // itself visually intact.  Values are rendered once at the end of each line,
+  // debugger-style, rather than injected after every identifier occurrence.
+  const minLine = Math.max(0, currentLine - 28);
+  // Never project current state into future source lines. Replay state describes
+  // what is known at the selected execution point, not what later lines will see.
+  const maxLine = currentLine;
+  const visible = editor.visibleRanges?.length
+    ? editor.visibleRanges.map(r => [Math.max(minLine, r.start.line), Math.min(maxLine, r.end.line)])
+    : [[minLine, maxLine]];
+
+  const options = [];
+  for (const [startLine, endLine] of visible) {
+    if (endLine < startLine) continue;
+    for (let lineNo = startLine; lineNo <= endLine; lineNo++) {
+      const line = editor.document.lineAt(lineNo);
+      const text = line.text;
+      const names = [];
+      const seen = new Set();
+      const matcher = /[A-Za-z_$][\w$]*/g;
+      let match;
+      while ((match = matcher.exec(text))) {
+        const name = match[0];
+        if (seen.has(name) || !values.has(name)) continue;
+        const valueText = replayInlineValueText(values.get(name));
+        if (!valueText) continue;
+        seen.add(name);
+        const compact = valueText.length > 34 ? `${valueText.slice(0, 31)}…` : valueText;
+        names.push(`${name} = ${compact}`);
+        if (names.length >= 4) break;
+      }
+      if (!names.length) continue;
+
+      let contentText = `    ${names.join('   ·   ')}`;
+      if (contentText.length > 128) contentText = `${contentText.slice(0, 125)}…`;
+      const endCharacter = line.range.end.character;
+      options.push({
+        range: new vscode.Range(lineNo, endCharacter, lineNo, endCharacter),
+        renderOptions: { after: { contentText } }
+      });
+      if (options.length >= 60) return options;
+    }
+  }
+  return options;
+}
+function replayHoverLookup(event, name) {
+  if (!nativeReplaySession || !event || !name) return undefined;
+  const state = nativeReplaySession.stateForLine(event);
+  if (name === 'this' && state.receiver !== undefined) return { kind: 'this', name: 'this', value: state.receiver };
+
+  const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
+  for (const [entryName, value] of argumentEntries) {
+    if (String(entryName) === name) return { kind: 'argument', name, value };
+  }
+
+  const argumentNames = new Set(argumentEntries.map(([entryName]) => String(entryName)));
+  const localEntries = replayVisibleLocalEntries(state.locals).filter(([entryName]) => !argumentNames.has(String(entryName)));
+  for (const [entryName, value] of localEntries) {
+    if (String(entryName) === name) return { kind: 'local', name, value };
+  }
+
+  for (const [entryName, value] of replayObjectFields(state.receiver)) {
+    if (String(entryName) === name) return { kind: 'field', name, value };
+  }
+  return undefined;
+}
+
+function replayHoverDetailLines(value) {
+  if (!value || typeof value !== 'object') return [];
+  const fields = replayObjectFields(value);
+  if (!fields.length) return [];
+  return fields.slice(0, 8).map(([name, fieldValue]) => {
+    const label = replayInlineValueText(fieldValue) || replayValueLabel(fieldValue);
+    return `${String(name)} = ${String(label).replace(/\s+/g, ' ').trim()}`;
+  });
+}
+
+function replayHoverForDocument(document, position) {
+  const session = nativeReplaySession;
+  const current = session?.current;
+  if (!session || !current || document.uri.scheme !== 'file') return undefined;
+  if (normalizePath(current.sourcePath) !== normalizePath(document.uri.fsPath)) return undefined;
+  if (Number(current.line || 0) !== position.line + 1) return undefined;
+
+  const range = document.getWordRangeAtPosition(position, /[A-Za-z_$][\w$]*/);
+  if (!range) return undefined;
+  const name = document.getText(range);
+  const resolved = replayHoverLookup(current, name);
+  if (!resolved) return undefined;
+
+  const valueText = replayInlineValueText(resolved.value) || replayValueLabel(resolved.value);
+  const markdown = new vscode.MarkdownString();
+  markdown.appendMarkdown(`**Replay · ${resolved.kind}**\n\n`);
+  markdown.appendCodeblock(`${resolved.name} = ${valueText}`, 'java');
+  const details = replayHoverDetailLines(resolved.value);
+  if (details.length) {
+    markdown.appendMarkdown(`\n${details.map(line => `\`${line.replace(/`/g, '\\`')}\``).join('  \n')}`);
+  }
+  markdown.appendMarkdown(`\n\nCaptured entering line ${Number(current.line || 0)} · event #${replayEventSequence(current)}`);
+  return new vscode.Hover(markdown, range);
+}
+
 class NativeReplaySession {
   constructor(result) {
     this.result = result;
@@ -4104,6 +4348,11 @@ class NativeReplaySession {
       .sort((a,b) => replayEventSequence(a)-replayEventSequence(b) || a.__nativeIndex-b.__nativeIndex);
     this.files = this.buildFiles();
     this.position = 0;
+    // State checkpoint expansion is intentionally lazy. Most Replay sessions jump to
+    // a handful of interesting lines, so paying to reconstruct every object graph at
+    // startup is wasted work. Hydrated events are cached as they are inspected.
+    this.stateCheckpoints = undefined;
+    this.hydratedStateEvents = new Map();
   }
 
   normalizeBoundaryLines() {
@@ -4213,17 +4462,64 @@ class NativeReplaySession {
     }
     return upcoming;
   }
+  ensureStateCheckpointIndex() {
+    if (this.stateCheckpoints) return;
+    const checkpoints = new Map();
+    const visit = value => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const child of value) visit(child); return; }
+      if (value.snapshotId) checkpoints.set(String(value.snapshotId), value);
+      for (const child of Object.values(value)) visit(child);
+    };
+    const stateKeys = ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown','arguments','frameLocals'];
+    for (const event of this.rawEvents) for (const key of stateKeys) if (event[key] !== undefined) visit(event[key]);
+    this.stateCheckpoints = checkpoints;
+  }
+
+  hydrateStateValue(value, seen = new Set()) {
+    if (!value || typeof value !== 'object') return value;
+    if (Array.isArray(value)) return value.map(child => this.hydrateStateValue(child, seen));
+    if (value.snapshotRef) {
+      this.ensureStateCheckpointIndex();
+      const id = String(value.snapshotRef);
+      const prior = this.stateCheckpoints.get(id);
+      if (!prior || seen.has(id)) return value;
+      const nextSeen = new Set(seen); nextSeen.add(id);
+      const hydrated = this.hydrateStateValue(prior, nextSeen);
+      return hydrated && typeof hydrated === 'object' ? { ...hydrated, __fromCheckpoint: true, __checkpointSequence: value.checkpointSequence } : hydrated;
+    }
+    const result = {};
+    for (const [key, child] of Object.entries(value)) result[key] = this.hydrateStateValue(child, seen);
+    return result;
+  }
+
+  hydratedEvent(event) {
+    if (!event) return event;
+    const index = Number(event.__nativeIndex);
+    if (!Number.isFinite(index) || index < 0) return event;
+    const cached = this.hydratedStateEvents.get(index);
+    if (cached) return cached;
+    const hydrated = { ...event };
+    const stateKeys = ['frameReceiver','receiver','receiverAfter','callerReceiver','callerReceiverAfter','targetReceiver','returnValue','thrown'];
+    for (const key of stateKeys) if (event[key] !== undefined) hydrated[key] = this.hydrateStateValue(event[key]);
+    if (Array.isArray(event.arguments)) hydrated.arguments = event.arguments.map(value => this.hydrateStateValue(value));
+    if (event.frameLocals && typeof event.frameLocals === 'object') hydrated.frameLocals = this.hydrateStateValue(event.frameLocals);
+    this.hydratedStateEvents.set(index, hydrated);
+    // Bound retained expanded state. Raw compact capture remains available for rehydration.
+    if (this.hydratedStateEvents.size > 200) this.hydratedStateEvents.delete(this.hydratedStateEvents.keys().next().value);
+    return hydrated;
+  }
+
   stateForLine(event) {
     if (!event) return { receiver: undefined, locals: undefined, arguments: undefined, entry: undefined };
-    const entry = this.entryForLine(event);
-    // LINE events carry the state captured immediately before the source line executes.
-    // The agent names these frameReceiver/frameLocals; receiver/locals are primarily
-    // method-boundary fields and are only fallbacks here. Arguments normally live on ENTER.
-    const receiver = event.frameReceiver !== undefined ? event.frameReceiver
-      : (event.receiver !== undefined ? event.receiver : entry?.receiver);
-    const locals = event.frameLocals !== undefined ? event.frameLocals
-      : (event.locals !== undefined ? event.locals : event.localVariables);
-    const args = event.arguments !== undefined ? event.arguments : entry?.arguments;
+    const hydratedLine = this.hydratedEvent(event);
+    const rawEntry = this.entryForLine(event);
+    const entry = rawEntry ? this.hydratedEvent(rawEntry) : rawEntry;
+    const receiver = hydratedLine.frameReceiver !== undefined ? hydratedLine.frameReceiver
+      : (hydratedLine.receiver !== undefined ? hydratedLine.receiver : entry?.receiver);
+    const locals = hydratedLine.frameLocals !== undefined ? hydratedLine.frameLocals
+      : (hydratedLine.locals !== undefined ? hydratedLine.locals : hydratedLine.localVariables);
+    const args = hydratedLine.arguments !== undefined ? hydratedLine.arguments : entry?.arguments;
     return { receiver, locals, arguments: args, entry };
   }
 
@@ -4556,6 +4852,50 @@ class ReplayValueItem extends vscode.TreeItem {
     this.iconPath = new vscode.ThemeIcon(children.length ? 'symbol-object' : 'symbol-field');
   }
 }
+class ReplayStateGroupItem extends vscode.TreeItem {
+  constructor(kind, label, entries, description='') {
+    super(label, entries.length ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
+    this.kind = kind;
+    this.entries = entries;
+    this.description = description || (entries.length ? String(entries.length) : 'none');
+    this.contextValue = `replayStateGroup.${kind}`;
+    this.iconPath = new vscode.ThemeIcon(kind === 'this' ? 'symbol-object' : kind === 'arguments' ? 'symbol-parameter' : 'symbol-variable');
+    this.tooltip = kind === 'this'
+      ? 'Receiver state for this invocation'
+      : kind === 'arguments'
+        ? 'Arguments passed to this method invocation'
+        : 'Source locals currently in scope, excluding method parameters';
+  }
+}
+
+function replayVisibleLocalEntries(locals) {
+  if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return [];
+  return Object.entries(locals).filter(([name])=>{
+    const text=String(name||'');
+    if(!text.startsWith('slot')) return true;
+    const suffix=text.slice(4);
+    return !suffix || String(Number(suffix))!==suffix;
+  });
+}
+
+function replayArgumentEntries(args, locals) {
+  if (args === undefined) return [];
+  if (!Array.isArray(args)) {
+    if (args && typeof args === 'object') return Object.entries(args);
+    return [['arguments', args]];
+  }
+
+  // LINE snapshots expose source locals in JVM-slot order. Because `this` is omitted,
+  // the first named locals are the method parameters. Use those names to make the
+  // argument section useful while keeping the captured ENTER argument values as the
+  // source of truth. This also lets us remove parameters from the Locals section.
+  const localEntries = replayVisibleLocalEntries(locals);
+  return args.map((value, index) => {
+    const localName = localEntries[index]?.[0];
+    return [localName || `arg ${index}`, value];
+  });
+}
+
 class ReplayStateProvider {
   constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData=this.emitter.event; }
   refresh(){this.emitter.fire();}
@@ -4563,25 +4903,37 @@ class ReplayStateProvider {
   getChildren(parent) {
     if (!nativeReplaySession?.current) return [];
     if (parent instanceof ReplayValueItem) return parent.children.map(([k,v])=>new ReplayValueItem(k,v,parent.depth+1));
-    const e=nativeReplaySession.current, out=[];
+    if (parent instanceof ReplayStateGroupItem) return parent.entries.map(([k,v])=>new ReplayValueItem(k,v,0));
+
+    const e=nativeReplaySession.current;
     const state=nativeReplaySession.stateForLine(e);
-    if (state.receiver !== undefined) out.push(new ReplayValueItem('this',state.receiver));
-    const args=state.arguments;
-    if (args !== undefined) {
-      if (Array.isArray(args)) args.forEach((v,i)=>out.push(new ReplayValueItem(`arg ${i}`,v)));
-      else if (args && typeof args==='object') Object.entries(args).forEach(([k,v])=>out.push(new ReplayValueItem(k,v)));
-      else out.push(new ReplayValueItem('arguments',args));
+    const groups=[];
+
+    if (state.receiver !== undefined) {
+      groups.push(new ReplayStateGroupItem('this', 'THIS', [['this', state.receiver]], replayValueLabel(state.receiver)));
     }
-    const locals=state.locals;
-    if (locals && typeof locals==='object') {
-      Object.entries(locals)
-        .filter(([name])=>{ const text=String(name||''); if(!text.startsWith('slot')) return true; const suffix=text.slice(4); return !suffix || String(Number(suffix))!==suffix; })
-        .forEach(([k,v])=>out.push(new ReplayValueItem(k,v)));
+
+    const allLocals = replayVisibleLocalEntries(state.locals);
+    const argumentEntries = replayArgumentEntries(state.arguments, state.locals);
+    if (argumentEntries.length) {
+      groups.push(new ReplayStateGroupItem('arguments', `ARGUMENTS (${argumentEntries.length})`, argumentEntries));
     }
-    if (!out.length) {
-      const empty=new vscode.TreeItem('No state captured'); empty.description='for this line'; empty.iconPath=new vscode.ThemeIcon('info'); out.push(empty);
+
+    // Parameters are present in frameLocals as well as the ENTER argument array.
+    // Keep them out of LOCALS so the UI clearly answers "arguments vs locals".
+    const parameterNames = new Set(argumentEntries.map(([name])=>String(name)));
+    const localEntries = allLocals.filter(([name])=>!parameterNames.has(String(name)));
+    if (localEntries.length) {
+      groups.push(new ReplayStateGroupItem('locals', `LOCALS (${localEntries.length})`, localEntries));
     }
-    return out;
+
+    if (!groups.length) {
+      const empty=new vscode.TreeItem('No state captured');
+      empty.description='for this line';
+      empty.iconPath=new vscode.ThemeIcon('info');
+      groups.push(empty);
+    }
+    return groups;
   }
 }
 class ReplayCallStackProvider {
@@ -4621,14 +4973,22 @@ class ReplayTimelineProvider {
     if(!this.view)return;
     const session=nativeReplaySession;
     if(!session){this.view.webview.html='<!doctype html><body style="font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:12px">Run a test with Code Flow, then open Execution Replay.</body>';return;}
-    const events=session.lineEvents.map((e,index)=>({index,sequence:e.sequence??e.__nativeIndex,file:e.sourceFile||path.basename(e.sourcePath||''),line:Number(e.line||0),method:`${replaySimpleClass(e)}.${e.methodName||'?'}()`,text:replaySourceText(e)}));
-    const payload=JSON.stringify({events,position:session.position,title:session.result?.displayName||'Test',query:this.searchQuery}).replace(/</g,'\\u003c');
+    // Do not build/render the entire timeline for every step. With no search active,
+    // send only a window around the current position; absolute indices are preserved.
+    // Search still spans the complete lightweight line index, with source text served
+    // from a per-file cache instead of rereading a file once per event.
+    const searching = Boolean(String(this.searchQuery || '').trim());
+    const radius = 250;
+    const start = searching ? 0 : Math.max(0, session.position - radius);
+    const end = searching ? session.lineEvents.length : Math.min(session.lineEvents.length, session.position + radius + 1);
+    const events=session.lineEvents.slice(start,end).map((e,offset)=>({index:start+offset,sequence:e.sequence??e.__nativeIndex,file:e.sourceFile||path.basename(e.sourcePath||''),line:Number(e.line||0),method:`${replaySimpleClass(e)}.${e.methodName||'?'}()`,text:replaySourceText(e)}));
+    const payload=JSON.stringify({events,position:session.position,total:session.lineEvents.length,title:session.result?.displayName||'Test',query:this.searchQuery}).replace(/</g,'\\u003c');
     this.view.webview.html=`<!doctype html><html><head><meta charset="UTF-8"><style>
       *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-panel-background,var(--vscode-editor-background));overflow:hidden}.app{height:100%;display:grid;grid-template-rows:auto 1fr}.bar{display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--vscode-panel-border);background:color-mix(in srgb,var(--vscode-editor-background) 72%,transparent)}input{flex:1;min-width:120px;height:27px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,var(--vscode-panel-border));border-radius:2px;padding:4px 8px;outline:none}input:focus{border-color:var(--vscode-focusBorder)}.status{font-size:11px;color:var(--vscode-descriptionForeground);white-space:nowrap}.rows{overflow:auto;font-family:var(--vscode-editor-font-family);font-size:12px;padding:2px 0}.row{position:relative;width:100%;display:grid;grid-template-columns:48px minmax(0,1fr);grid-template-areas:'seq head' '. code';column-gap:10px;row-gap:3px;padding:6px 10px 7px;border:0;border-bottom:1px solid color-mix(in srgb,var(--vscode-panel-border) 42%,transparent);background:transparent;color:inherit;text-align:left;cursor:pointer;min-height:39px}.row:hover{background:var(--vscode-list-hoverBackground)}.row.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.row.active:before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--vscode-focusBorder)}.seq{grid-area:seq;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:1px}.head{grid-area:head;display:flex;align-items:baseline;gap:8px;min-width:0}.method{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;color:var(--vscode-foreground)}.loc{flex:0 1 auto;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground);font-size:11px}.loc:before{content:'·';margin-right:8px;opacity:.7}.code{grid-area:code;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--vscode-editor-foreground);opacity:.82;font-size:11px}.row.active .seq,.row.active .loc,.row.active .code{color:inherit;opacity:.86}@media(max-width:620px){.row{grid-template-columns:40px minmax(0,1fr);column-gap:7px;padding-left:8px;padding-right:8px}.loc{max-width:38%}.bar{padding-left:8px;padding-right:8px}}.hidden{display:none}</style></head><body><div class="app"><div class="bar"><input id="search" placeholder="Search replay — AND terms separated by spaces…"><span id="status" class="status"></span></div><div id="rows" class="rows"></div></div><script>
       const vscode=acquireVsCodeApi(),model=${payload},root=document.getElementById('rows'),search=document.getElementById('search'),status=document.getElementById('status');let query=String(model.query||'');
       const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
       function terms(){return query.trim().toLowerCase().split(/\\s+/).filter(Boolean)}
-      function render(){root.innerHTML='';let shown=0;const needles=terms();for(const e of model.events){const hay=[e.sequence,e.method,e.file,e.line,e.text,e.file+':'+e.line].join(' ').toLowerCase();if(needles.length&&!needles.every(term=>hay.includes(term)))continue;shown++;const b=document.createElement('button');b.className='row '+(e.index===model.position?'active':'');b.title=e.method+'  '+e.file+':'+e.line+'\\n'+e.text;b.innerHTML='<span class="seq">#'+esc(e.sequence)+'</span><span class="head"><span class="method">'+esc(e.method)+'</span><span class="loc">'+esc(e.file)+':'+e.line+'</span></span><span class="code">'+esc(e.text)+'</span>';b.onclick=()=>vscode.postMessage({command:'seek',index:e.index});root.appendChild(b)}status.textContent=(model.position+1)+' / '+model.events.length+(needles.length?' · '+shown+' matches':'');requestAnimationFrame(()=>root.querySelector('.active')?.scrollIntoView({block:'center'}))}
+      function render(){root.innerHTML='';let shown=0;const needles=terms();for(const e of model.events){const hay=[e.sequence,e.method,e.file,e.line,e.text,e.file+':'+e.line].join(' ').toLowerCase();if(needles.length&&!needles.every(term=>hay.includes(term)))continue;shown++;const b=document.createElement('button');b.className='row '+(e.index===model.position?'active':'');b.title=e.method+'  '+e.file+':'+e.line+'\\n'+e.text;b.innerHTML='<span class="seq">#'+esc(e.sequence)+'</span><span class="head"><span class="method">'+esc(e.method)+'</span><span class="loc">'+esc(e.file)+':'+e.line+'</span></span><span class="code">'+esc(e.text)+'</span>';b.onclick=()=>vscode.postMessage({command:'seek',index:e.index});root.appendChild(b)}status.textContent=(model.position+1)+' / '+model.total+(needles.length?' · '+shown+' matches':'');requestAnimationFrame(()=>root.querySelector('.active')?.scrollIntoView({block:'center'}))}
       search.value=query;search.oninput=()=>{query=search.value;vscode.postMessage({command:'search',query});render()};render();</script></body></html>`;
   }
 }
@@ -4650,8 +5010,15 @@ function applyReplayDecorations(editor) {
   const lines=[...new Set(nativeReplaySession.lineEvents.filter(e=>normalizePath(e.sourcePath)===source).map(e=>Number(e.line||0)).filter(Boolean))];
   editor.setDecorations(replayExecutedDecoration,lines.map(line=>editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,line-1))).range));
   const current=nativeReplaySession.current;
-  const currentRanges=current&&normalizePath(current.sourcePath)===source?[editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,Number(current.line||1)-1))).range]:[];
-  editor.setDecorations(replayCurrentDecoration,currentRanges);
+  const currentOptions=[];
+  if(current&&normalizePath(current.sourcePath)===source){
+    const documentLine=editor.document.lineAt(Math.max(0,Math.min(editor.document.lineCount-1,Number(current.line||1)-1)));
+    // Keep the editor marker intentionally compact. Replay values are exposed through
+    // debugger-style symbol hovers instead of appending a long state summary to the line.
+    currentOptions.push({range:documentLine.range,renderOptions:{after:{contentText:'  ◀ REPLAY'}}});
+  }
+  editor.setDecorations(replayCurrentDecoration,currentOptions);
+  editor.setDecorations(replayInlineValueDecoration, replayInlineValuesEnabled && current ? replayInlineValueOptions(editor, current) : []);
 }
 async function updateNativeReplayWorkbench() {
   const session=nativeReplaySession;if(!session)return;
@@ -4673,6 +5040,7 @@ async function openNativeReplay(result) {
   // Remember the editor group the developer is currently working in before any Replay
   // sidebar/panel receives focus. All replay source navigation stays in that group.
   replayEditorColumn = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
+  replaySourceLinesCache.clear();
   nativeReplaySession=new NativeReplaySession(result);
   await vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
   const first=nativeReplaySession.current;
@@ -4687,7 +5055,7 @@ function closeNativeReplay() {
   nativeReplaySession=undefined;
   replayEditorColumn=undefined;
   replayFilesProvider?.refresh();instrumentationProvider?.refresh();replayStateProvider?.refresh();replayCallStackProvider?.refresh();replayTimelineProvider?.render();
-  for(const editor of vscode.window.visibleTextEditors){editor.setDecorations(replayExecutedDecoration,[]);editor.setDecorations(replayCurrentDecoration,[]);}
+  for(const editor of vscode.window.visibleTextEditors){editor.setDecorations(replayExecutedDecoration,[]);editor.setDecorations(replayCurrentDecoration,[]);editor.setDecorations(replayInlineValueDecoration,[]);}
   vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',false);
 }
 function showFlowReplayPanel(result){ return openNativeReplay(result); }
@@ -4740,19 +5108,37 @@ module.exports.activate = async function patchedActivate(context) {
     borderColor: new vscode.ThemeColor('debugIcon.startForeground'),
     overviewRulerColor: new vscode.ThemeColor('debugIcon.startForeground'),
     overviewRulerLane: vscode.OverviewRulerLane.Full,
-    after: { contentText: '  ◀ REPLAY', color: new vscode.ThemeColor('debugIcon.startForeground'), fontStyle: 'italic' }
+    after: { color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic', margin: '0 0 0 1.5em' }
+  });
+  replayInlineValuesEnabled = context.workspaceState.get('compositeGradleTests.replay.inlineValuesEnabled', true) !== false;
+  vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayInlineValuesEnabled', replayInlineValuesEnabled);
+
+  replayInlineValueDecoration = vscode.window.createTextEditorDecorationType({
+    rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    after: {
+      color: new vscode.ThemeColor('editorCodeLens.foreground'),
+      fontStyle: 'italic',
+      margin: '0 0 0 0.3em'
+    }
   });
   replayFilesProvider = new ReplayFilesProvider();
   instrumentationProvider = new ReplayInstrumentationProvider();
   replayStateProvider = new ReplayStateProvider();
   replayCallStackProvider = new ReplayCallStackProvider();
   replayTimelineProvider = new ReplayTimelineProvider();
-  context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration);
+  context.subscriptions.push(replayExecutedDecoration, replayCurrentDecoration, replayInlineValueDecoration);
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayFiles', replayFilesProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayInstrumentation', instrumentationProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayState', replayStateProvider));
   context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayCallStack', replayCallStackProvider));
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('compositeGradleTests.replayTimeline', replayTimelineProvider, { webviewOptions: { retainContextWhenHidden: true } }));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.toggleInlineValues', async () => {
+    replayInlineValuesEnabled = !replayInlineValuesEnabled;
+    await context.workspaceState.update('compositeGradleTests.replay.inlineValuesEnabled', replayInlineValuesEnabled);
+    await vscode.commands.executeCommand('setContext', 'compositeGradleTests.replayInlineValuesEnabled', replayInlineValuesEnabled);
+    for (const editor of vscode.window.visibleTextEditors) applyReplayDecorations(editor);
+    vscode.window.setStatusBarMessage(`Replay inline values ${replayInlineValuesEnabled ? 'shown' : 'hidden'}`, 1600);
+  }));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.open', async () => {
     const result = testHistory.find(item => item?.flowEvents?.some(event => event.event === 'line'));
     if (result) await openNativeReplay(result); else vscode.window.showWarningMessage('Composite Gradle Tests: no captured execution replay is available yet.');
@@ -4771,6 +5157,8 @@ module.exports.activate = async function patchedActivate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.last', () => nativeReplaySession?.last()));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.previousOccurrence', () => nativeReplaySession?.moveOccurrence(-1)));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.nextOccurrence', () => nativeReplaySession?.moveOccurrence(1)));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeCurrentFile', includeCurrentReplayFile));
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.includeCurrentPackage', includeCurrentReplayPackage));
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addRule', async () => {
     const choice = await vscode.window.showQuickPick([
       { label: '$(package) Include Package', description: 'Instrument every class in a package', command: 'compositeGradleTests.replay.instrumentation.addPackage' },

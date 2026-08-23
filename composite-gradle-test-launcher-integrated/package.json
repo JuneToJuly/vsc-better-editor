@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.26",
+  "version": "0.4.35",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -191,6 +191,11 @@
         "icon": "$(close)"
       },
       {
+        "command": "compositeGradleTests.replay.toggleInlineValues",
+        "title": "Replay: Toggle Inline Values",
+        "icon": "$(symbol-variable)"
+      },
+      {
         "command": "compositeGradleTests.replay.first",
         "title": "Replay: First Step",
         "icon": "$(debug-restart)"
@@ -311,6 +316,16 @@
         "icon": "$(trash)"
       },
       {
+        "command": "compositeGradleTests.replay.instrumentation.includeCurrentFile",
+        "title": "Replay: Include Current File in Instrumentation",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.instrumentation.includeCurrentPackage",
+        "title": "Replay: Include Current Package in Instrumentation",
+        "icon": "$(package)"
+      },
+      {
         "command": "compositeGradleTests.replay.instrumentation.addRule",
         "title": "Replay Instrumentation: Add Rule",
         "icon": "$(add)"
@@ -382,6 +397,16 @@
           "command": "compositeGradleTests.runClassWithFlow",
           "when": "editorLangId == java",
           "group": "testing@9"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeCurrentFile",
+          "when": "compositeGradleTests.replayActive && editorLangId == java",
+          "group": "replayInstrumentation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeCurrentPackage",
+          "when": "compositeGradleTests.replayActive && editorLangId == java",
+          "group": "replayInstrumentation@2"
         }
       ],
       "view/title": [
@@ -464,6 +489,11 @@
           "command": "compositeGradleTests.replay.adapters.create",
           "when": "view == compositeGradleTests.replayInstrumentation",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.toggleInlineValues",
+          "when": "view == compositeGradleTests.replayTimeline",
+          "group": "navigation@8"
         }
       ],
       "view/item/context": [
@@ -578,6 +608,16 @@
           "command": "compositeGradleTests.replay.exit",
           "when": "compositeGradleTests.replayActive",
           "group": "navigation@29"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeCurrentFile",
+          "when": "compositeGradleTests.replayActive && editorLangId == java",
+          "group": "navigation@23"
+        },
+        {
+          "command": "compositeGradleTests.replay.instrumentation.includeCurrentPackage",
+          "when": "compositeGradleTests.replayActive && editorLangId == java",
+          "group": "navigation@24"
         }
       ]
     },

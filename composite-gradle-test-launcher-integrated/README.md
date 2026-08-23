@@ -1,3 +1,5 @@
+# CGTL 0.4.35
+
 # Composite Gradle Test Launcher
 
 Current version: **0.3.26**
