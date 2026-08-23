@@ -25,3 +25,22 @@ For each preview choose:
 - **Theme Favorites: Toggle Current Theme Favorite** — add/remove the currently active theme manually
 
 Favorites are stored in VS Code global extension state, so they follow you across workspaces in the same VS Code profile.
+
+## Portable theme bundles
+
+### Export Favorite Theme Bundle
+Run **Theme Favorites: Export Favorite Theme Bundle**.
+
+This creates a `.vsthemes` bundle containing:
+- your favorite theme list
+- theme IDs, labels, UI theme types, and original extension IDs
+- the actual files from the extensions that provide those favorite themes
+
+The provider files are included so theme JSON files that use relative includes or companion files continue to work on another machine.
+
+### Import Theme Bundle
+Run **Theme Favorites: Import Theme Bundle** and select the `.vsthemes` file.
+
+Theme Favorites creates a local, inert theme-pack extension containing only theme contributions, restores the exported favorites, and offers to reload VS Code. The original theme extensions do not have to be installed on the destination machine.
+
+Imported provider code is not activated by the generated pack; the pack contributes only the exported themes.
