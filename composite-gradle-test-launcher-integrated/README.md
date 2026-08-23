@@ -442,3 +442,10 @@ Replay Capture Points are debugger-like source markers for high-fidelity state c
 ## 0.4.40 — Replay State Search
 
 The Replay **State** view now supports live search across variable names and captured values. Use the search icon in the State view title. Search terms are case-insensitive and whitespace-separated terms are combined with AND semantics, so `customer CUST-42` only keeps matching state paths that contain both terms. Matching nested paths remain visible and expand automatically. The query remains active while stepping through Replay until explicitly cleared with the State view's clear-search action.
+
+## 0.4.41
+
+- Fixed composite Gradle debugger project detection. Debug attach now resolves `projectName` from the same auto-detected Gradle task/project used to run the test, instead of relying primarily on a path-only Java project lookup.
+- Composite tasks such as `:order-service:app:test` are matched against Java project identities such as `order-service-app`, with the source path used as an additional disambiguator.
+- Explicit per-source `projects[].javaProjectName` mappings remain highest priority. The legacy global `javaProjectName` is now a fallback after automatic task-based project resolution.
+- Added debug output showing the detected Gradle task and the Java project selected from it.

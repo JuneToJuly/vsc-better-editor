@@ -280,9 +280,11 @@ async function createInvocation(documentUri, target, debug) {
     displayName: target.displayName,
     filter: target.filter,
     task,
-    projectName: resolveMappedJavaProjectName(documentUri.fsPath, root, config)
-      || String(config.get('javaProjectName', '') || '').trim()
-      || await resolveJavaProjectNameFromJavaExtension(documentUri.fsPath),
+    // Resolve debugger project identity from the same Gradle project/task that
+    // selected this test. In composite builds java.project.getAll can expose
+    // several projects beneath the same included-build root, so a path-only
+    // lookup can select the wrong sibling project.
+    projectName: await resolveDebuggerProjectName(documentUri.fsPath, root, task, config),
     showOutput: config.get('showOutput', false),
     documentUri: documentUri.toString(),
     sourcePath: documentUri.fsPath,
@@ -4139,6 +4141,92 @@ class DebugEvaluateCompletionProvider {
       return item;
     });
   }
+}
+
+async function resolveDebuggerProjectName(filePath, root, task, config) {
+  const mapped = resolveMappedJavaProjectName(filePath, root, config);
+  if (mapped) return mapped;
+
+  // The Gradle task is already the authoritative result of composite project
+  // detection. Prefer a Java project whose name agrees with that task before
+  // falling back to the older path-only language-server lookup.
+  const detected = await resolveJavaProjectNameFromDetectedTask(filePath, task);
+  if (detected) return detected;
+
+  const configured = String(config.get('javaProjectName', '') || '').trim();
+  if (configured) {
+    output.appendLine(`[debug] Java project using legacy configured name: ${configured}`);
+    return configured;
+  }
+
+  return resolveJavaProjectNameFromJavaExtension(filePath);
+}
+
+function gradleProjectPartsFromTask(task) {
+  const parts = String(task || '').split(':').map(value => value.trim()).filter(Boolean);
+  if (parts.length <= 1) return [];
+  // The final segment is the test/source-set task (test, integrationTest, etc.).
+  return parts.slice(0, -1);
+}
+
+function normalizeProjectIdentity(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\\/:._\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+async function resolveJavaProjectNameFromDetectedTask(filePath, task) {
+  const projectParts = gradleProjectPartsFromTask(task);
+  if (!projectParts.length) return undefined;
+
+  const fullIdentity = normalizeProjectIdentity(projectParts.join('-'));
+  const leafIdentity = normalizeProjectIdentity(projectParts[projectParts.length - 1]);
+  const normalizedFile = normalizePath(filePath);
+
+  try {
+    const projects = await vscode.commands.executeCommand('java.project.getAll');
+    const candidates = collectJavaProjects(projects);
+    let best;
+
+    for (const candidate of candidates) {
+      if (!candidate?.name) continue;
+      const nameIdentity = normalizeProjectIdentity(candidate.name);
+      let score = 0;
+
+      // Typical Red Hat Java/Buildship composite name: order-service-app for
+      // Gradle task :order-service:app:test.
+      if (nameIdentity === fullIdentity) score += 1000;
+      else if (fullIdentity && (nameIdentity.endsWith(`-${fullIdentity}`) || fullIdentity.endsWith(`-${nameIdentity}`))) score += 700;
+
+      // A few Gradle/JDT layouts expose only the leaf project name ("app").
+      if (nameIdentity === leafIdentity) score += 450;
+
+      if (candidate.path) {
+        const normalizedProjectPath = normalizePath(candidate.path);
+        if (isPathInside(normalizedFile, normalizedProjectPath)) score += 300;
+        // Prefer the deepest matching project root when several Java projects
+        // are reported for one included build.
+        score += Math.min(200, normalizedProjectPath.length / 10);
+      }
+
+      if (!best || score > best.score) best = { ...candidate, score };
+    }
+
+    // Require an actual task/name or source-path signal. Do not invent a
+    // projectName just because java.project.getAll returned something.
+    if (best && best.score >= 300) {
+      output.appendLine(`[debug] Java project resolved from detected Gradle task ${task}: ${best.name}`);
+      return best.name;
+    }
+
+    output.appendLine(`[debug] Detected Gradle task ${task} did not map positively to a Java project name.`);
+  } catch (error) {
+    output.appendLine(`[debug] Task-based Java project lookup unavailable for ${task}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return undefined;
 }
 
 async function resolveJavaProjectNameFromJavaExtension(filePath) {
