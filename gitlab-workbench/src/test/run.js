@@ -1,0 +1,2 @@
+const assert=require('assert'); const {DemoClient}=require('../services/demoClient');
+(async()=>{const c=new DemoClient();const list=await c.listMergeRequests();assert(list.length>=5);assert(list.some(x=>x.pipeline==='failed'));const mr=await c.getMergeRequest('pricing-service',284);assert.equal(mr.iid,284);assert(mr.files.length>0);console.log('PASS: demo backend provides multi-repo MRs, pipeline states, and changed files');})().catch(e=>{console.error(e);process.exit(1)});

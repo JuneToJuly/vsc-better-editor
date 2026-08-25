@@ -1,0 +1,347 @@
+{
+  "name": "gitlab-developer-workbench",
+  "displayName": "GitLab Developer Workbench",
+  "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
+  "version": "0.14.0",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "activationEvents": [
+    "onView:gitlabWorkbench.mergeRequests",
+    "onCommand:gitlabWorkbench.openDashboard",
+    "onView:gitlabWorkbench.issues",
+    "onCommand:gitlabWorkbench.newIssue",
+    "onCommand:gitlabWorkbench.issueFilter"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "gitlabWorkbench.openDashboard",
+        "title": "GitLab Workbench: Open Dashboard"
+      },
+      {
+        "command": "gitlabWorkbench.refresh",
+        "title": "GitLab Workbench: Refresh"
+      },
+      {
+        "command": "gitlabWorkbench.manageProjects",
+        "title": "GitLab Workbench: Manage Projects",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "gitlabWorkbench.removeProject",
+        "title": "GitLab Workbench: Remove Project",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "gitlabWorkbench.addProject",
+        "title": "GitLab Workbench: Add Project",
+        "icon": "$(add)"
+      },
+      {
+        "command": "gitlabWorkbench.showOutput",
+        "title": "GitLab Workbench: Show Output"
+      },
+      {
+        "command": "gitlabWorkbench.toggleDemo",
+        "title": "GitLab Workbench: Toggle Demo Mode"
+      },
+      {
+        "command": "gitlabWorkbench.openMr",
+        "title": "GitLab Workbench: Open Merge Request"
+      },
+      {
+        "command": "gitlabWorkbench.checkoutMr",
+        "title": "GitLab Workbench: Checkout Merge Request"
+      },
+      {
+        "command": "gitlabWorkbench.approveMr",
+        "title": "GitLab Workbench: Approve Merge Request"
+      },
+      {
+        "command": "gitlabWorkbench.mergeMr",
+        "title": "GitLab Workbench: Merge Merge Request"
+      },
+      {
+        "command": "gitlabWorkbench.openDiff",
+        "title": "GitLab Workbench: Open File Diff"
+      },
+      {
+        "command": "gitlabWorkbench.demoScenario",
+        "title": "GitLab Workbench: Choose Demo Scenario"
+      },
+      {
+        "command": "gitlabWorkbench.reviewMr",
+        "title": "GitLab Workbench: Start Review"
+      },
+      {
+        "command": "gitlabWorkbench.nextChange",
+        "title": "GitLab Workbench: Next Changed File",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "gitlabWorkbench.previousChange",
+        "title": "GitLab Workbench: Previous Changed File",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "gitlabWorkbench.markReviewed",
+        "title": "GitLab Workbench: Mark Current File Reviewed",
+        "icon": "$(check)"
+      },
+      {
+        "command": "gitlabWorkbench.openReviewFile",
+        "title": "GitLab Workbench: Open Review File"
+      },
+      {
+        "command": "gitlabWorkbench.toggleReviewed",
+        "title": "GitLab Workbench: Toggle File Reviewed"
+      },
+      {
+        "command": "gitlabWorkbench.addReviewComment",
+        "title": "GitLab Workbench: Add Review Comment",
+        "icon": "$(comment-add)"
+      },
+      {
+        "command": "gitlabWorkbench.finishReview",
+        "title": "GitLab Workbench: Finish Review",
+        "icon": "$(close)"
+      },
+      {
+        "command": "gitlabWorkbench.nextUnresolved",
+        "title": "GitLab Workbench: Next Unresolved Comment",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "gitlabWorkbench.replyDiscussion",
+        "title": "GitLab Workbench: Reply to Review Comment",
+        "icon": "$(reply)"
+      },
+      {
+        "command": "gitlabWorkbench.resolveDiscussion",
+        "title": "GitLab Workbench: Resolve Review Comment",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "gitlabWorkbench.openIssue",
+        "title": "GitLab Workbench: Open Issue"
+      },
+      {
+        "command": "gitlabWorkbench.newIssue",
+        "title": "GitLab Workbench: New Issue",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "gitlabWorkbench.issueFilter",
+        "title": "GitLab Workbench: Filter Issues",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "gitlabWorkbench.manageTrackedAssignees",
+        "title": "GitLab Workbench: Manage Tracked Assignees",
+        "icon": "$(person-add)"
+      },
+      {
+        "command": "gitlabWorkbench.issueViewMode",
+        "title": "GitLab Workbench: Change Issue View",
+        "icon": "$(layout)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gitlabWorkbench",
+          "title": "GitLab Workbench",
+          "icon": "resources/gitlab.svg"
+        }
+      ]
+    },
+    "views": {
+      "gitlabWorkbench": [
+        {
+          "id": "gitlabWorkbench.mergeRequests",
+          "name": "Merge Requests",
+          "when": "!gitlabWorkbench.reviewActive"
+        },
+        {
+          "id": "gitlabWorkbench.issues",
+          "name": "Issues",
+          "when": "!gitlabWorkbench.reviewActive"
+        },
+        {
+          "id": "gitlabWorkbench.reviewExplorer",
+          "name": "Review Explorer",
+          "when": "gitlabWorkbench.reviewActive"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GitLab Developer Workbench",
+      "properties": {
+        "gitlabWorkbench.demoMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use a deterministic fake GitLab backend. No GitLab project is required."
+        },
+        "gitlabWorkbench.glabPath": {
+          "type": "string",
+          "default": "glab",
+          "description": "Path to the glab executable."
+        },
+        "gitlabWorkbench.perPage": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Merge requests fetched per repository."
+        },
+        "gitlabWorkbench.managedProjects": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "GitLab project URLs managed by the Workbench. Projects do not need to be cloned locally."
+        },
+        "gitlabWorkbench.discoverLocalRepositories": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also discover GitLab projects from Git repositories in the current VS Code workspace."
+        },
+        "gitlabWorkbench.trackedAssignees": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "GitLab usernames kept as quick filters in the Issues view."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "gitlabWorkbench.nextChange",
+        "key": "f7",
+        "when": "gitlabWorkbench.reviewActive"
+      },
+      {
+        "command": "gitlabWorkbench.previousChange",
+        "key": "shift+f7",
+        "when": "gitlabWorkbench.reviewActive"
+      },
+      {
+        "command": "gitlabWorkbench.addReviewComment",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c",
+        "when": "gitlabWorkbench.reviewActive && editorTextFocus"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gitlabWorkbench.markReviewed",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitlabWorkbench.nextUnresolved",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@1.5"
+        },
+        {
+          "command": "gitlabWorkbench.addReviewComment",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitlabWorkbench.previousChange",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitlabWorkbench.nextChange",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gitlabWorkbench.finishReview",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "gitlabWorkbench.addProject",
+          "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitlabWorkbench.manageProjects",
+          "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitlabWorkbench.addProject",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitlabWorkbench.manageProjects",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitlabWorkbench.newIssue",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0"
+        },
+        {
+          "command": "gitlabWorkbench.issueFilter",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0.5"
+        },
+        {
+          "command": "gitlabWorkbench.issueViewMode",
+          "when": "view == gitlabWorkbench.issues",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "gitlabWorkbench.toggleReviewed",
+          "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewFile",
+          "group": "inline"
+        },
+        {
+          "command": "gitlabWorkbench.toggleReviewed",
+          "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewFileReviewed",
+          "group": "inline"
+        },
+        {
+          "command": "gitlabWorkbench.replyDiscussion",
+          "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewDiscussion",
+          "group": "inline@1"
+        },
+        {
+          "command": "gitlabWorkbench.resolveDiscussion",
+          "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewDiscussion",
+          "group": "inline@2"
+        },
+        {
+          "command": "gitlabWorkbench.replyDiscussion",
+          "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewGeneralDiscussion",
+          "group": "inline@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node src/test/run.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.95.0"
+  }
+}

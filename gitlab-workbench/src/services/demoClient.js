@@ -1,0 +1,53 @@
+const baseMrs=[
+ {repo:'pricing-service',iid:284,title:'Add customer pricing rules',author:'alice',source:'feature/pricing-rules',target:'develop',pipeline:'success',approvals:'2/2',conflicts:false,updated:'8m',description:'Adds customer-specific pricing rules and validation.',files:[['src/main/java/pricing/PricingEngine.java',31,8],['src/main/java/pricing/PricingRules.java',82,0],['src/test/java/pricing/PricingEngineTest.java',71,0]]},
+ {repo:'order-service',iid:391,title:'Integrate pricing response',author:'bob',source:'feature/pricing-integration',target:'develop',pipeline:'running',approvals:'1/2',conflicts:false,updated:'17m',description:'Consumes the new pricing response in order processing.',files:[['src/main/java/order/OrderService.java',24,6],['src/test/java/order/OrderServiceTest.java',43,2]]},
+ {repo:'inventory-service',iid:188,title:'Update inventory API contract',author:'carol',source:'feature/inventory-contract',target:'develop',pipeline:'failed',approvals:'0/2',conflicts:false,updated:'26m',description:'Updates availability contract for downstream consumers.',files:[['src/main/java/inventory/InventoryController.java',18,12]]},
+ {repo:'customer-service',iid:102,title:'Customer model cleanup',author:'dave',source:'cleanup/customer-model',target:'develop',pipeline:'success',approvals:'2/2',conflicts:true,updated:'1h',description:'Simplifies customer model mapping.',files:[['src/main/java/customer/CustomerMapper.java',15,19]]},
+ {repo:'shared-model',iid:81,title:'Add CustomerType',author:'erin',source:'feature/customer-type',target:'develop',pipeline:'success',approvals:'2/2',conflicts:false,updated:'2h',description:'Adds shared CustomerType used by several services.',files:[['src/main/java/model/CustomerType.java',37,0]]}
+];
+const feedbackMr={repo:'pricing-service',iid:412,title:'Add tiered customer pricing',author:'demo-user',source:'feature/tiered-pricing',target:'develop',pipeline:'success',approvals:'0/2',conflicts:false,updated:'3m',description:'Your MR has reviewer feedback waiting to be addressed.',files:[['src/main/java/pricing/PricingEngine.java',31,8],['src/main/java/pricing/PricingRules.java',22,3],['src/test/java/pricing/PricingEngineTest.java',18,1]],discussions:[
+ {id:'g1',path:null,line:null,resolved:false,resolvable:false,notes:[{id:'gn1',author:'Sarah Chen',body:'Overall this is looking good. Before we merge, can you update the MR description with the rollout behavior and add a note about backwards compatibility?'}]},
+ {id:'g2',path:null,line:null,resolved:false,resolvable:false,notes:[{id:'gn2',author:'Marcus Lee',body:'One general question: do we need to coordinate this change with order-service, or is the new pricing response backwards compatible?'},{id:'gn3',author:'demo-user',body:'It is backwards compatible, but I will document the rollout sequence here.'}]},
+ {id:'d1',path:'src/main/java/pricing/PricingEngine.java',line:6,resolved:false,notes:[{id:'n1',author:'Sarah Chen',body:'Can we validate the customer before calculating the tier? Otherwise an invalid customer can reach the pricing lookup.'}]},
+ {id:'d2',path:'src/main/java/pricing/PricingEngine.java',line:8,resolved:false,notes:[{id:'n2',author:'Marcus Lee',body:'Please avoid returning null here. Could this return the standard price instead?'}]},
+ {id:'d3',path:'src/main/java/pricing/PricingRules.java',line:7,resolved:false,notes:[{id:'n3',author:'Sarah Chen',body:'Could you add a short comment explaining why enterprise customers bypass this rule?'}]},
+ {id:'d4',path:'src/test/java/pricing/PricingEngineTest.java',line:9,resolved:true,notes:[{id:'n4',author:'Marcus Lee',body:'Nice — this covers the boundary case I was worried about.'},{id:'n5',author:'demo-user',body:'Thanks, added the explicit boundary assertion.'}]}
+]};
+
+const demoIssues=[
+ {repo:'pricing-service',iid:47,title:'Tiered pricing should handle missing customer segment',author:'Sarah Chen',assignees:['sarah'],state:'opened',labels:['bug','pricing','in progress'],updated:'12m',commentCount:2,description:'Pricing falls back incorrectly when a customer has no segment assigned.'},
+ {repo:'pricing-service',iid:44,title:'Document tiered pricing rollout behavior',author:'Marcus Lee',assignees:['marcus'],state:'opened',labels:['documentation','review'],updated:'1h',commentCount:1,description:'Document backwards compatibility and rollout order for downstream services.'},
+ {repo:'order-service',iid:103,title:'Consume new pricing response fields',author:'demo-user',assignees:['demo-user','sarah'],state:'opened',labels:['integration','blocked'],updated:'2h',commentCount:3,description:'Update order processing to consume the optional tier metadata.'},
+ {repo:'inventory-service',iid:71,title:'Intermittent inventory contract test failure',author:'Carol',assignees:[],state:'opened',labels:['bug','todo'],updated:'1d',commentCount:0,description:'Contract test occasionally fails when reservation data is refreshed.'}
+];
+
+const demoIssueNotes=new Map([['pricing-service#47',[{id:'i1',author:'Sarah Chen',body:'I can reproduce this when the segment is missing.',created:'10m'},{id:'i2',author:'demo-user',body:'I will add a fallback test.',created:'5m'}]],['pricing-service#44',[{id:'i3',author:'Marcus Lee',body:'Please include the downstream rollout order.',created:'45m'}]],['order-service#103',[{id:'i4',author:'Sarah Chen',body:'I am taking the consumer-side update.',created:'1h'}]]]);
+const clone=x=>JSON.parse(JSON.stringify(x));
+function generated(count,repos=30){return Array.from({length:count},(_,i)=>({repo:`service-${String(i%repos+1).padStart(2,'0')}`,iid:1000+i,title:`Program change ${i+1}`,author:`dev${i%12+1}`,source:`feature/change-${i+1}`,target:'develop',pipeline:i%11===0?'failed':i%7===0?'running':'success',approvals:i%5===0?'0/2':i%3===0?'1/2':'2/2',conflicts:i%17===0,updated:`${i+3}m`,description:`Generated merge request ${i+1} for stress testing.`,files:Array.from({length:(i%8)+1},(_,f)=>[`src/main/java/example/Feature${i+1}_${f+1}.java`,10+f*3,f%4])}));}
+function scenario(name){let x=clone(baseMrs);switch(name){case'feedback':return [clone(feedbackMr),...x];case'heavy':return [...x,...generated(25,8)];case'review':return generated(18,7).map((m,i)=>({...m,approvals:i%4===0?'1/2':'0/2'}));case'pipelines':return generated(20,8).map((m,i)=>({...m,pipeline:i%3===0?'running':'failed'}));case'conflicts':return generated(16,8).map((m,i)=>({...m,conflicts:i%2===0,pipeline:'success'}));case'large':return generated(120,30);default:return x;}}
+class DemoClient{
+ constructor(){this.scenario='normal';this.reviewed=new Set();this.discussionState=new Map();}
+ setScenario(s){this.scenario=s;this.discussionState.clear();}
+ getScenario(){return this.scenario;}
+ async status(){return {mode:'demo',authenticated:true,user:'demo-user',scenario:this.scenario};}
+ async listIssues(){return clone(demoIssues);}
+ async getIssue(repo,iid){return clone(demoIssues.find(x=>x.repo===repo&&x.iid===Number(iid)));}
+ async listIssueNotes(issue){return clone(demoIssueNotes.get(`${issue.repo}#${issue.iid}`)||[]);}
+ async addIssueNote(issue,body){const k=`${issue.repo}#${issue.iid}`;const a=demoIssueNotes.get(k)||[];a.push({id:`n${Date.now()}`,author:'demo-user',body,created:'now'});demoIssueNotes.set(k,a);return {message:'Demo: comment added'};}
+ async createIssue(repoId,data){const iid=Math.max(0,...demoIssues.filter(x=>x.repo===repoId).map(x=>x.iid))+1;const issue={repo:repoId,repoName:repoId,iid,title:data.title,author:'demo-user',assignees:data.assignee?[data.assignee]:[],state:'opened',labels:[],updated:'now',commentCount:0,description:data.description||''};demoIssues.unshift(issue);return clone(issue);}
+ async updateIssue(issue,data){const x=demoIssues.find(v=>v.repo===issue.repo&&v.iid===Number(issue.iid));if(!x)return;Object.assign(x,data.title!==undefined?{title:data.title}:{},data.description!==undefined?{description:data.description}:{},data.assignees!==undefined?{assignees:data.assignees}:{},data.state_event==='close'?{state:'closed'}:data.state_event==='reopen'?{state:'opened'}:{});x.updated='now';return clone(x);}
+ async currentUser(){return 'demo-user';}
+ async projectList(){return [...new Set(demoIssues.map(x=>x.repo))].map(repo=>({id:repo,name:repo,project:repo,host:'demo'}));}
+ async listMergeRequests(){return clone(scenario(this.scenario)).map(m=>({...m,reviewedFiles:(m.files||[]).filter(f=>this.reviewed.has(`${m.repo}!${m.iid}:${f[0]}`)).length,unresolved:(m.discussions||[]).filter(d=>!this._discussion(m,d.id).resolved).length}));}
+ async getMergeRequest(repo,iid){const m=scenario(this.scenario).find(x=>x.repo===repo&&x.iid===Number(iid));if(!m)return;const out=clone(m);out.discussions=(m.discussions||[]).map(d=>this._discussion(m,d.id));out.unresolved=out.discussions.filter(d=>!d.resolved).length;out.reviewedFiles=(m.files||[]).filter(f=>this.reviewed.has(`${m.repo}!${m.iid}:${f[0]}`)).length;return out;}
+ _discussion(m,id){const k=`${m.repo}!${m.iid}:${id}`;if(!this.discussionState.has(k)){const d=(m.discussions||[]).find(x=>x.id===id);this.discussionState.set(k,clone(d));}return clone(this.discussionState.get(k));}
+ _save(m,d){this.discussionState.set(`${m.repo}!${m.iid}:${d.id}`,clone(d));}
+ async listDiscussions(mr){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));return (full?.discussions||[]).map(d=>this._discussion(full,d.id));}
+ async addMergeRequestComment(mr,body){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));if(!full)throw new Error('Merge request not found');full.discussions=full.discussions||[];full.discussions.push({id:`general-${Date.now()}`,path:null,line:null,resolved:false,resolvable:false,notes:[{id:`note-${Date.now()}`,author:'demo-user',body}]});return {message:'Merge request comment added'};}
+ async replyDiscussion(mr,id,body){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));const d=this._discussion(full,id);d.notes.push({id:`reply-${Date.now()}`,author:'demo-user',body});this._save(full,d);return d;}
+ async resolveDiscussion(mr,id,resolved=true){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));const d=this._discussion(full,id);d.resolved=resolved;this._save(full,d);return d;}
+ markReviewed(mr,path,value=true){const k=`${mr.repo}!${mr.iid}:${path}`;value?this.reviewed.add(k):this.reviewed.delete(k);}
+ isReviewed(mr,path){return this.reviewed.has(`${mr.repo}!${mr.iid}:${path}`);}
+ async checkout(mr){return {message:`Demo: checked out ${mr.repo}!${mr.iid}`};} async approve(mr){return {message:`Demo: approved ${mr.repo}!${mr.iid}`};} async merge(mr){return {message:`Demo: merged ${mr.repo}!${mr.iid}`};}
+}
+module.exports={DemoClient};

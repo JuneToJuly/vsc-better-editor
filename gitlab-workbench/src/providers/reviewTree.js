@@ -1,0 +1,21 @@
+const vscode=require('vscode');
+const path=require('path');
+class ReviewTreeProvider{
+ constructor(reviewState,isReviewed){this.reviewState=reviewState;this.isReviewed=isReviewed;this._onDidChangeTreeData=new vscode.EventEmitter();this.onDidChangeTreeData=this._onDidChangeTreeData.event;}
+ refresh(){this._onDidChangeTreeData.fire();}
+ getTreeItem(el){
+  if(el.kind==='summary')return el.item;
+  if(el.kind==='folder'){const t=new vscode.TreeItem(el.name,vscode.TreeItemCollapsibleState.Expanded);t.iconPath=new vscode.ThemeIcon('folder');t.description=`${el.reviewed}/${el.total}`;return t;}
+  if(el.kind==='generalFolder'){const t=new vscode.TreeItem('Merge Request Discussion',vscode.TreeItemCollapsibleState.Expanded);t.iconPath=new vscode.ThemeIcon('comment-discussion');t.description=`${el.children.length} thread${el.children.length===1?'':'s'}`;t.contextValue='generalDiscussionFolder';return t;}
+  if(el.kind==='comment'){const first=el.discussion.notes[0];const t=new vscode.TreeItem(`${first.author}: ${oneLine(first.body)}`,vscode.TreeItemCollapsibleState.None);t.description=el.discussion.path?(el.discussion.resolved?'resolved':`line ${el.discussion.line}`):'general';t.iconPath=new vscode.ThemeIcon(el.discussion.resolved?'pass':'comment-discussion');t.tooltip=el.discussion.notes.map(n=>`${n.author}: ${n.body}`).join('\n\n');t.command=el.discussion.path?{command:'gitlabWorkbench.openDiscussion',title:'Open comment',arguments:[el.discussion]}:undefined;t.contextValue=el.discussion.path?(el.discussion.resolved?'reviewDiscussionResolved':'reviewDiscussion'):'reviewGeneralDiscussion';return t;}
+  const active=this.reviewState.index===el.index;const reviewed=this.isReviewed(el.mr,el.file[0]);const discussions=(this.reviewState.discussions||[]).filter(d=>d.path===el.file[0]);const unresolved=discussions.filter(d=>!d.resolved).length;const name=path.basename(el.file[0]);
+  const t=new vscode.TreeItem(name,discussions.length?vscode.TreeItemCollapsibleState.Expanded:vscode.TreeItemCollapsibleState.None);t.description=`+${el.file[1]} -${el.file[2]}${unresolved?`  💬 ${unresolved}`:''}${active?'  current':''}`;t.tooltip=`${el.file[0]}\n${reviewed?'Reviewed':'Not reviewed'}\n+${el.file[1]} -${el.file[2]}${unresolved?`\n${unresolved} unresolved review comment(s)`:''}`;t.iconPath=new vscode.ThemeIcon(reviewed?'pass':active?'eye':'circle-outline');t.contextValue=reviewed?'reviewFileReviewed':'reviewFile';t.command={command:'gitlabWorkbench.openReviewFile',title:'Open changed file',arguments:[el.index]};t.discussions=discussions;return t;
+ }
+ getChildren(el){const mr=this.reviewState.mr;if(!mr)return [];
+  if(!el){const files=mr.files||[],done=files.filter(f=>this.isReviewed(mr,f[0])).length,unresolved=(this.reviewState.discussions||[]).filter(d=>!d.resolved).length;const s=new vscode.TreeItem(`Review !${mr.iid} · ${done}/${files.length}`,vscode.TreeItemCollapsibleState.None);s.description=`${mr.repo}${unresolved?` · 💬 ${unresolved} unresolved`:''}`;s.iconPath=new vscode.ThemeIcon(unresolved?'comment-discussion':done===files.length?'verified':'git-pull-request');s.contextValue='reviewSummary';const all=this.reviewState.discussions||[];const general=all.filter(d=>!d.path).map(d=>({kind:'comment',discussion:d}));const generalNode=general.length?[{kind:'generalFolder',children:general}]:[];return [{kind:'summary',item:s},...generalNode,...buildFolders(files,mr,this.isReviewed,all)];}
+  if(el.kind==='folder'||el.kind==='generalFolder')return el.children;if(el.kind==='file')return (el.discussions||[]).map(d=>({kind:'comment',discussion:d}));return [];
+ }
+}
+function buildFolders(files,mr,isReviewed,discussions){const roots=new Map();files.forEach((f,index)=>{const parts=f[0].split('/');const dir=parts.length>1?parts.slice(0,-1).join('/'):'(root)';if(!roots.has(dir))roots.set(dir,[]);roots.get(dir).push({kind:'file',file:f,index,mr,discussions:discussions.filter(d=>d.path===f[0])});});return [...roots.entries()].map(([name,children])=>({kind:'folder',name,children,total:children.length,reviewed:children.filter(x=>isReviewed(mr,x.file[0])).length}));}
+function oneLine(s){s=String(s||'').replace(/\s+/g,' ').trim();return s.length>55?s.slice(0,52)+'…':s;}
+module.exports={ReviewTreeProvider};
