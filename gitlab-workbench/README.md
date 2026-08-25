@@ -60,3 +60,39 @@ The Issues view now defaults to a compact text Kanban layout: assignee → statu
 ## v0.14.0 - Local review cache
 
 Live merge-request reviews now prepare a local Git object store once when **Start Review** is selected. If a matching local checkout is available, Workbench reuses it; otherwise it creates a private bare clone under VS Code extension global storage using `glab repo clone -- --bare`. Base/head file contents are then read with local `git show` instead of GitLab API requests on every file navigation. GitLab remains the source for discussions and review mutations.
+
+## v0.15.2 Java-aware reviews
+
+Live MR reviews now materialize the MR HEAD as a detached Git worktree. The changed/right side of the VS Code diff is the real file from that worktree, so once JDT imports it normal Java navigation and completion can work there.
+
+`GitLab Workbench: Prepare Java Review Root` asks once for your normal Fast Composite JDT root, generates a disposable review composite root from its settings file, rewrites literal `includeBuild(...)` paths to absolute paths, and substitutes the reviewed repository with the MR worktree when it can match the included build by directory name. If it cannot match it, the MR worktree is added as an included build and the output log says so.
+
+GitLab Workbench does not modify Fast Composite JDT or its private state. It invokes Fast Composite JDT's existing public `Add Composite Root` / `Switch Composite Root` commands. Because those commands intentionally own their interactive root picker, the first registration requires selecting the generated review-root folder; GitLab Workbench copies that path to the clipboard before opening the command. Subsequent switching uses Fast Composite JDT's existing switch command.
+
+
+## 0.15.2
+Review Git caches, worktrees, and generated composite roots now live under `<workspace>/.glw`. Worktree creation is non-interactive, validates the target commit, logs the exact Git command, and times out instead of hanging indefinitely. Repository discovery ignores the Workbench directory.
+
+
+## v0.15.2 review checkout
+
+Live reviews now use a normal workspace-local Git clone under `.glw/r/<short-project-id>/<iid>` instead of a bare cache plus `git worktree`. The clone is reused, fetched, and detached at the exact MR head SHA. This directory is also the real-file/JDT review project used by the generated Fast Composite root.
+
+
+## v0.15.6
+
+Restores/preserves the exact v0.15.2 workspace-local `glab repo clone` execution path and adds clone subprocess boundary diagnostics (begin, return/error, elapsed time, stdout/stderr, and `.git` validation). Composite-root instrumentation from v0.15.4 remains in place.
+
+
+### 0.15.6
+Windows review clones now use the shorter `<workspace>/.glw/r/<short-project-id>/<iid>` review paths and enable Git for Windows `core.longpaths=true` for clone/fetch/checkout/reset operations. This avoids checkout failures on deep Java package paths while keeping review repositories workspace-local. Existing partial review clones are reused and repaired by the long-path-enabled reset path when possible.
+
+## v0.15.8
+
+Java review composite roots are now intentionally minimal. GitLab Workbench no longer asks for, copies, or rewrites the user's existing composite root. For an MR it generates only a disposable `settings.gradle` containing `includeBuild('<workspace review clone>')`, then launches Fast Composite JDT's existing Add Composite Root selector so the user can add/switch to that generated root.
+
+
+## v0.15.8
+- Standard review checkout is now the default; Fast Composite JDT root preparation is opt-in via `gitlabWorkbench.prepareCompositeRootOnStart`.
+- The existing **Prepare Java Review Root** action remains available when Java/composite navigation is needed.
+- Review diffs default to unified/inline mode via `gitlabWorkbench.unifiedDiff`.

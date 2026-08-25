@@ -1,11 +1,12 @@
 const vscode=require('vscode');
 class IssueTreeProvider{
- constructor(clientFactory){this.clientFactory=clientFactory;this.filter={type:'all',label:'All'};this.mode='board';this._onDidChangeTreeData=new vscode.EventEmitter();this.onDidChangeTreeData=this._onDidChangeTreeData.event;}
+ constructor(clientFactory){this.clientFactory=clientFactory;this.filter={type:'all',label:'All'};this.search='';this.mode='board';this._onDidChangeTreeData=new vscode.EventEmitter();this.onDidChangeTreeData=this._onDidChangeTreeData.event;}
  refresh(){this._onDidChangeTreeData.fire();}
  setFilter(filter){this.filter=filter||{type:'all',label:'All'};this.refresh();}
+ setSearch(value){this.search=String(value||'').trim();this.refresh();}
  setMode(mode){this.mode=mode==='projects'?'projects':'board';this.refresh();}
  async getChildren(element){
-  if(!element){let issues=await this.clientFactory().listIssues();const special=issues.filter(i=>i.kind);issues=issues.filter(i=>!i.kind&&matchesFilter(i,this.filter));if(this.mode==='projects')return projectRoots(issues,special);return boardRoots(issues,special);}
+  if(!element){let issues=await this.clientFactory().listIssues();const special=issues.filter(i=>i.kind);issues=issues.filter(i=>!i.kind&&matchesFilter(i,this.filter)&&matchesSearch(i,this.search));if(this.mode==='projects')return projectRoots(issues,special);return boardRoots(issues,special);}
   if(element.kind==='repo')return element.items.map(issue=>wrapIssue(issue));
   if(element.kind==='person')return element.statuses.map(s=>({kind:'statusGroup',...s}));
   if(element.kind==='statusGroup')return element.items.map(issue=>({kind:'issue',issue}));
@@ -28,4 +29,5 @@ function issueStatus(issue){const labels=(issue.labels||[]).map(x=>String(x).toL
 function statusIcon(key){return ({blocked:'error','in-progress':'sync~spin',review:'eye','todo':'circle-large-outline',other:'issues'})[key]||'issues';}
 function wrapIssue(issue){return issue.kind==='error'?{kind:'error',issue}:issue.kind==='empty'?{kind:'empty',issue}:issue.kind==='status'?{kind:'status',issue}:{kind:'issue',issue};}
 function matchesFilter(issue,f){if(!f||f.type==='all')return true;const names=(issue.assignees||[]).map(x=>x.toLowerCase());if(f.type==='unassigned')return !names.length;if(f.type==='user')return names.includes(String(f.username||'').toLowerCase());return true;}
+function matchesSearch(issue,search){const terms=String(search||'').toLowerCase().split(/\s+/).filter(Boolean);if(!terms.length)return true;const status=issueStatus(issue).label;const haystack=[issue.iid,`#${issue.iid}`,issue.title,issue.repoName,issue.repo,issue.author,status,...(issue.assignees||[]),...(issue.labels||[])].filter(Boolean).join(' ').toLowerCase();return terms.every(term=>haystack.includes(term));}
 module.exports={IssueTreeProvider,issueStatus};

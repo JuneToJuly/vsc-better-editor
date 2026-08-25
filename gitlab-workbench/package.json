@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.14.0",
+  "version": "0.16.0",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -15,7 +15,8 @@
     "onCommand:gitlabWorkbench.openDashboard",
     "onView:gitlabWorkbench.issues",
     "onCommand:gitlabWorkbench.newIssue",
-    "onCommand:gitlabWorkbench.issueFilter"
+    "onCommand:gitlabWorkbench.issueFilter",
+    "onCommand:gitlabWorkbench.issueSearch"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -137,6 +138,11 @@
         "icon": "$(new-file)"
       },
       {
+        "command": "gitlabWorkbench.issueSearch",
+        "title": "GitLab Workbench: Search Issues",
+        "icon": "$(search)"
+      },
+      {
         "command": "gitlabWorkbench.issueFilter",
         "title": "GitLab Workbench: Filter Issues",
         "icon": "$(filter)"
@@ -150,6 +156,16 @@
         "command": "gitlabWorkbench.issueViewMode",
         "title": "GitLab Workbench: Change Issue View",
         "icon": "$(layout)"
+      },
+      {
+        "command": "gitlabWorkbench.prepareJavaReview",
+        "title": "GitLab Workbench: Prepare Java Review Root",
+        "icon": "$(coffee)"
+      },
+      {
+        "command": "gitlabWorkbench.switchJavaReviewRoot",
+        "title": "GitLab Workbench: Switch Fast Composite JDT Root",
+        "icon": "$(sync)"
       }
     ],
     "viewsContainers": {
@@ -220,6 +236,16 @@
             "type": "string"
           },
           "description": "GitLab usernames kept as quick filters in the Issues view."
+        },
+        "gitlabWorkbench.prepareCompositeRootOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically generate and add/switch a Fast Composite JDT review root when starting a live review. When disabled, Start Review only prepares the normal local review checkout."
+        },
+        "gitlabWorkbench.unifiedDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show GitLab Workbench review diffs in a single unified/inline diff editor instead of side-by-side when possible."
         }
       }
     },
@@ -243,6 +269,16 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "gitlabWorkbench.prepareJavaReview",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@0.1"
+        },
+        {
+          "command": "gitlabWorkbench.switchJavaReviewRoot",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@0.2"
+        },
         {
           "command": "gitlabWorkbench.markReviewed",
           "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
@@ -301,12 +337,17 @@
         {
           "command": "gitlabWorkbench.issueFilter",
           "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
-          "group": "navigation@0.5"
+          "group": "navigation@0.6"
         },
         {
           "command": "gitlabWorkbench.issueViewMode",
           "when": "view == gitlabWorkbench.issues",
           "group": "navigation@3"
+        },
+        {
+          "command": "gitlabWorkbench.issueSearch",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0.5"
         }
       ],
       "view/item/context": [

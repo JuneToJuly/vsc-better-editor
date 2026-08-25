@@ -2,10 +2,17 @@ const cp = require('child_process');
 const path = require('path');
 const util = require('util');
 const fs = require('fs/promises');
+const crypto = require('crypto');
 const execFile = util.promisify(cp.execFile);
 
 class GlabClient {
  constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.output=vscode.window.createOutputChannel('GitLab Workbench');}
+ log(message){this.output.appendLine(message);}
+ workspaceReviewRoot(){
+  const folders=this.vscode.workspace.workspaceFolders||[];
+  if(!folders.length)throw new Error('Open a VS Code workspace folder before starting a local review.');
+  return path.join(folders[0].uri.fsPath,'.glw');
+ }
  async run(args,cwd){
   const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
   const bin=cfg.get('glabPath','glab');
@@ -161,39 +168,84 @@ class GlabClient {
   if(!refs)throw new Error('GitLab did not return merge request diff refs.');
   const base=refs.base_sha||refs.baseSha,head=refs.head_sha||refs.headSha;
   if(!base||!head)throw new Error('GitLab did not return base/head commit SHAs for this review.');
-  const key=`${repo.host}/${repo.project}`.toLowerCase();
-  let gitDir=repo.cwd;
-  let source='local checkout';
-  if(gitDir){
-   const have=await this.hasObjects(gitDir,base,head);
-   if(!have){
-    this.output.appendLine(`[review-cache] fetching review refs in local repository ${gitDir}`);
-    await this.git(['fetch','--quiet','origin',mr.target||'',mr.source||''].filter(Boolean),gitDir).catch(()=>{});
+
+  // Reviews use an ordinary workspace-local clone. This is intentionally simpler
+  // than a bare repository + linked worktree and gives JDT/Fast Composite a real,
+  // self-contained project directory to import.
+  const root=this.workspaceReviewRoot();
+  const safe=shortRepoKey(repo);
+  const cloneDir=path.join(root,'r',safe,String(mr.iid));
+  await fs.mkdir(path.dirname(cloneDir),{recursive:true});
+  let exists=false;
+  try{await fs.access(path.join(cloneDir,'.git'));exists=true;}catch{}
+  if(!exists){
+   await fs.rm(cloneDir,{recursive:true,force:true}).catch(()=>{});
+   // Keep the v0.15.2 clone path deliberately unchanged.  This was the last
+   // known-good implementation: glab repo clone into an ordinary workspace-local
+   // repository.  The extra lines below are observation only; they do not alter
+   // the clone command or its environment.
+   this.output.appendLine(`[review-clone] cloning ${repo.host}/${repo.project} -> ${cloneDir}`);
+   const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
+   const bin=cfg.get('glabPath','glab');
+   const cloneArgs=['repo','clone',`https://${repo.host}/${repo.project}`,cloneDir,'--','--config','core.longpaths=true'];
+   const cloneStarted=Date.now();
+   this.output.appendLine(`[review-clone] exec begin bin=${bin} args=${JSON.stringify(cloneArgs)}`);
+   try{
+    const result=await execFile(bin,cloneArgs,{env:{...process.env,GITLAB_HOST:repo.host,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1',GIT_TERMINAL_PROMPT:'0'},maxBuffer:20*1024*1024,windowsHide:true,timeout:120000});
+    this.output.appendLine(`[review-clone] exec returned after ${Date.now()-cloneStarted}ms stdout=${JSON.stringify((result.stdout||'').trim())} stderr=${JSON.stringify((result.stderr||'').trim())}`);
+   }catch(e){
+    this.output.appendLine(`[review-clone] exec ERROR after ${Date.now()-cloneStarted}ms code=${e?.code??'<none>'} signal=${e?.signal??'<none>'} killed=${!!e?.killed} stdout=${JSON.stringify((e?.stdout||'').trim())} stderr=${JSON.stringify((e?.stderr||'').trim())}`);
+    throw e;
    }
-   if(!await this.hasObjects(gitDir,base,head))gitDir=null;
+   this.output.appendLine(`[review-clone] clone command complete; validating .git`);
+   try{await fs.access(path.join(cloneDir,'.git'));this.output.appendLine('[review-clone] clone validation complete (.git present)');}
+   catch(e){this.output.appendLine(`[review-clone] clone validation FAILED: ${cleanError(e)}`);throw e;}
+  }else{
+   this.output.appendLine(`[review-clone] reusing ${cloneDir}`);
   }
-  if(!gitDir){
-   source='Workbench bare cache';
-   const root=this.context?.globalStorageUri?.fsPath||path.join(process.cwd(),'.gitlab-workbench-cache');
-   const safe=key.replace(/[^a-z0-9._-]+/gi,'_');
-   gitDir=path.join(root,'review-cache',`${safe}.git`);
-   await fs.mkdir(path.dirname(gitDir),{recursive:true});
-   try{await fs.access(path.join(gitDir,'HEAD'));}
-   catch{
-    this.output.appendLine(`[review-cache] cloning ${repo.host}/${repo.project} -> ${gitDir}`);
-    const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
-    const bin=cfg.get('glabPath','glab');
-    await execFile(bin,['repo','clone',`https://${repo.host}/${repo.project}`,gitDir,'--','--bare'],{env:{...process.env,GITLAB_HOST:repo.host,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1'},maxBuffer:20*1024*1024,windowsHide:true});
-   }
-   if(!await this.hasObjects(gitDir,base,head)){
-    this.output.appendLine(`[review-cache] refreshing ${repo.project}`);
-    await this.git(['fetch','--quiet','--prune','origin'],gitDir);
-   }
+
+  // Refresh objects, then pin the working tree to the exact MR head. Fetch failure
+  // is tolerated only when the required commits are already present locally.
+  this.output.appendLine(`[review-clone] fetching ${repo.project}`);
+  await this.git(['fetch','--quiet','--prune','origin'],cloneDir).catch(e=>this.output.appendLine(`[review-clone] fetch warning: ${cleanError(e)}`));
+  if(!await this.hasObjects(cloneDir,base,head)){
+   // Some GitLab MR commits are not reachable from normal branch refs. Ask for the
+   // two exact objects as a fallback before failing the review.
+   await this.git(['fetch','--quiet','origin',base,head],cloneDir).catch(()=>{});
   }
-  if(!await this.hasObjects(gitDir,base,head))throw new Error(`Local review cache does not contain the MR base/head commits (${base.slice(0,8)} / ${head.slice(0,8)}).`);
-  const session={gitDir,base,head,source,key};this.reviewRepos.set(`${mr.repo}!${mr.iid}`,session);
-  this.output.appendLine(`[review-cache] ready ${repo.project}!${mr.iid} from ${source}; base=${base.slice(0,8)} head=${head.slice(0,8)}`);
+  if(!await this.hasObjects(cloneDir,base,head))throw new Error(`Review clone does not contain the MR base/head commits (${base.slice(0,8)} / ${head.slice(0,8)}).`);
+
+  const current=await this.git(['rev-parse','HEAD'],cloneDir).then(x=>x.trim()).catch(()=>null);
+  if(current!==head){
+   this.output.appendLine(`[review-clone] checkout --detach ${head.slice(0,8)}`);
+   await this.git(['checkout','--quiet','--detach','--force',head],cloneDir);
+  }
+  await this.git(['reset','--quiet','--hard',head],cloneDir);
+  const session={gitDir:cloneDir,worktree:cloneDir,base,head,source:'workspace review clone',key:`${repo.host}/${repo.project}`.toLowerCase()};
+  this.reviewRepos.set(`${mr.repo}!${mr.iid}`,session);
+  this.output.appendLine(`[review-clone] ready ${repo.project}!${mr.iid}; base=${base.slice(0,8)} head=${head.slice(0,8)} path=${cloneDir}`);
   return session;
+ }
+ getReviewSession(mr){return this.reviewRepos.get(`${mr.repo}!${mr.iid}`);}
+ async createCompositeReviewRoot(mr){
+  this.output.appendLine(`[review-jdt] createCompositeReviewRoot begin project=${mr.repo} !${mr.iid}`);
+  const session=this.getReviewSession(mr)||await this.prepareReview(mr);
+  this.output.appendLine(`[review-jdt] review session worktree=${session.worktree}`);
+  const repo=await this.repo(mr.repo);
+  const root=this.workspaceReviewRoot();
+  const safe=shortRepoKey(repo);
+  const reviewRoot=path.join(root,'c',safe,String(mr.iid));
+  await fs.mkdir(reviewRoot,{recursive:true});
+  const wt=session.worktree.replace(/\\/g,'/').replace(/'/g,"\\'");
+  // Fast Composite JDT only needs a composite settings file that includes the
+  // reviewed build. Do not copy or infer the user's normal composite root.
+  const body=`// Generated by GitLab Workbench for ${repo.project} !${mr.iid}\nincludeBuild('${wt}')\n`;
+  const outPath=path.join(reviewRoot,'settings.gradle');
+  await fs.writeFile(outPath,body,'utf8');
+  await fs.writeFile(path.join(reviewRoot,'.gitlab-workbench-review.json'),JSON.stringify({mr:mr.iid,project:repo.project,worktree:session.worktree,head:session.head},null,2),'utf8');
+  session.compositeRoot=reviewRoot;
+  this.output.appendLine(`[review-jdt] generated minimal composite root ${reviewRoot}; includeBuild=${session.worktree}`);
+  return {reviewRoot,worktree:session.worktree};
  }
  async hasObjects(gitDir,...shas){for(const sha of shas){try{await this.git(['cat-file','-e',`${sha}^{commit}`],gitDir);}catch{return false;}}return true;}
  async getReviewFileVersions(mr,file){
@@ -284,7 +336,17 @@ class GlabClient {
   return {id:String(created.id),path:returned.new_path||returned.old_path,line:Number(returned.new_line||returned.old_line),oldPath:returned.old_path||null,newPath:returned.new_path||null,oldLine:returned.old_line?Number(returned.old_line):null,newLine:returned.new_line?Number(returned.new_line):null,side:returned.new_line?'new':'old',resolved:!!note.resolved,resolvable:!!note.resolvable,notes:(created.notes||[]).filter(n=>!n.system).map(n=>({id:String(n.id),author:n.author?.name||n.author?.username||'Reviewer',body:n.body||''}))};
  }
  async repo(id){if(this.repos.has(id))return this.repos.get(id);await this.listMergeRequests();const r=this.repos.get(id);if(!r)throw new Error(`GitLab project not found: ${id}`);return r;}
- async git(args,cwd){const {stdout}=await execFile('git',['-C',cwd,...args],{env:process.env,windowsHide:true,maxBuffer:2*1024*1024});return stdout;}
+ async git(args,cwd){const {stdout}=await execFile('git',['-c','core.longpaths=true','-C',cwd,...args],{env:{...process.env,GIT_TERMINAL_PROMPT:'0'},windowsHide:true,maxBuffer:2*1024*1024,timeout:60000});return stdout;}
+ async gitDir(args,gitDir,timeout=60000){
+  try{const {stdout,stderr}=await execFile('git',[`--git-dir=${gitDir}`,...args],{env:{...process.env,GIT_TERMINAL_PROMPT:'0'},windowsHide:true,maxBuffer:4*1024*1024,timeout});if(stderr?.trim())this.output.appendLine(`[git] ${stderr.trim()}`);return stdout;}
+  catch(e){if(e.killed||e.signal==='SIGTERM')throw new Error(`Git command timed out after ${Math.round(timeout/1000)}s: git --git-dir=${gitDir} ${args.join(' ')}`);throw e;}
+ }
+}
+
+function shortRepoKey(repo){
+ const base=(repo.project||'repo').split('/').pop().replace(/[^a-z0-9_-]+/gi,'_').slice(0,16)||'repo';
+ const hash=crypto.createHash('sha1').update(`${repo.host}/${repo.project}`).digest('hex').slice(0,8);
+ return `${base}-${hash}`;
 }
 function repoLabel(mr){return mr.project||mr.repoName||mr.repo||'project';}
 
@@ -294,7 +356,7 @@ function cleanError(e){return String(e.stderr||e.message||e).trim().split(/\r?\n
 function countAdded(diff=''){return String(diff).split(/\r?\n/).filter(l=>l.startsWith('+')&&!l.startsWith('+++')).length;}
 function countRemoved(diff=''){return String(diff).split(/\r?\n/).filter(l=>l.startsWith('-')&&!l.startsWith('---')).length;}
 async function findGitRepositories(root){
- const found=[]; const skip=new Set(['node_modules','build','out','dist','target','.gradle','.idea','.vscode']);
+ const found=[]; const skip=new Set(['node_modules','build','out','dist','target','.gradle','.idea','.vscode','.gitlab-workbench','.glw']);
  async function walk(dir,depth){
   if(depth>12)return;
   let entries;try{entries=await fs.readdir(dir,{withFileTypes:true});}catch{return;}
@@ -318,4 +380,6 @@ function parseProjectUrl(value=''){
  const ssh=raw.match(/^[^@]+@([^:]+):(.+)$/);if(ssh){const project=ssh[2].replace(/\.git$/,'').replace(/^\/+|\/+$/g,'');return {host:ssh[1],project,url:`https://${ssh[1]}/${project}`,remote:raw,source:'managed'};}
  return null;
 }
+
+async function firstExisting(paths){for(const p of paths){try{await fs.access(p);return p;}catch{}}return null;}
 module.exports={GlabClient,parseProjectUrl};
