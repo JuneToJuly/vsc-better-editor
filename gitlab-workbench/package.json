@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.0",
+  "version": "0.16.8",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -27,7 +27,8 @@
       },
       {
         "command": "gitlabWorkbench.refresh",
-        "title": "GitLab Workbench: Refresh"
+        "title": "GitLab Workbench: Refresh",
+        "icon": "$(refresh)"
       },
       {
         "command": "gitlabWorkbench.manageProjects",
@@ -166,6 +167,16 @@
         "command": "gitlabWorkbench.switchJavaReviewRoot",
         "title": "GitLab Workbench: Switch Fast Composite JDT Root",
         "icon": "$(sync)"
+      },
+      {
+        "command": "gitlabWorkbench.toggleUnassigned",
+        "title": "GitLab Workbench: Toggle Unassigned",
+        "icon": "$(person)"
+      },
+      {
+        "command": "gitlabWorkbench.cloneManagedProjects",
+        "title": "GitLab Workbench: Clone Managed Projects",
+        "icon": "$(cloud-download)"
       }
     ],
     "viewsContainers": {
@@ -246,6 +257,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show GitLab Workbench review diffs in a single unified/inline diff editor instead of side-by-side when possible."
+        },
+        "gitlabWorkbench.peopleBoard.showUnassigned": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show unassigned work on the People Board."
+        },
+        "gitlabWorkbench.peopleBoard.peopleConfigured": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the People Board tracked-person selection has been explicitly configured."
         }
       }
     },
@@ -310,6 +331,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "gitlabWorkbench.refresh",
+          "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0"
+        },
+        {
           "command": "gitlabWorkbench.addProject",
           "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
           "group": "navigation@1"
@@ -348,6 +374,21 @@
           "command": "gitlabWorkbench.issueSearch",
           "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
           "group": "navigation@0.5"
+        },
+        {
+          "command": "gitlabWorkbench.manageTrackedAssignees",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0.7"
+        },
+        {
+          "command": "gitlabWorkbench.toggleUnassigned",
+          "when": "view == gitlabWorkbench.issues && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0.8"
+        },
+        {
+          "command": "gitlabWorkbench.cloneManagedProjects",
+          "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
+          "group": "navigation@2.5"
         }
       ],
       "view/item/context": [

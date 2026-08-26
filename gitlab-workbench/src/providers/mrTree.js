@@ -11,7 +11,7 @@ class MrTreeProvider{
   if(el.kind==='empty'){const t=new vscode.TreeItem('No open merge requests',vscode.TreeItemCollapsibleState.None);t.iconPath=new vscode.ThemeIcon('check');return t;}
   if(el.kind==='status'){const t=new vscode.TreeItem(el.mr.repoName||'GitLab Workbench status',vscode.TreeItemCollapsibleState.None);t.description='status';t.tooltip=el.mr.error||'';t.iconPath=new vscode.ThemeIcon('info');return t;}
   if(el.kind==='error'){const t=new vscode.TreeItem('GitLab query failed',vscode.TreeItemCollapsibleState.None);t.description='error';t.tooltip=el.mr.error;t.iconPath=new vscode.ThemeIcon('error');return t;}
-  const mr=el.mr;const t=new vscode.TreeItem(`!${mr.iid}  ${mr.title}`,vscode.TreeItemCollapsibleState.None);t.description=`${symbol(mr.pipeline)} ${mr.pipeline}  ${mr.approvals||''}`;t.tooltip=`${mr.repoName||mr.repo}\n${mr.source} → ${mr.target}`;t.iconPath=new vscode.ThemeIcon(mr.pipeline==='failed'?'error':mr.pipeline==='running'?'sync~spin':'git-pull-request');t.command={command:'gitlabWorkbench.openMr',title:'Open MR',arguments:[mr]};return t;
+  const mr=el.mr;const t=new vscode.TreeItem(`!${mr.iid}  ${mr.title}`,vscode.TreeItemCollapsibleState.None);t.description=[mr.author?`by ${mr.author}`:'by unknown',`${symbol(mr.pipeline)} ${mr.pipeline}`,mr.approvals||''].filter(Boolean).join('  ·  ');t.tooltip=`${mr.repoName||mr.repo}\nSubmitted by: ${mr.author||'unknown'}\n${mr.source} → ${mr.target}`;t.iconPath=new vscode.ThemeIcon(mr.pipeline==='failed'?'error':mr.pipeline==='running'?'sync~spin':'git-pull-request');t.command={command:'gitlabWorkbench.openMr',title:'Open MR',arguments:[mr]};return t;
  }
 }
 function symbol(s){return s==='success'?'✓':s==='failed'?'✕':s==='running'?'◌':'•';}

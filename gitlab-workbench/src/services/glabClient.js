@@ -85,7 +85,7 @@ class GlabClient {
  async listIssueNotes(issue){const repo=await this.repo(issue.repo);const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}/notes?sort=asc&per_page=100`,[],repo.cwd);return (JSON.parse(raw)||[]).filter(n=>!n.system).map(n=>({id:String(n.id),author:person(n.author),body:n.body||'',created:n.created_at||''}));}
  async addIssueNote(issue,body){const repo=await this.repo(issue.repo);await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}/notes`,['--method','POST','-f',`body=${body}`],repo.cwd);return {message:'Comment added'};}
  async createIssue(repoId,data){const repo=await this.repo(repoId);const args=['--method','POST','-f',`title=${data.title}`];if(data.description)args.push('-f',`description=${data.description}`);if(data.assignee)args.push('-f',`assignee_ids=${await this.userId(repo,data.assignee)}`);const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues`,args,repo.cwd);return this.normalizeIssue(JSON.parse(raw),repo);}
- async updateIssue(issue,data){const repo=await this.repo(issue.repo);const args=['--method','PUT'];if(data.title!==undefined)args.push('-f',`title=${data.title}`);if(data.description!==undefined)args.push('-f',`description=${data.description}`);if(data.state_event)args.push('-f',`state_event=${data.state_event}`);if(data.assignees!==undefined){const ids=[];for(const u of data.assignees){if(u)ids.push(await this.userId(repo,u));}args.push('-f',`assignee_ids=${ids.join(',')}`);}const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}`,args,repo.cwd);return this.normalizeIssue(JSON.parse(raw),repo);}
+ async updateIssue(issue,data){const repo=await this.repo(issue.repo);const args=['--method','PUT'];if(data.title!==undefined)args.push('-f',`title=${data.title}`);if(data.description!==undefined)args.push('-f',`description=${data.description}`);if(data.labels!==undefined)args.push('-f',`labels=${data.labels.join(',')}`);if(data.state_event)args.push('-f',`state_event=${data.state_event}`);if(data.assignees!==undefined){const ids=[];for(const u of data.assignees){if(u)ids.push(await this.userId(repo,u));}args.push('-f',`assignee_ids=${ids.join(',')}`);}const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}`,args,repo.cwd);return this.normalizeIssue(JSON.parse(raw),repo);}
  async userId(repo,username){const raw=await this.api(repo.host,`users?username=${encodeURIComponent(username)}`,[],repo.cwd);const users=JSON.parse(raw)||[];if(!users.length)throw new Error(`GitLab user not found: ${username}`);return users[0].id;}
  async currentUser(){const projects=await this.projectList();if(!projects.length)return null;const r=projects[0];const raw=await this.api(r.host,'user',[],r.cwd);const u=JSON.parse(raw);return u.username||u.name;}
  async listMergeRequests(){
@@ -133,6 +133,15 @@ class GlabClient {
    updated:pick(x,'updated_at','updatedAt')||'',description:pick(x,'description','Description')||'',
    webUrl:pick(x,'web_url','webUrl','url'),diffRefs:pick(x,'diff_refs','diffRefs')||null,files:[]
   };
+ }
+
+ async getMergeReadiness(mr){
+  const repo=await this.repo(mr.repo); const project=encodeURIComponent(repo.project);
+  let approvals={approved:0,required:0,users:[]};
+  try{const a=JSON.parse(await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/approvals`,[],repo.cwd));approvals={approved:Number(a.approvals_left!=null?Math.max(0,Number(a.approvals_required||0)-Number(a.approvals_left||0)):(a.approved_by||[]).length),required:Number(a.approvals_required||0),users:(a.approved_by||[]).map(x=>person(x.user||x))};}catch{}
+  let pipeline=null,jobs=[];
+  try{const ps=JSON.parse(await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/pipelines?per_page=1`,[],repo.cwd))||[];pipeline=ps[0]||null;if(pipeline?.id){jobs=JSON.parse(await this.api(repo.host,`projects/${project}/pipelines/${pipeline.id}/jobs?per_page=100`,[],repo.cwd))||[];}}catch{}
+  return {approvals,pipeline,jobs};
  }
 
  async getMergeRequest(repoId,iid){
