@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const execFile = util.promisify(cp.execFile);
 
 class GlabClient {
- constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.output=vscode.window.createOutputChannel('GitLab Workbench');}
+ constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.mrActivityCache=new Map();this.output=vscode.window.createOutputChannel('GitLab Workbench');}
  log(message){this.output.appendLine(message);}
  workspaceReviewRoot(){
   const folders=this.vscode.workspace.workspaceFolders||[];
@@ -109,7 +109,10 @@ class GlabClient {
     const raw=await this.api(repo.host,endpoint,[],repo.cwd);const arr=raw?JSON.parse(raw):[];
     this.output.appendLine(`[mr] ${repo.project}: ${arr.length} open`);
     if(!arr.length)out.push({repo:repo.id,repoName:repo.name,kind:'empty'});
-    for(const x of arr)out.push(this.normalize(x,repo));
+    const me=await this.currentUserForRepo(repo);
+    const normalized=arr.map(x=>this.normalize(x,repo));
+    const enriched=await Promise.all(normalized.map(mr=>this.enrichMergeRequestActivity(mr,repo,me)));
+    out.push(...enriched);
    }catch(e){const error=cleanError(e);this.output.appendLine(`[mr] ${repo.project}: ERROR ${error}`);out.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}
   }
   return out;
@@ -126,6 +129,10 @@ class GlabClient {
    iid:Number.isFinite(iid)?iid:undefined,
    title:pick(x,'title','Title')||'(untitled)',
    author:person(pick(x,'author','Author')),
+   reviewers:(pick(x,'reviewers','Reviewers')||[]).map(person).filter(Boolean),
+   created:pick(x,'created_at','createdAt')||'',
+   sha:pick(x,'sha','head_sha','headSha')||'',
+
    source:pick(x,'source_branch','sourceBranch','source_branch_name')||'',
    target:pick(x,'target_branch','targetBranch','target_branch_name')||'',
    pipeline:String(pipeline).toLowerCase(),approvals,
@@ -135,6 +142,31 @@ class GlabClient {
   };
  }
 
+
+ async currentUserForRepo(repo){
+  try{const raw=await this.api(repo.host,'user',[],repo.cwd);const u=JSON.parse(raw);return u.username||u.name||'';}catch{return '';}
+ }
+ async enrichMergeRequestActivity(mr,repo,me){
+  mr.currentUser=me||'';mr.isReviewer=!!me&&(mr.reviewers||[]).some(x=>String(x).toLowerCase()===String(me).toLowerCase());
+  if(!me)return mr;
+  const key=`${repo.id}!${mr.iid}:${mr.sha||mr.updated||''}:${me}`;const cached=this.mrActivityCache.get(key);
+  if(cached&&Date.now()-cached.at<60000)return {...mr,...cached.value};
+  let value={hasMyComments:false,lastMyComment:'',changesSinceMyComment:0,lastCommit:''};
+  try{
+   const project=encodeURIComponent(repo.project);
+   const [notesRaw,commitsRaw]=await Promise.all([
+    this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/notes?per_page=100&sort=desc`,[],repo.cwd),
+    this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/commits?per_page=100`,[],repo.cwd)
+   ]);
+   const notes=JSON.parse(notesRaw||'[]')||[];const commits=JSON.parse(commitsRaw||'[]')||[];
+   const mine=notes.filter(n=>!n.system&&person(n.author).toLowerCase()===String(me).toLowerCase());
+   const last=mine.map(n=>n.created_at).filter(Boolean).sort().pop()||'';
+   const lastMs=last?Date.parse(last):0;
+   const newer=lastMs?commits.filter(c=>Date.parse(c.committed_date||c.created_at||c.authored_date||0)>lastMs):[];
+   value={hasMyComments:mine.length>0,lastMyComment:last,changesSinceMyComment:newer.length,lastCommit:(commits.map(c=>c.committed_date||c.created_at||'').filter(Boolean).sort().pop()||'')};
+  }catch(e){this.output.appendLine(`[mr-activity] ${repo.project}!${mr.iid}: ${cleanError(e)}`);}
+  this.mrActivityCache.set(key,{at:Date.now(),value});return {...mr,...value};
+ }
  async getMergeReadiness(mr){
   const repo=await this.repo(mr.repo); const project=encodeURIComponent(repo.project);
   let approvals={approved:0,required:0,users:[]};

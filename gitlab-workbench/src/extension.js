@@ -3,17 +3,18 @@ const path=require('path');
 const {DemoClient}=require('./services/demoClient');
 const {GlabClient}=require('./services/glabClient');
 const {MrTreeProvider}=require('./providers/mrTree');
+const {MrWebviewProvider}=require('./providers/mrWebview');
 const {IssueTreeProvider}=require('./providers/issueTree');
 const {ReviewTreeProvider}=require('./providers/reviewTree');
-let demoClient,liveClient,tree,issueTree,reviewTree,commentController,extensionContext; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined}; let reviewComments=[];
+let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined}; let reviewComments=[];
 function activate(context){
  extensionContext=context;
  demoClient=new DemoClient(); liveClient=new GlabClient(vscode,context); commentController=vscode.comments.createCommentController('gitlabWorkbench.reviewComments','GitLab Review Comments'); context.subscriptions.push(commentController); const client=()=>vscode.workspace.getConfiguration('gitlabWorkbench').get('demoMode',true)?demoClient:liveClient;
- tree=new MrTreeProvider(client); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.mergeRequests',tree));
+ tree=new MrTreeProvider(client); mrWebview=new MrWebviewProvider(client); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.mergeRequests',mrWebview,{webviewOptions:{retainContextWhenHidden:true}}));
  issueTree=new IssueTreeProvider(client); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.issues',issueTree));
  reviewTree=new ReviewTreeProvider(review,(mr,path)=>isReviewed(mr,path)); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.reviewExplorer',reviewTree));
  const cmd=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,fn));
- cmd('gitlabWorkbench.refresh',()=>{tree.refresh();issueTree.refresh();});
+ cmd('gitlabWorkbench.refresh',()=>{tree.refresh();mrWebview?.refresh();issueTree.refresh();});
  cmd('gitlabWorkbench.showOutput',()=>liveClient.output.show(true));
  cmd('gitlabWorkbench.addProject',async()=>{
   const value=await vscode.window.showInputBox({title:'Add GitLab Project',prompt:'Paste a GitLab project URL',placeHolder:'https://gitlab.com/group/project',ignoreFocusOut:true});if(!value)return;
@@ -78,9 +79,9 @@ function activate(context){
  cmd('gitlabWorkbench.prepareJavaReview',()=>prepareJavaReview());
  cmd('gitlabWorkbench.switchJavaReviewRoot',()=>switchJavaReviewRoot());
  cmd('gitlabWorkbench.finishReview',async()=>{if(!review.mr)return;await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',false);clearRenderedComments();review.mr=null;review.index=0;review.discussions=[];review.worktree=undefined;review.compositeRoot=undefined;reviewTree.refresh();vscode.window.showInformationMessage('Review session finished. Fast Composite JDT root is left unchanged; switch back when you are ready.');});
- context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('gitlabWorkbench')){tree.refresh();issueTree.refresh();}}));
+ context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('gitlabWorkbench')){tree.refresh();mrWebview?.refresh();issueTree.refresh();}}));
 }
-async function action(client,mr,method){try{const r=await client()[method](mr);vscode.window.showInformationMessage(r.message);tree.refresh();}catch(e){vscode.window.showErrorMessage(String(e.stderr||e.message||e));}}
+async function action(client,mr,method){try{const r=await client()[method](mr);vscode.window.showInformationMessage(r.message);tree.refresh();mrWebview?.refresh();}catch(e){vscode.window.showErrorMessage(String(e.stderr||e.message||e));}}
 async function openDashboard(client){const p=vscode.window.createWebviewPanel('gitlabWorkbenchDashboard','GitLab Workbench',currentEditorColumn(),{enableScripts:true}); let mrs=[];try{mrs=await client().listMergeRequests();}catch(e){p.webview.html=page('GitLab Workbench',`<div class="error">${esc(e.message)}</div>`);return;}const failed=mrs.filter(x=>x.pipeline==='failed').length;const running=mrs.filter(x=>x.pipeline==='running').length;p.webview.html=page('GitLab Workbench',`<div class="hero"><div><h1>GitLab Workbench</h1><p>${isDemo()?'DEMO DATA — safe to explore':'LIVE — powered by glab'}</p></div><button data-cmd="refresh">Refresh</button></div><div class="stats"><b>${mrs.length}</b> open MRs <b>${failed}</b> failed pipelines <b>${running}</b> running</div>${mrs.map(card).join('')}`);p.webview.onDidReceiveMessage(async m=>{if(m.command==='open'){const mr=mrs.find(x=>x.repo===m.repo&&x.iid===m.iid);openMr(client,mr);}if(m.command==='refresh'){p.dispose();openDashboard(client);}});}
 async function openIssue(client,issue){
  let current=issue;let editing=false;try{current=await client().getIssue(issue.repo,issue.iid)||issue;}catch{}
