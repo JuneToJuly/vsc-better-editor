@@ -228,7 +228,7 @@ class GlabClient {
    this.output.appendLine(`[review-clone] cloning ${repo.host}/${repo.project} -> ${cloneDir}`);
    const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
    const bin=cfg.get('glabPath','glab');
-   const cloneArgs=['repo','clone',`https://${repo.host}/${repo.project}`,cloneDir,'--','--config','core.longpaths=true'];
+   const cloneArgs=['repo','clone',repo.remote||repo.url||`https://${repo.host}/${repo.project}`,cloneDir,'--','--config','core.longpaths=true'];
    const cloneStarted=Date.now();
    this.output.appendLine(`[review-clone] exec begin bin=${bin} args=${JSON.stringify(cloneArgs)}`);
    try{
@@ -482,10 +482,24 @@ function projectFromRemote(remote=''){
 }
 function parseProjectUrl(value=''){
  let raw=String(value).trim();if(!raw)return null;
- try{const u=new URL(raw);const project=u.pathname.replace(/^\/+|\/+$/g,'').replace(/\.git$/,'');if(!u.hostname||!project)return null;return {host:u.hostname,project,url:`${u.protocol}//${u.host}/${project}`,remote:raw,source:'managed'};}catch{}
- const ssh=raw.match(/^[^@]+@([^:]+):(.+)$/);if(ssh){const project=ssh[2].replace(/\.git$/,'').replace(/^\/+|\/+$/g,'');return {host:ssh[1],project,url:`https://${ssh[1]}/${project}`,remote:raw,source:'managed'};}
+ // Normalize identity independently from transport. `url` is a stable HTTPS
+ // identity; `remote` preserves exactly what the user supplied for Git clones.
+ const ssh=raw.match(/^(?:ssh:\/\/)?([^@\/]+)@([^:\/]+)(?::|\/)(.+)$/i);
+ if(ssh){
+  const project=ssh[3].replace(/\.git$/i,'').replace(/^\/+|\/+$/g,'');
+  if(!ssh[2]||!project)return null;
+  return {host:ssh[2],project,url:`https://${ssh[2]}/${project}`,remote:raw,protocol:'ssh',source:'managed'};
+ }
+ try{
+  const u=new URL(raw);const project=u.pathname.replace(/^\/+|\/+$/g,'').replace(/\.git$/i,'');
+  if(!u.hostname||!project)return null;
+  const protocol=u.protocol==='ssh:'?'ssh':u.protocol.replace(':','').toLowerCase();
+  return {host:u.hostname,project,url:`https://${u.host}/${project}`,remote:raw,protocol,source:'managed'};
+ }catch{}
  return null;
 }
+function sameProjectUrl(a,b){const x=parseProjectUrl(a),y=parseProjectUrl(b);return !!x&&!!y&&x.host.toLowerCase()===y.host.toLowerCase()&&x.project.toLowerCase()===y.project.toLowerCase();}
+
 
 async function firstExisting(paths){for(const p of paths){try{await fs.access(p);return p;}catch{}}return null;}
-module.exports={GlabClient,parseProjectUrl};
+module.exports={GlabClient,parseProjectUrl,sameProjectUrl};

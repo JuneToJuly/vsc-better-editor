@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.21",
+  "version": "0.16.25",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -191,6 +191,21 @@
       {
         "command": "gitlabWorkbench.openPendingReviewComment",
         "title": "GitLab Workbench: Open Pending Review Comment"
+      },
+      {
+        "command": "gitlabWorkbench.collapseReviewComments",
+        "title": "GitLab Workbench: Collapse All Review Comments",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "gitlabWorkbench.expandReviewComments",
+        "title": "GitLab Workbench: Expand All Review Comments",
+        "icon": "$(unfold)"
+      },
+      {
+        "command": "gitlabWorkbench.toggleResolvedComments",
+        "title": "GitLab Workbench: Hide/Show Resolved Comments",
+        "icon": "$(eye-closed)"
       }
     ],
     "viewsContainers": {
@@ -414,6 +429,21 @@
           "command": "gitlabWorkbench.discardReview",
           "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
           "group": "navigation@9"
+        },
+        {
+          "command": "gitlabWorkbench.collapseReviewComments",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@1.6"
+        },
+        {
+          "command": "gitlabWorkbench.expandReviewComments",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@1.7"
+        },
+        {
+          "command": "gitlabWorkbench.toggleResolvedComments",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@1.8"
         }
       ],
       "view/item/context": [

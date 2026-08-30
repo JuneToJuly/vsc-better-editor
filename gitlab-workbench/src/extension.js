@@ -6,7 +6,7 @@ const {MrTreeProvider}=require('./providers/mrTree');
 const {MrWebviewProvider}=require('./providers/mrWebview');
 const {IssueTreeProvider}=require('./providers/issueTree');
 const {ReviewTreeProvider}=require('./providers/reviewTree');
-let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[]}; let reviewComments=[];
+let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:false,hideResolved:false}; let reviewComments=[];
 function activate(context){
  extensionContext=context;
  demoClient=new DemoClient(); liveClient=new GlabClient(vscode,context); commentController=vscode.comments.createCommentController('gitlabWorkbench.reviewComments','GitLab Review Comments'); context.subscriptions.push(commentController); const client=()=>vscode.workspace.getConfiguration('gitlabWorkbench').get('demoMode',true)?demoClient:liveClient;
@@ -17,12 +17,13 @@ function activate(context){
  cmd('gitlabWorkbench.refresh',()=>{tree.refresh();mrWebview?.refresh();issueTree.refresh();});
  cmd('gitlabWorkbench.showOutput',()=>liveClient.output.show(true));
  cmd('gitlabWorkbench.addProject',async()=>{
-  const value=await vscode.window.showInputBox({title:'Add GitLab Project',prompt:'Paste a GitLab project URL',placeHolder:'https://gitlab.com/group/project',ignoreFocusOut:true});if(!value)return;
-  let u;try{u=new URL(value.trim());}catch{vscode.window.showErrorMessage('Enter a valid GitLab project URL, for example https://gitlab.com/group/project');return;}
-  const project=u.pathname.replace(/^\/+|\/+$/g,'').replace(/\.git$/,'');if(!u.hostname||!project){vscode.window.showErrorMessage('The URL must include a GitLab host and project path.');return;}
-  const canonical=`${u.protocol}//${u.host}/${project}`;const c=vscode.workspace.getConfiguration('gitlabWorkbench');const current=c.get('managedProjects',[])||[];
-  if(current.some(x=>String(x).replace(/\.git$/,'').replace(/\/$/,'')===canonical)){vscode.window.showInformationMessage('That GitLab project is already managed.');return;}
-  await c.update('managedProjects',[...current,canonical],vscode.ConfigurationTarget.Global);tree.refresh();issueTree.refresh();vscode.window.showInformationMessage(`Added GitLab project: ${project}`);
+  const value=await vscode.window.showInputBox({title:'Add GitLab Project',prompt:'Paste an HTTPS or SSH GitLab project URL',placeHolder:'https://gitlab.com/group/project  or  git@gitlab.com:group/project.git',ignoreFocusOut:true});if(!value)return;
+  const parsed=parseProjectUrl(value);if(!parsed){vscode.window.showErrorMessage('Enter a valid GitLab HTTPS or SSH project URL.');return;}
+  const c=vscode.workspace.getConfiguration('gitlabWorkbench');const current=c.get('managedProjects',[])||[];
+  if(current.some(x=>sameProjectUrl(x,value))){vscode.window.showInformationMessage(`That GitLab project is already managed: ${parsed.host}/${parsed.project}`);return;}
+  // Preserve the supplied transport for cloning. API calls use normalized
+  // host/project identity from parseProjectUrl().
+  await c.update('managedProjects',[...current,value.trim()],vscode.ConfigurationTarget.Global);tree.refresh();issueTree.refresh();vscode.window.showInformationMessage(`Added GitLab project: ${parsed.host}/${parsed.project} (${parsed.protocol||'remote'})`);
  });
  cmd('gitlabWorkbench.removeProject',async()=>{
   const c=vscode.workspace.getConfiguration('gitlabWorkbench');const current=c.get('managedProjects',[])||[];if(!current.length){vscode.window.showInformationMessage('No managed GitLab projects.');return;}
@@ -37,7 +38,7 @@ function activate(context){
  cmd('gitlabWorkbench.cloneManagedProjects',async()=>{
   const cfg=vscode.workspace.getConfiguration('gitlabWorkbench');const current=cfg.get('managedProjects',[])||[];
   if(!current.length){vscode.window.showInformationMessage('No managed GitLab projects.');return;}
-  const picks=await vscode.window.showQuickPick(current.map(url=>{const clean=String(url).replace(/\.git$/,'').replace(/\/$/,'');const name=clean.split('/').pop();return {label:`$(repo) ${name}`,description:clean.replace(/^https?:\/\//,''),url,name,picked:false};}),{title:'Clone Managed Projects',placeHolder:'Select one or more managed projects to clone',canPickMany:true,ignoreFocusOut:true});
+  const picks=await vscode.window.showQuickPick(current.map(url=>{const parsed=parseProjectUrl(url);const name=parsed?.project?.split('/').pop()||String(url).split('/').pop();return {label:`$(repo) ${name}`,description:parsed?`${parsed.host}/${parsed.project} · ${parsed.protocol||'remote'}`:String(url),url,name,picked:false};}),{title:'Clone Managed Projects',placeHolder:'Select one or more managed projects to clone',canPickMany:true,ignoreFocusOut:true});
   if(!picks||!picks.length)return;
   const destPick=await vscode.window.showOpenDialog({title:`Clone ${picks.length} managed project${picks.length===1?'':'s'} into…`,canSelectFolders:true,canSelectFiles:false,canSelectMany:false,openLabel:'Clone Here'});
   if(!destPick?.length)return;const root=destPick[0].fsPath;const c=client();let ok=0,skipped=0,failed=[];
@@ -73,6 +74,9 @@ function activate(context){
  cmd('gitlabWorkbench.submitReview',()=>submitReview(client));
  cmd('gitlabWorkbench.discardReview',()=>discardPendingReview(client));
  cmd('gitlabWorkbench.nextUnresolved',()=>nextUnresolved());
+ cmd('gitlabWorkbench.collapseReviewComments',async()=>{review.commentsCollapsed=true;await refreshReviewCommentDisplay();});
+ cmd('gitlabWorkbench.expandReviewComments',async()=>{review.commentsCollapsed=false;await refreshReviewCommentDisplay();});
+ cmd('gitlabWorkbench.toggleResolvedComments',async()=>{review.hideResolved=!review.hideResolved;await vscode.commands.executeCommand('setContext','gitlabWorkbench.hideResolvedComments',review.hideResolved);reviewTree.refresh();await refreshReviewCommentDisplay();vscode.window.setStatusBarMessage(review.hideResolved?'Resolved review comments hidden':'Resolved review comments shown',3000);});
  cmd('gitlabWorkbench.openDiscussion',d=>openDiscussion(d));
  cmd('gitlabWorkbench.openPendingReviewComment',n=>openPendingReviewComment(n));
  cmd('gitlabWorkbench.replyDiscussion',d=>replyDiscussion(client,d));
@@ -221,7 +225,7 @@ async function startReview(client,mr){
    progress.report({message:'Loading review discussions…'});liveClient.log('[review-flow] stage=discussions begin');review.discussions=await loadDiscussions(client,full);review.pending=await loadDraftNotes(client,full);liveClient.log(`[review-flow] stage=discussions complete count=${review.discussions.length} pending=${review.pending.length}`);
   });
  }else {review.discussions=await loadDiscussions(client,full);review.pending=await loadDraftNotes(client,full);}
- review.mr=full; review.index=0; clearRenderedComments(); reviewTree.refresh(); await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',true);
+ review.mr=full; review.index=0; review.commentsCollapsed=false; review.hideResolved=false; await vscode.commands.executeCommand('setContext','gitlabWorkbench.hideResolvedComments',false); clearRenderedComments(); reviewTree.refresh(); await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',true);
  // Composite/JDT preparation is optional. Standard reviews only use the local checkout.
  if(!isDemo() && vscode.workspace.getConfiguration('gitlabWorkbench').get('prepareCompositeRootOnStart',false)){
   liveClient.log('[review-flow] stage=java-root begin (enabled)');
@@ -241,10 +245,13 @@ async function setReviewed(mr,pathName,value){if(isDemo()){demoClient.markReview
 async function loadDiscussions(client,mr){try{return await client().listDiscussions(mr)||[];}catch{return mr.discussions||[];}}
 async function loadDraftNotes(client,mr){try{return await client().listDraftNotes(mr)||[];}catch{return [];}}
 function clearRenderedComments(){for(const t of reviewComments){try{t.dispose();}catch{}}reviewComments=[];}
+async function refreshReviewCommentDisplay(){if(!review.mr)return;const f=review.mr.files?.[review.index];if(f)await renderDiscussionThreads(f);}
 async function renderDiscussionThreads(file){
  clearRenderedComments(); if(!review.mr)return; const editor=vscode.window.activeTextEditor;if(!editor)return;
- for(const p of (review.pending||[]).filter(x=>x.path===file[0]||x.path===file[3]?.new_path||x.path===file[3]?.old_path)){const target=p.newLine||p.oldLine||1,line=Math.max(0,Math.min(editor.document.lineCount-1,target-1)),c={body:p.body,mode:vscode.CommentMode.Preview,author:{name:'You · Pending'}};const t=commentController.createCommentThread(editor.document.uri,new vscode.Range(line,0,line,0),[c]);t.label='Pending review comment · not published';t.canReply=false;t.collapsibleState=vscode.CommentThreadCollapsibleState.Expanded;reviewComments.push(t);}
- for(const d of review.discussions.filter(x=>x.path===file[0]||x.newPath===file[3]?.new_path||x.oldPath===file[3]?.old_path)){const target=d.newLine||d.line||1;const line=Math.max(0,Math.min(editor.document.lineCount-1,target-1));const comments=d.notes.map(n=>({body:n.body,mode:vscode.CommentMode.Preview,author:{name:n.author}}));const t=commentController.createCommentThread(editor.document.uri,new vscode.Range(line,0,line,0),comments);t.label=d.resolved?'Resolved review thread':`${d.notes.length} comment${d.notes.length===1?'':'s'} · ${d.notes[0]?.author||'Reviewer'} · line ${target}`;t.contextValue=d.resolved?'gitlabResolvedDiscussion':'gitlabDiscussion';t.canReply=false;t.collapsibleState=vscode.CommentThreadCollapsibleState.Expanded;reviewComments.push(t);}
+ const state=review.commentsCollapsed?vscode.CommentThreadCollapsibleState.Collapsed:vscode.CommentThreadCollapsibleState.Expanded;
+ // Pending comments are intentionally never filtered by Hide Resolved.
+ for(const p of (review.pending||[]).filter(x=>x.path===file[0]||x.path===file[3]?.new_path||x.path===file[3]?.old_path)){const target=p.newLine||p.oldLine||1,line=Math.max(0,Math.min(editor.document.lineCount-1,target-1)),c={body:p.body,mode:vscode.CommentMode.Preview,author:{name:'You · Pending'}};const t=commentController.createCommentThread(editor.document.uri,new vscode.Range(line,0,line,0),[c]);t.label='Pending review comment · not published';t.canReply=false;t.collapsibleState=state;reviewComments.push(t);}
+ for(const d of review.discussions.filter(x=>(!review.hideResolved||!x.resolved)&&(x.path===file[0]||x.newPath===file[3]?.new_path||x.oldPath===file[3]?.old_path))){const target=d.newLine||d.line||1;const line=Math.max(0,Math.min(editor.document.lineCount-1,target-1));const comments=d.notes.map(n=>({body:n.body,mode:vscode.CommentMode.Preview,author:{name:n.author}}));const t=commentController.createCommentThread(editor.document.uri,new vscode.Range(line,0,line,0),comments);t.label=d.resolved?'Resolved review thread':`${d.notes.length} comment${d.notes.length===1?'':'s'} · ${d.notes[0]?.author||'Reviewer'} · line ${target}`;t.contextValue=d.resolved?'gitlabResolvedDiscussion':'gitlabDiscussion';t.canReply=false;t.collapsibleState=state;reviewComments.push(t);}
 }
 async function openDiscussion(d){if(!review.mr)return;const i=review.mr.files.findIndex(f=>f[0]===d.path);if(i>=0){review.index=i;reviewTree.refresh();await showReviewFile();const ed=vscode.window.activeTextEditor;if(ed){const line=Math.max(0,Math.min(ed.document.lineCount-1,(d.line||1)-1));ed.selection=new vscode.Selection(line,0,line,0);ed.revealRange(new vscode.Range(line,0,line,0),vscode.TextEditorRevealType.InCenter);}}}
 async function nextUnresolved(){const ds=review.discussions.filter(d=>!d.resolved);if(!ds.length){vscode.window.showInformationMessage('No unresolved review comments.');return;}const current=review.mr?.files[review.index]?.[0];let i=ds.findIndex(d=>d.path===current);const d=ds[(i+1)%ds.length];await openDiscussion(d);}
