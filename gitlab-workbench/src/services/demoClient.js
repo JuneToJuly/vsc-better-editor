@@ -26,7 +26,7 @@ const clone=x=>JSON.parse(JSON.stringify(x));
 function generated(count,repos=30){return Array.from({length:count},(_,i)=>({repo:`service-${String(i%repos+1).padStart(2,'0')}`,iid:1000+i,title:`Program change ${i+1}`,author:`dev${i%12+1}`,source:`feature/change-${i+1}`,target:'develop',pipeline:i%11===0?'failed':i%7===0?'running':'success',approvals:i%5===0?'0/2':i%3===0?'1/2':'2/2',conflicts:i%17===0,updated:`${i+3}m`,description:`Generated merge request ${i+1} for stress testing.`,files:Array.from({length:(i%8)+1},(_,f)=>[`src/main/java/example/Feature${i+1}_${f+1}.java`,10+f*3,f%4])}));}
 function scenario(name){let x=clone(baseMrs);switch(name){case'feedback':return [clone(feedbackMr),...x];case'heavy':return [...x,...generated(25,8)];case'review':return generated(18,7).map((m,i)=>({...m,approvals:i%4===0?'1/2':'0/2'}));case'pipelines':return generated(20,8).map((m,i)=>({...m,pipeline:i%3===0?'running':'failed'}));case'conflicts':return generated(16,8).map((m,i)=>({...m,conflicts:i%2===0,pipeline:'success'}));case'large':return generated(120,30);default:return x;}}
 class DemoClient{
- constructor(){this.scenario='normal';this.reviewed=new Set();this.discussionState=new Map();}
+ constructor(){this.scenario='normal';this.reviewed=new Set();this.discussionState=new Map();this.draftNotes=new Map();}
  setScenario(s){this.scenario=s;this.discussionState.clear();}
  getScenario(){return this.scenario;}
  async status(){return {mode:'demo',authenticated:true,user:'demo-user',scenario:this.scenario};}
@@ -44,6 +44,10 @@ class DemoClient{
  _discussion(m,id){const k=`${m.repo}!${m.iid}:${id}`;if(!this.discussionState.has(k)){const d=(m.discussions||[]).find(x=>x.id===id);this.discussionState.set(k,clone(d));}return clone(this.discussionState.get(k));}
  _save(m,d){this.discussionState.set(`${m.repo}!${m.iid}:${d.id}`,clone(d));}
  async listDiscussions(mr){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));return (full?.discussions||[]).map(d=>this._discussion(full,d.id));}
+ async listDraftNotes(mr){return clone(this.draftNotes.get(`${mr.repo}!${mr.iid}`)||[]);}
+ async addDraftReviewComment(mr,file,position,body){const k=`${mr.repo}!${mr.iid}`,a=this.draftNotes.get(k)||[];a.push({id:`draft-${Date.now()}`,body,path:file[0],newLine:position.newLine||null,oldLine:position.oldLine||null});this.draftNotes.set(k,a);return clone(a[a.length-1]);}
+ async submitReview(mr,{summary='',outcome='comment'}={}){const k=`${mr.repo}!${mr.iid}`,a=this.draftNotes.get(k)||[];this.draftNotes.set(k,[]);return {message:`Demo: submitted ${a.length} comment(s) as ${outcome}.`};}
+ async discardReview(mr){const k=`${mr.repo}!${mr.iid}`,n=(this.draftNotes.get(k)||[]).length;this.draftNotes.set(k,[]);return {message:`Demo: discarded ${n} pending comment(s).`};}
  async addMergeRequestComment(mr,body){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));if(!full)throw new Error('Merge request not found');full.discussions=full.discussions||[];full.discussions.push({id:`general-${Date.now()}`,path:null,line:null,resolved:false,resolvable:false,notes:[{id:`note-${Date.now()}`,author:'demo-user',body}]});return {message:'Merge request comment added'};}
  async replyDiscussion(mr,id,body){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));const d=this._discussion(full,id);d.notes.push({id:`reply-${Date.now()}`,author:'demo-user',body});this._save(full,d);return d;}
  async resolveDiscussion(mr,id,resolved=true){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));const d=this._discussion(full,id);d.resolved=resolved;this._save(full,d);return d;}

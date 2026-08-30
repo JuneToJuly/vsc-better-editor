@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.14",
+  "version": "0.16.21",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -177,6 +177,20 @@
         "command": "gitlabWorkbench.cloneManagedProjects",
         "title": "GitLab Workbench: Clone Managed Projects",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gitlabWorkbench.submitReview",
+        "title": "GitLab Workbench: Submit Review",
+        "icon": "$(send)"
+      },
+      {
+        "command": "gitlabWorkbench.discardReview",
+        "title": "GitLab Workbench: Discard Pending Review",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "gitlabWorkbench.openPendingReviewComment",
+        "title": "GitLab Workbench: Open Pending Review Comment"
       }
     ],
     "viewsContainers": {
@@ -292,6 +306,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "gitlabWorkbench.submitReview",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@0"
+        },
+        {
           "command": "gitlabWorkbench.prepareJavaReview",
           "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
           "group": "navigation@0.1"
@@ -390,6 +409,11 @@
           "command": "gitlabWorkbench.cloneManagedProjects",
           "when": "view == gitlabWorkbench.mergeRequests && !gitlabWorkbench.reviewActive",
           "group": "navigation@2.5"
+        },
+        {
+          "command": "gitlabWorkbench.discardReview",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@9"
         }
       ],
       "view/item/context": [

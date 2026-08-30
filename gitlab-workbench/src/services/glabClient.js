@@ -323,58 +323,123 @@ class GlabClient {
  async addMergeRequestComment(mr,body){const {f,project,host}=await this.projectPath(mr);await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions`,['--method','POST','-f',`body=${body}`],f);return {message:'Merge request comment added'};}
  async replyDiscussion(mr,id,body){const {f,project,host}=await this.projectPath(mr);await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions/${id}/notes`,['--method','POST','-f',`body=${body}`],f);return {message:'Reply posted'};}
  async resolveDiscussion(mr,id,resolved=true){const {f,project,host}=await this.projectPath(mr);await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions/${id}`,['--method','PUT','-f',`resolved=${resolved}`],f);return {message:resolved?'Discussion resolved':'Discussion reopened'};}
- async addReviewComment(mr,file,position,body){
+ async listDraftNotes(mr){
+  const {f,project,host}=await this.projectPath(mr);const raw=await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes`,[],f);
+  const notes=(JSON.parse(raw||'[]')||[]).map(n=>({id:n.id,body:n.note||n.body||'',path:n.position?.new_path||n.position?.old_path||'',newLine:n.position?.new_line||null,oldLine:n.position?.old_line||null,position:n.position||null}));
+  this.output.appendLine(`[review-draft] loaded ${notes.length} pending comment${notes.length===1?'':'s'} for ${repoLabel(mr)} !${mr.iid}`);
+  return notes;
+ }
+ async addDraftReviewComment(mr,file,position,body){
+  const {f,project,host}=await this.projectPath(mr),info=Array.isArray(file)?(file[3]||{}):(file||{}),newPath=info.new_path||info.newPath||(Array.isArray(file)?file[0]:file.path),oldPath=info.old_path||info.oldPath||newPath,pos=typeof position==='number'?{newLine:position}:position;
+  const session=this.getReviewSession(mr)||await this.prepareReview(mr);const current=JSON.parse(await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}`,[],f)||'{}'),refs=current.diff_refs||{};
+  if(refs.head_sha&&session.head&&refs.head_sha!==session.head)throw new Error('This merge request changed after the review diff was opened. Refresh/reopen the review before adding this comment.');
+  const positionData={position_type:'text',base_sha:refs.base_sha||session.base,start_sha:refs.start_sha||session.base,head_sha:refs.head_sha||session.head,old_path:oldPath,new_path:newPath};
+  if(pos.oldLine)positionData.old_line=Number(pos.oldLine);if(pos.newLine)positionData.new_line=Number(pos.newLine);
+
+  // Important: glab's -f handling accepts these names but, on some glab/GitLab
+  // combinations, Rails receives "position[...]" as literal flat keys. GitLab
+  // then creates a perfectly valid *general* draft note with position=null.
+  // Put the documented nested parameters in the query string instead. Rails
+  // reliably decodes bracket notation there into the required position hash.
+  const q=new URLSearchParams();q.set('note',body);
+  for(const [k,v] of Object.entries(positionData))q.set(`position[${k}]`,String(v));
+  const endpoint=`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes?${q.toString()}`;
+  this.output.appendLine(`[review-draft] POST positioned old=${oldPath}:${pos.oldLine||'-'} new=${newPath}:${pos.newLine||'-'}`);
+  let created;
+  try{created=JSON.parse(await this.api(host,endpoint,['--method','POST'],f)||'{}');}
+  catch(e){this.output.appendLine(`[review-draft] POST ERROR ${cleanError(e)}`);throw e;}
+
+  // Never silently accept an unpositioned draft: that is what caused line
+  // comments to become "general" comments after the review was published.
+  const rp=created.position;
+  if(!rp?.new_path&&!rp?.old_path){
+   if(created.id)await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes/${created.id}`,['--method','DELETE'],f).catch(()=>{});
+   throw new Error('GitLab created the draft without a diff position. The draft was removed instead of allowing it to become a general comment.');
+  }
+  if(pos.newLine&&!rp.new_line||pos.oldLine&&!rp.old_line){
+   if(created.id)await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes/${created.id}`,['--method','DELETE'],f).catch(()=>{});
+   throw new Error(`GitLab did not preserve the selected diff line (requested old=${pos.oldLine||'-'}, new=${pos.newLine||'-'}). The invalid draft was removed.`);
+  }
+  this.output.appendLine(`[review-draft] VERIFIED id=${created.id} old=${rp.old_path||'-'}:${rp.old_line||'-'} new=${rp.new_path||'-'}:${rp.new_line||'-'}`);
+  return created;
+ }
+ async submitReview(mr,{summary='',outcome='comment'}={}){
+  const {f,project,host}=await this.projectPath(mr),args=['--method','POST'];if(summary)args.push('-f',`note=${summary}`);args.push('-f',`reviewer_state=${outcome==='request_changes'?'requested_changes':'reviewed'}`);
+  await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes/bulk_publish`,args,f);if(outcome==='approve')await this.approve(mr);
+  return {message:outcome==='approve'?'Review submitted and merge request approved.':outcome==='request_changes'?'Review submitted with changes requested.':'Review submitted.'};
+ }
+ async discardReview(mr){const {f,project,host}=await this.projectPath(mr),drafts=await this.listDraftNotes(mr);for(const d of drafts)await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/draft_notes/${d.id}`,['--method','DELETE'],f);return {message:`Discarded ${drafts.length} pending review comment${drafts.length===1?'':'s'}.`};}
+ async postReviewCommentNow(mr,file,position,body){
   const {f,project,host}=await this.projectPath(mr);
   const info=Array.isArray(file)?(file[3]||{}):(file||{});
   const newPath=info.new_path||info.newPath||(Array.isArray(file)?file[0]:file.path);
   const oldPath=info.old_path||info.oldPath||newPath;
   if(!newPath||!oldPath)throw new Error('Could not determine the GitLab old/new paths for this diff.');
 
-  const pos=(typeof position==='number')?{newLine:position}:position;
+  const pos=(typeof position==='number')?{kind:'added',newLine:position}:position;
   if(!pos?.newLine&&!pos?.oldLine)throw new Error('The selected editor line does not map to a GitLab diff position.');
 
-  // Prefer glab's dedicated diff-note command. It resolves the current MR diff
-  // version and builds GitLab's position payload itself. This is both simpler
-  // and more reliable than sending bracketed position[...] fields through
-  // `glab api` (newer glab versions treat -f/--raw-field bracket keys literally).
-  const repoUrl=`https://${host}/${project}`;
-  const args=['mr','note','create',String(mr.iid),'--file',newPath,'-m',body,'-R',repoUrl];
-  if(pos.oldLine&&!pos.newLine)args.push('--old-line',String(pos.oldLine));
-  else args.push('--line',String(pos.newLine));
+  // A review window is pinned to a specific MR head. If somebody pushes while the
+  // review is open, the editor is showing the old diff and GitLab's current diff
+  // position may no longer accept those line numbers. Detect that explicitly.
+  const session=this.getReviewSession(mr)||await this.prepareReview(mr);
+  const currentRaw=await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}`,[],f);
+  const current=JSON.parse(currentRaw||'{}');
+  const currentRefs=current.diff_refs||current.diffRefs||{};
+  const currentHead=currentRefs.head_sha||currentRefs.headSha;
+  if(currentHead&&session.head&&currentHead!==session.head){
+   throw new Error('This merge request changed after the review diff was opened. Refresh/reopen the review before adding this comment so the line maps to the latest diff.');
+  }
+
+  const refs=currentRefs.head_sha?currentRefs:(mr.diffRefs||{});
+  const baseSha=refs.base_sha||refs.baseSha||session.base;
+  const startSha=refs.start_sha||refs.startSha||baseSha;
+  const headSha=refs.head_sha||refs.headSha||session.head;
+  if(!baseSha||!startSha||!headSha)throw new Error('GitLab did not return the diff SHAs required for a positioned review comment.');
+
+  // Do NOT use `glab mr note create --line` here. That command only exposes one
+  // side of the line position and can reject valid context lines. GitLab's REST
+  // API supports the full position object, including BOTH old_line and new_line
+  // for unchanged context inside a diff hunk.
+  const payload={
+   body,
+   position:{
+    position_type:'text',
+    base_sha:baseSha,
+    start_sha:startSha,
+    head_sha:headSha,
+    old_path:oldPath,
+    new_path:newPath
+   }
+  };
+  if(pos.oldLine)payload.position.old_line=Number(pos.oldLine);
+  if(pos.newLine)payload.position.new_line=Number(pos.newLine);
+
+  const tmpDir=path.join(this.workspaceReviewRoot(),'tmp');
+  await fs.mkdir(tmpDir,{recursive:true});
+  const tmp=path.join(tmpDir,`review-comment-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`);
+  await fs.writeFile(tmp,JSON.stringify(payload),'utf8');
 
   this.output.appendLine(`[review-comment] ${repoLabel(mr)} !${mr.iid}`);
-  this.output.appendLine(`[review-comment] file old=${oldPath} new=${newPath} editor/new=${pos.newLine||'-'} old=${pos.oldLine||'-'} kind=${pos.kind||'unknown'}`);
-  this.output.appendLine(`[review-comment] command glab mr note create ${mr.iid} --file ${newPath} ${pos.oldLine&&!pos.newLine?'--old-line '+pos.oldLine:'--line '+pos.newLine}`);
+  this.output.appendLine(`[review-comment] file old=${oldPath} new=${newPath} new_line=${pos.newLine||'-'} old_line=${pos.oldLine||'-'} kind=${pos.kind||'unknown'}`);
+  this.output.appendLine(`[review-comment] refs base=${baseSha.slice(0,8)} start=${startSha.slice(0,8)} head=${headSha.slice(0,8)}`);
+
+  let created;
   try{
-   const result=await this.run(args,f);
-   if(result)this.output.appendLine(`[review-comment] glab ${String(result).slice(0,1000)}`);
+   const raw=await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions`,['--method','POST','--input',tmp],f);
+   created=JSON.parse(raw||'{}');
   }catch(e){
    this.output.appendLine(`[review-comment] POST ERROR ${cleanError(e)}`);
    throw e;
+  }finally{
+   await fs.rm(tmp,{force:true}).catch(()=>{});
   }
 
-  // Read it back from GitLab and require a real position before reporting
-  // success. This also gives callers the canonical GitLab discussion object.
-  const raw=await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions?per_page=100`,[],f);
-  const discussions=JSON.parse(raw||'[]');
-  const candidates=[];
-  for(const d of discussions){
-   for(const n of (d.notes||[])){
-    if(n.system||n.body!==body||!n.position)continue;
-    const rp=n.position;
-    const pathOk=rp.new_path===newPath||rp.old_path===oldPath;
-    const lineOk=pos.newLine?Number(rp.new_line)===Number(pos.newLine):Number(rp.old_line)===Number(pos.oldLine);
-    if(pathOk&&lineOk)candidates.push({d,n});
-   }
-  }
-  const hit=candidates[candidates.length-1];
-  if(!hit){
-   this.output.show(true);
-   throw new Error('GitLab did not return the new comment as a positioned review discussion. See GitLab Workbench output.');
-  }
-  const created=hit.d,note=hit.n,returned=note.position;
-  this.output.appendLine(`[review-comment] verified discussion=${created.id} path=${returned.new_path||returned.old_path} old=${returned.old_line||'-'} new=${returned.new_line||'-'}`);
-  return {id:String(created.id),path:returned.new_path||returned.old_path,line:Number(returned.new_line||returned.old_line),oldPath:returned.old_path||null,newPath:returned.new_path||null,oldLine:returned.old_line?Number(returned.old_line):null,newLine:returned.new_line?Number(returned.new_line):null,side:returned.new_line?'new':'old',resolved:!!note.resolved,resolvable:!!note.resolvable,notes:(created.notes||[]).filter(n=>!n.system).map(n=>({id:String(n.id),author:n.author?.name||n.author?.username||'Reviewer',body:n.body||''}))};
+  const note=(created.notes||[]).find(n=>!n.system&&n.body===body&&n.position);
+  if(!note?.position)throw new Error('GitLab created the discussion without a diff position.');
+  const rp=note.position;
+  this.output.appendLine(`[review-comment] attached old_line=${rp.old_line||'-'} new_line=${rp.new_line||'-'} old_path=${rp.old_path||'-'} new_path=${rp.new_path||'-'}`);
+  return created;
  }
  async repo(id){if(this.repos.has(id))return this.repos.get(id);await this.listMergeRequests();const r=this.repos.get(id);if(!r)throw new Error(`GitLab project not found: ${id}`);return r;}
  async git(args,cwd){const {stdout}=await execFile('git',['-c','core.longpaths=true','-C',cwd,...args],{env:{...process.env,GIT_TERMINAL_PROMPT:'0'},windowsHide:true,maxBuffer:2*1024*1024,timeout:60000});return stdout;}
