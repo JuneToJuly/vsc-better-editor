@@ -5,14 +5,14 @@ const {GlabClient}=require('./services/glabClient');
 const {MrTreeProvider}=require('./providers/mrTree');
 const {MrWebviewProvider}=require('./providers/mrWebview');
 const {IssueTreeProvider}=require('./providers/issueTree');
-const {ReviewTreeProvider}=require('./providers/reviewTree');
+const {ReviewWebviewProvider}=require('./providers/reviewWebview');
 let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:false,hideResolved:false}; let reviewComments=[];
 function activate(context){
  extensionContext=context;
  demoClient=new DemoClient(); liveClient=new GlabClient(vscode,context); commentController=vscode.comments.createCommentController('gitlabWorkbench.reviewComments','GitLab Review Comments'); context.subscriptions.push(commentController); const client=()=>vscode.workspace.getConfiguration('gitlabWorkbench').get('demoMode',true)?demoClient:liveClient;
  tree=new MrTreeProvider(client); mrWebview=new MrWebviewProvider(client); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.mergeRequests',mrWebview,{webviewOptions:{retainContextWhenHidden:true}}));
  issueTree=new IssueTreeProvider(client); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.issues',issueTree));
- reviewTree=new ReviewTreeProvider(review,(mr,path)=>isReviewed(mr,path)); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.reviewExplorer',reviewTree));
+ reviewTree=new ReviewWebviewProvider(review,(mr,path)=>isReviewed(mr,path)); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.reviewExplorer',reviewTree,{webviewOptions:{retainContextWhenHidden:true}}));
  const cmd=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,fn));
  cmd('gitlabWorkbench.refresh',()=>{tree.refresh();mrWebview?.refresh();issueTree.refresh();});
  cmd('gitlabWorkbench.showOutput',()=>liveClient.output.show(true));
