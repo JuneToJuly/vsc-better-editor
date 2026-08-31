@@ -15,9 +15,13 @@ class GlabClient {
  }
  async run(args,cwd){
   const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
-  const bin=cfg.get('glabPath','glab');
-  const {stdout}=await execFile(bin,args,{cwd,env:{...process.env,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1'},maxBuffer:20*1024*1024,windowsHide:true});
-  return stdout.trim();
+  const bin=cfg.get('glabPath','glab'),started=Date.now();
+  const label=args[0]==='api'?`api ${args.find(x=>String(x).startsWith('projects/'))||''}`:args.slice(0,3).join(' ');
+  try{
+   const {stdout}=await execFile(bin,args,{cwd,env:{...process.env,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1'},maxBuffer:20*1024*1024,windowsHide:true});
+   this.output.appendLine(`[perf] glab ${label} ${Date.now()-started}ms`);
+   return stdout.trim();
+  }catch(e){this.output.appendLine(`[perf] glab ${label} FAILED ${Date.now()-started}ms`);throw e;}
  }
  async status(){await this.run(['auth','status']); return {mode:'live',authenticated:true};}
  async api(host,endpoint,args=[],cwd){return this.run(['api','--hostname',host,endpoint,...args],cwd);}
@@ -167,15 +171,24 @@ class GlabClient {
   }catch(e){this.output.appendLine(`[mr-activity] ${repo.project}!${mr.iid}: ${cleanError(e)}`);}
   this.mrActivityCache.set(key,{at:Date.now(),value});return {...mr,...value};
  }
- async getMergeReadiness(mr){
-  const repo=await this.repo(mr.repo); const project=encodeURIComponent(repo.project);
-  let approvals={approved:0,required:0,users:[]};
-  try{const a=JSON.parse(await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/approvals`,[],repo.cwd));approvals={approved:Number(a.approvals_left!=null?Math.max(0,Number(a.approvals_required||0)-Number(a.approvals_left||0)):(a.approved_by||[]).length),required:Number(a.approvals_required||0),users:(a.approved_by||[]).map(x=>person(x.user||x))};}catch{}
-  let pipeline=null,jobs=[];
-  try{const ps=JSON.parse(await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/pipelines?per_page=1`,[],repo.cwd))||[];pipeline=ps[0]||null;if(pipeline?.id){jobs=JSON.parse(await this.api(repo.host,`projects/${project}/pipelines/${pipeline.id}/jobs?per_page=100`,[],repo.cwd))||[];}}catch{}
-  return {approvals,pipeline,jobs};
+ async listMergeRequestCommits(mr){
+  const repo=await this.repo(mr.repo),project=encodeURIComponent(repo.project);
+  try{const raw=await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/commits?per_page=100`,[],repo.cwd);return (JSON.parse(raw||'[]')||[]).map(c=>({id:c.id||'',shortId:c.short_id||(c.id||'').slice(0,8),title:c.title||String(c.message||'Commit').split('\n')[0],author:c.author_name||c.committer_name||'',created:c.committed_date||c.created_at||c.authored_date||'',webUrl:c.web_url||''}));}
+  catch(e){this.output.appendLine(`[mr-commits] ${repo.project}!${mr.iid}: ${cleanError(e)}`);return [];}
  }
 
+ async getMergeReadiness(mr){
+  const repo=await this.repo(mr.repo),project=encodeURIComponent(repo.project);
+  const approvalsPromise=this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/approvals`,[],repo.cwd)
+   .then(raw=>{const a=JSON.parse(raw);return {approved:Number(a.approvals_left!=null?Math.max(0,Number(a.approvals_required||0)-Number(a.approvals_left||0)):(a.approved_by||[]).length),required:Number(a.approvals_required||0),users:(a.approved_by||[]).map(x=>person(x.user||x))};})
+   .catch(()=>({approved:0,required:0,users:[]}));
+  const pipelinePromise=this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/pipelines?per_page=1`,[],repo.cwd)
+   .then(raw=>(JSON.parse(raw)||[])[0]||null).catch(()=>null);
+  const [approvals,pipeline]=await Promise.all([approvalsPromise,pipelinePromise]);
+  let jobs=[];
+  if(pipeline?.id)try{jobs=JSON.parse(await this.api(repo.host,`projects/${project}/pipelines/${pipeline.id}/jobs?per_page=100`,[],repo.cwd))||[];}catch{}
+  return {approvals,pipeline,jobs};
+ }
  async getMergeRequest(repoId,iid){
   const repo=await this.repo(repoId);
   const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests/${iid}`,[],repo.cwd);
@@ -299,7 +312,17 @@ class GlabClient {
   return {base:baseText,head:headText,source:session.source};
  }
  async checkout(mr){const r=await this.repo(mr.repo);if(!r.cwd)throw new Error('This project is not cloned locally. Clone or associate a local repository before checkout.');await this.run(['mr','checkout',String(mr.iid)],r.cwd);return {message:`Checked out ${r.name}!${mr.iid}`};}
- async approve(mr){const r=await this.repo(mr.repo);await this.api(r.host,`projects/${encodeURIComponent(r.project)}/merge_requests/${mr.iid}/approve`,['--method','POST'],r.cwd);return {message:`Approved ${r.name}!${mr.iid}`};}
+ async approve(mr){
+  const r=await this.repo(mr.repo);
+  // Use glab's first-class MR approval command rather than calling the REST
+  // endpoint ourselves. This preserves glab's own host/auth selection and is
+  // the same path users get from `glab mr approve`.
+  const repoTarget=`https://${r.host}/${r.project}`;
+  this.output.appendLine(`[approve] ${r.project}!${mr.iid} host=${r.host} via=glab-mr-approve`);
+  try{await this.run(['mr','approve',String(mr.iid),'--repo',repoTarget],r.cwd);}
+  catch(e){this.output.appendLine(`[approve] ERROR ${cleanError(e)}`);throw e;}
+  return {message:`Approved ${r.name}!${mr.iid}`};
+ }
  async merge(mr){const r=await this.repo(mr.repo);await this.api(r.host,`projects/${encodeURIComponent(r.project)}/merge_requests/${mr.iid}/merge`,['--method','PUT'],r.cwd);return {message:`Merged ${r.name}!${mr.iid}`};}
  async projectPath(mr){const r=await this.repo(mr.repo);return {f:r.cwd,project:r.project,host:r.host};}
  async ensureProject(repo){
@@ -317,8 +340,14 @@ class GlabClient {
    const positioned=visible.find(n=>n.position?.new_path||n.position?.old_path);
    const pos=positioned?.position;
    const anchor=visible.find(n=>n.resolvable)||positioned;
-   return {id:String(d.id),path:pos?.new_path||pos?.old_path||null,oldPath:pos?.old_path||null,newPath:pos?.new_path||null,line:pos?Number(pos.new_line||pos.old_line||1):null,oldLine:pos?.old_line?Number(pos.old_line):null,newLine:pos?.new_line?Number(pos.new_line):null,side:pos?.new_line?'new':pos?.old_line?'old':null,resolved:!!anchor?.resolved,resolvable:!!anchor?.resolvable,notes:visible.map(n=>({id:String(n.id),author:n.author?.name||n.author?.username||'Reviewer',body:n.body||'',created:n.created_at||''}))};
+   return {id:String(d.id),path:pos?.new_path||pos?.old_path||null,oldPath:pos?.old_path||null,newPath:pos?.new_path||null,line:pos?Number(pos.new_line||pos.old_line||1):null,oldLine:pos?.old_line?Number(pos.old_line):null,newLine:pos?.new_line?Number(pos.new_line):null,side:pos?.new_line?'new':pos?.old_line?'old':null,positionHeadSha:pos?.head_sha||pos?.headSha||null,positionBaseSha:pos?.base_sha||pos?.baseSha||null,resolved:!!anchor?.resolved,resolvable:!!anchor?.resolvable,notes:visible.map(n=>({id:String(n.id),author:n.author?.name||n.author?.username||'Reviewer',body:n.body||'',created:n.created_at||''}))};
   }).filter(d=>d.notes.length);
+ }
+ async getFileAtRef(mr,pathName,ref){
+  if(!pathName||!ref)return '';
+  const {f,project,host}=await this.projectPath(mr);
+  try{return await this.api(host,`projects/${encodeURIComponent(project)}/repository/files/${encodeURIComponent(pathName)}/raw?ref=${encodeURIComponent(ref)}`,[],f);}
+  catch{return '';}
  }
  async addMergeRequestComment(mr,body){const {f,project,host}=await this.projectPath(mr);await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions`,['--method','POST','-f',`body=${body}`],f);return {message:'Merge request comment added'};}
  async replyDiscussion(mr,id,body){const {f,project,host}=await this.projectPath(mr);await this.api(host,`projects/${encodeURIComponent(project)}/merge_requests/${mr.iid}/discussions/${id}/notes`,['--method','POST','-f',`body=${body}`],f);return {message:'Reply posted'};}

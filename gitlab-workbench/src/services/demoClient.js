@@ -53,6 +53,7 @@ class DemoClient{
  async resolveDiscussion(mr,id,resolved=true){const full=scenario(this.scenario).find(x=>x.repo===mr.repo&&x.iid===Number(mr.iid));const d=this._discussion(full,id);d.resolved=resolved;this._save(full,d);return d;}
  markReviewed(mr,path,value=true){const k=`${mr.repo}!${mr.iid}:${path}`;value?this.reviewed.add(k):this.reviewed.delete(k);}
  isReviewed(mr,path){return this.reviewed.has(`${mr.repo}!${mr.iid}:${path}`);}
- async checkout(mr){return {message:`Demo: checked out ${mr.repo}!${mr.iid}`};} async approve(mr){return {message:`Demo: approved ${mr.repo}!${mr.iid}`};} async merge(mr){return {message:`Demo: merged ${mr.repo}!${mr.iid}`};}
+ async checkout(mr){return {message:`Demo: checked out ${mr.repo}!${mr.iid}`};} async approve(mr){return {message:`Demo: approved ${mr.repo}!${mr.iid}`};} async merge(mr){return {message:`Demo: merged ${mr.repo}!${mr.iid}`};} async listMergeRequestCommits(){return [{id:'d34db33f',shortId:'d34db33f',title:'Address review feedback',author:'Worg0le',created:new Date(Date.now()-1080000).toISOString(),webUrl:''},{id:'abc12345',shortId:'abc12345',title:'Add workflow tests',author:'Worg0le',created:new Date(Date.now()-86400000).toISOString(),webUrl:''}];}
+
 }
 module.exports={DemoClient};

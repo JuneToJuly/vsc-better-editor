@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.29",
+  "version": "0.16.49",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -206,6 +206,33 @@
         "command": "gitlabWorkbench.toggleResolvedComments",
         "title": "GitLab Workbench: Hide/Show Resolved Comments",
         "icon": "$(eye-closed)"
+      },
+      {
+        "command": "gitlabWorkbench.resolveSourceFeedback",
+        "title": "GitLab Workbench: Resolve Feedback",
+        "icon": "$(check)"
+      },
+      {
+        "command": "gitlabWorkbench.refreshSourceFeedback",
+        "title": "GitLab Workbench: Refresh Source Feedback",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gitlabWorkbench.openSourceFeedbackById",
+        "title": "GitLab Workbench: Open Source Feedback"
+      },
+      {
+        "command": "gitlabWorkbench.resolveSourceFeedbackById",
+        "title": "GitLab Workbench: Resolve Source Feedback"
+      },
+      {
+        "command": "gitlabWorkbench.closeSourceFeedback",
+        "title": "GitLab Workbench: Close Source Feedback"
+      },
+      {
+        "command": "gitlabWorkbench.replySourceFeedbackById",
+        "title": "GitLab Workbench: Reply to Source Feedback",
+        "icon": "$(reply)"
       }
     ],
     "viewsContainers": {
@@ -471,6 +498,13 @@
         {
           "command": "gitlabWorkbench.replyDiscussion",
           "when": "view == gitlabWorkbench.reviewExplorer && viewItem == reviewGeneralDiscussion",
+          "group": "inline@1"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "gitlabWorkbench.resolveSourceFeedback",
+          "when": "commentThread == gitlabSourceFeedback",
           "group": "inline@1"
         }
       ]

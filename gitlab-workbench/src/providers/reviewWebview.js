@@ -2,7 +2,7 @@ const vscode=require('vscode');
 const path=require('path');
 
 class ReviewWebviewProvider{
- constructor(reviewState,isReviewed){this.reviewState=reviewState;this.isReviewed=isReviewed;this.view=null;this.filter='unresolved';this.showGeneral=true;}
+ constructor(reviewState,isReviewed){this.reviewState=reviewState;this.isReviewed=isReviewed;this.view=null;this.filter='unresolved';this.showGeneral=true;this.feedback=null;}
  resolveWebviewView(view){
   this.view=view;view.webview.options={enableScripts:true};
   view.webview.onDidReceiveMessage(m=>{
@@ -12,12 +12,49 @@ class ReviewWebviewProvider{
    if(m.type==='resolve'&&m.discussion)vscode.commands.executeCommand('gitlabWorkbench.resolveDiscussion',m.discussion);
    if(m.type==='reply'&&m.discussion)vscode.commands.executeCommand('gitlabWorkbench.replyDiscussion',m.discussion);
    if(m.type==='toggleReviewed')vscode.commands.executeCommand('gitlabWorkbench.toggleReviewed',Number(m.index));
+   if(m.type==='feedbackOpen'&&m.id)vscode.commands.executeCommand('gitlabWorkbench.openSourceFeedbackById',m.id);
+   if(m.type==='feedbackResolve'&&m.id)vscode.commands.executeCommand('gitlabWorkbench.resolveSourceFeedbackById',m.id);
+   if(m.type==='feedbackReply'&&m.id)vscode.commands.executeCommand('gitlabWorkbench.replySourceFeedbackById',m.id);
+   if(m.type==='feedbackClose')vscode.commands.executeCommand('gitlabWorkbench.closeSourceFeedback');
    if(m.type==='filter'){this.filter=m.value||'unresolved';this.refresh();}
    if(m.type==='toggleGeneral'){this.showGeneral=!this.showGeneral;this.refresh();}
   });
   this.refresh();
  }
- refresh(){if(this.view)this.view.webview.html=render(this.reviewState,this.isReviewed,this.filter,this.showGeneral);}
+ setFeedback(feedback){this.feedback=feedback;this.refresh();}
+ clearFeedback(){this.feedback=null;this.refresh();}
+ beginReview(){
+  this.feedback=null;
+  this.filter='unresolved';
+  this.refresh();
+ }
+ refresh(){
+  if(!this.view)return;
+  try{this.view.webview.html=this.feedback?renderFeedback(this.feedback):render(this.reviewState,this.isReviewed,this.filter,this.showGeneral);}
+  catch(err){
+   console.error('[GitLab Workbench] Review Explorer render failed',err);
+   this.view.webview.html=page(`<div class="summary"><div class="summary-title"><b>Review ${esc(this.reviewState.mr?.iid?'!'+this.reviewState.mr.iid:'')}</b></div></div><div class="empty">Review is active. The discussion list could not be rendered.</div>`);
+  }
+ }
+}
+function renderFeedback(feedback){
+ const mr=feedback.mr,all=(feedback.discussions||[]).filter(d=>!d.resolved),active=String(feedback.activeDiscussionId||'');
+ const reviewers=new Map();
+ for(const d of all){const author=d.notes?.[0]?.author||'Unknown reviewer';if(!reviewers.has(author))reviewers.set(author,new Map());const files=reviewers.get(author),file=d.path||'General';if(!files.has(file))files.set(file,[]);files.get(file).push(d);}
+ let body=`<div class="feedback-side-head"><div><b>Feedback</b><div class="muted">${all.length} outstanding · ${reviewers.size} reviewer${reviewers.size===1?'':'s'}</div></div><button class="icon-button" data-feedback-close title="Close feedback">×</button></div>`;
+ for(const [author,files] of reviewers){
+  body+=`<details open class="section feedback-reviewer"><summary><span class="chev"></span><b>${esc(author)}</b><span class="count">${[...files.values()].reduce((n,x)=>n+x.length,0)} open</span></summary><div class="section-body">`;
+  for(const [file,items] of files){
+   body+=`<div class="feedback-side-file"><div class="feedback-side-file-head">${esc(path.basename(file))}<span>${items.length}</span></div>`;
+   for(const d of items){const first=d.notes?.[0]||{},id=esc(String(d.id)),line=d.line||d.newLine||d.oldLine;
+    body+=`<div class="feedback-side-item ${active===String(d.id)?'active':''}"><button class="feedback-jump" data-feedback-open="${id}"><span class="feedback-line-no">${line?`L${esc(line)}`:'General'}</span><span class="feedback-side-text">${esc(oneLine(first.body))}</span></button><button class="reply-mini" data-feedback-reply="${id}" title="Reply to feedback">↩</button><button class="resolve-mini" data-feedback-resolve="${id}" title="Resolve feedback">✓</button></div>`;
+   }
+   body+='</div>';
+  }
+  body+='</div></details>';
+ }
+ if(!all.length)body+='<div class="empty">No outstanding feedback.</div>';
+ return page(body);
 }
 function render(review,isReviewed,filter='unresolved',showGeneral=true){
  const mr=review.mr;if(!mr)return page('<div class="empty">No active review.</div>');
@@ -67,9 +104,10 @@ details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;g
 .thread-top{display:flex;align-items:center;gap:7px;min-width:0}.thread-text{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.thread-icon{color:var(--vscode-icon-foreground)}.meta{display:flex;gap:9px;align-items:center;color:var(--vscode-descriptionForeground);font-size:.88em;margin-top:4px}.line{color:var(--vscode-textLink-foreground)}
 .badge{display:inline-block;padding:1px 6px;border-radius:9px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:.82em;white-space:nowrap}.badge.done{background:var(--vscode-toolbar-hoverBackground);color:var(--vscode-descriptionForeground)}.badge.pending{background:var(--vscode-editorWarning-background);color:var(--vscode-editorWarning-foreground)}.badge.current{margin-left:auto}
 .actions{display:flex;gap:5px;margin-top:6px}button{font:inherit;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:2px;padding:2px 7px;cursor:pointer}button:hover{background:var(--vscode-button-hoverBackground)}button.link{background:transparent;color:var(--vscode-textLink-foreground);padding:0;margin-left:auto}.empty{padding:14px;color:var(--vscode-descriptionForeground)}
+.feedback-side-head{display:flex;justify-content:space-between;align-items:flex-start;padding:8px 5px 11px;border-bottom:1px solid var(--vscode-panel-border);margin-bottom:8px}.feedback-side-head>b{font-size:14px}.icon-button{background:transparent;color:var(--vscode-foreground);font-size:20px;line-height:18px;padding:0 5px}.feedback-reviewer{margin-bottom:12px}.feedback-side-file{margin:3px 0 9px}.feedback-side-file-head{display:flex;gap:6px;align-items:center;padding:4px 6px;font-weight:650;font-size:.92em;color:var(--vscode-foreground)}.feedback-side-file-head span{font-size:.78em;border-radius:8px;padding:1px 5px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground)}.feedback-side-item{display:flex;align-items:center;gap:3px;border-left:2px solid transparent;border-radius:2px}.feedback-side-item:hover{background:var(--vscode-list-hoverBackground)}.feedback-side-item.active{border-left-color:var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground)}.feedback-jump{display:grid;grid-template-columns:42px minmax(0,1fr);gap:5px;align-items:center;flex:1;min-width:0;text-align:left;background:transparent;color:var(--vscode-foreground);padding:5px 4px}.feedback-line-no{font-size:.82em;color:var(--vscode-textLink-foreground)}.feedback-side-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.reply-mini,.resolve-mini{background:transparent;font-size:14px;padding:3px 7px}.reply-mini{color:var(--vscode-foreground)}.resolve-mini{color:var(--vscode-testing-iconPassed)}.resolve-mini:hover{background:var(--vscode-toolbar-hoverBackground)}
 </style></head><body>${body}<script>
 const vscode=acquireVsCodeApi();const dec=s=>JSON.parse(decodeURIComponent(s));
-document.addEventListener('click',e=>{const el=e.target.closest('[data-open-file],[data-open-discussion],[data-open-pending],[data-toggle-reviewed],[data-resolve],[data-reply],[data-filter],[data-general]');if(!el)return;e.stopPropagation();if(el.dataset.filter)return vscode.postMessage({type:'filter',value:el.dataset.filter});if(el.dataset.general)return vscode.postMessage({type:'toggleGeneral'});
+document.addEventListener('click',e=>{const el=e.target.closest('[data-open-file],[data-open-discussion],[data-open-pending],[data-toggle-reviewed],[data-resolve],[data-reply],[data-filter],[data-general],[data-feedback-open],[data-feedback-resolve],[data-feedback-reply],[data-feedback-close]');if(!el)return;e.stopPropagation();if(el.dataset.feedbackClose!==undefined)return vscode.postMessage({type:'feedbackClose'});if(el.dataset.feedbackResolve!==undefined)return vscode.postMessage({type:'feedbackResolve',id:el.dataset.feedbackResolve});if(el.dataset.feedbackReply!==undefined)return vscode.postMessage({type:'feedbackReply',id:el.dataset.feedbackReply});if(el.dataset.feedbackOpen!==undefined)return vscode.postMessage({type:'feedbackOpen',id:el.dataset.feedbackOpen});if(el.dataset.filter)return vscode.postMessage({type:'filter',value:el.dataset.filter});if(el.dataset.general)return vscode.postMessage({type:'toggleGeneral'});
  if(el.dataset.toggleReviewed!==undefined)return vscode.postMessage({type:'toggleReviewed',index:dec(el.dataset.toggleReviewed)});
  if(el.dataset.resolve)return vscode.postMessage({type:'resolve',discussion:dec(el.dataset.resolve)});
  if(el.dataset.reply)return vscode.postMessage({type:'reply',discussion:dec(el.dataset.reply)});
