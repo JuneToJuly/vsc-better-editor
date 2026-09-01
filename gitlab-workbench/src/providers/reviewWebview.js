@@ -4,7 +4,9 @@ const path=require('path');
 class ReviewWebviewProvider{
  constructor(reviewState,isReviewed){this.reviewState=reviewState;this.isReviewed=isReviewed;this.view=null;this.filter='unresolved';this.showGeneral=true;this.feedback=null;}
  resolveWebviewView(view){
-  this.view=view;view.webview.options={enableScripts:true};
+  this.view=view;
+  view.onDidDispose(()=>{if(this.view===view)this.view=null;});
+  view.webview.options={enableScripts:true};
   view.webview.onDidReceiveMessage(m=>{
    if(m.type==='openFile')vscode.commands.executeCommand('gitlabWorkbench.openReviewFile',Number(m.index));
    if(m.type==='openDiscussion'&&m.discussion)vscode.commands.executeCommand('gitlabWorkbench.openDiscussion',m.discussion);

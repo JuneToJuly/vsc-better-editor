@@ -1,14 +1,18 @@
 const vscode=require('vscode');
 const path=require('path');
 const {DemoClient}=require('./services/demoClient');
-const {GlabClient}=require('./services/glabClient');
+const {GlabClient,parseProjectUrl,sameProjectUrl}=require('./services/glabClient');
 const {MrTreeProvider}=require('./providers/mrTree');
 const {MrWebviewProvider}=require('./providers/mrWebview');
 const {IssueTreeProvider}=require('./providers/issueTree');
 const {ReviewWebviewProvider}=require('./providers/reviewWebview');
-let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let sourceFeedback={mr:null,discussions:[],threads:[],threadMap:new WeakMap(),activeDiscussionId:null}; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:true,hideResolved:false,expandedDiscussionId:null}; let reviewComments=[];
+let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,commentController,extensionContext; let sourceFeedback={mr:null,discussions:[],threads:[],threadMap:new WeakMap(),activeDiscussionId:null}; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:true,hideResolved:false,expandedDiscussionId:null,ignoreWhitespace:true}; let reviewComments=[];
 function activate(context){
  extensionContext=context;
+ // Review/feedback UI state is transient. Always start from the normal Workbench
+ // views after an extension-host reload; a real review will set this true again.
+ void vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',false);
+ void vscode.commands.executeCommand('setContext','gitlabWorkbench.hideResolvedComments',false);
  demoClient=new DemoClient(); liveClient=new GlabClient(vscode,context); commentController=vscode.comments.createCommentController('gitlabWorkbench.reviewComments','GitLab Review Comments'); context.subscriptions.push(commentController);
  context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(async editor=>{
   if(!editor||!sourceFeedback.mr)return;
@@ -29,7 +33,7 @@ function activate(context){
   if(current.some(x=>sameProjectUrl(x,value))){vscode.window.showInformationMessage(`That GitLab project is already managed: ${parsed.host}/${parsed.project}`);return;}
   // Preserve the supplied transport for cloning. API calls use normalized
   // host/project identity from parseProjectUrl().
-  await c.update('managedProjects',[...current,value.trim()],vscode.ConfigurationTarget.Global);tree.refresh();issueTree.refresh();vscode.window.showInformationMessage(`Added GitLab project: ${parsed.host}/${parsed.project} (${parsed.protocol||'remote'})`);
+  await c.update('managedProjects',[...current,value.trim()],vscode.ConfigurationTarget.Global);tree.refresh();await mrWebview?.refresh();issueTree.refresh();vscode.window.showInformationMessage(`Added GitLab project: ${parsed.host}/${parsed.project} (${parsed.protocol||'remote'})`);
  });
  cmd('gitlabWorkbench.removeProject',async()=>{
   const c=vscode.workspace.getConfiguration('gitlabWorkbench');const current=c.get('managedProjects',[])||[];if(!current.length){vscode.window.showInformationMessage('No managed GitLab projects.');return;}
@@ -74,6 +78,7 @@ function activate(context){
  cmd('gitlabWorkbench.demoScenario',chooseScenario);
  cmd('gitlabWorkbench.reviewMr',mr=>startReview(client,mr));
  cmd('gitlabWorkbench.nextChange',()=>moveReview(1));
+ cmd('gitlabWorkbench.toggleReviewWhitespace',async()=>{review.ignoreWhitespace=!review.ignoreWhitespace;if(review.mr)await showReviewFile();vscode.window.setStatusBarMessage(`Review diff: whitespace ${review.ignoreWhitespace?'ignored':'shown'}`,2500);});
  cmd('gitlabWorkbench.previousChange',()=>moveReview(-1));
  cmd('gitlabWorkbench.markReviewed',markReviewed);
  cmd('gitlabWorkbench.addReviewComment',()=>addReviewComment(client));
@@ -102,7 +107,7 @@ function activate(context){
  cmd('gitlabWorkbench.finishReview',async()=>{if(!review.mr)return;await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',false);clearRenderedComments();review.mr=null;review.index=0;review.discussions=[];review.pending=[];review.worktree=undefined;review.compositeRoot=undefined;reviewTree.refresh();vscode.window.showInformationMessage('Review session finished. Fast Composite JDT root is left unchanged; switch back when you are ready.');});
  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('gitlabWorkbench')){tree.refresh();mrWebview?.refresh();issueTree.refresh();}}));
 }
-async function action(client,mr,method){try{const r=await client()[method](mr);vscode.window.showInformationMessage(r.message);tree.refresh();mrWebview?.refresh();}catch(e){vscode.window.showErrorMessage(String(e.stderr||e.message||e));}}
+async function action(client,mr,method){try{const r=await client()[method](mr);vscode.window.showInformationMessage(r.message);tree.refresh();if(method==='approve')await mrWebview?.refreshOne(mr);else mrWebview?.refresh();}catch(e){vscode.window.showErrorMessage(String(e.stderr||e.message||e));}}
 async function openDashboard(client){const p=vscode.window.createWebviewPanel('gitlabWorkbenchDashboard','GitLab Workbench',currentEditorColumn(),{enableScripts:true}); let mrs=[];try{mrs=await client().listMergeRequests();}catch(e){p.webview.html=page('GitLab Workbench',`<div class="error">${esc(e.message)}</div>`);return;}const failed=mrs.filter(x=>x.pipeline==='failed').length;const running=mrs.filter(x=>x.pipeline==='running').length;p.webview.html=page('GitLab Workbench',`<div class="hero"><div><h1>GitLab Workbench</h1><p>${isDemo()?'DEMO DATA — safe to explore':'LIVE — powered by glab'}</p></div><button data-cmd="refresh">Refresh</button></div><div class="stats"><b>${mrs.length}</b> open MRs <b>${failed}</b> failed pipelines <b>${running}</b> running</div>${mrs.map(card).join('')}`);p.webview.onDidReceiveMessage(async m=>{if(m.command==='open'){const mr=mrs.find(x=>x.repo===m.repo&&x.iid===m.iid);openMr(client,mr);}if(m.command==='refresh'){p.dispose();openDashboard(client);}});}
 async function openIssue(client,issue){
  let current=issue;let editing=false;try{current=await client().getIssue(issue.repo,issue.iid)||issue;}catch{}
@@ -247,7 +252,7 @@ async function openMr(client,mr){
    else vscode.window.showInformationMessage('There is no outstanding line feedback to open in the project source.');
    return;
   }
-  if(m.action==='review'){await startReview(client,full);return;}if(m.action){await action(client,full,m.action);await render(activeTab);return;}if(Number.isInteger(m.file)){await openDemoDiff(full,full.files[m.file]);return;}
+  if(m.action==='review'){await startReview(client,full);return;}if(m.action){await action(client,full,m.action);if(m.action==='approve'){loaded=false;await render(activeTab,true);}else await render(activeTab);return;}if(Number.isInteger(m.file)){await openDemoDiff(full,full.files[m.file]);return;}
   if(m.mrAction==='comment'){const body=String(m.body||'').trim();if(!body)return;try{await client().addMergeRequestComment(full,body);loaded=false;await render('conversation',true);}catch(e){vscode.window.showErrorMessage(`Could not add merge request comment: ${String(e.stderr||e.message||e)}`);}return;}
   if(m.feedbackDiff){
     const d=discussions.find(x=>String(x.id)===String(m.feedbackDiff)),data=impactData.get(String(m.feedbackDiff));
@@ -258,7 +263,7 @@ async function openMr(client,mr){
     const right=vscode.Uri.parse(`gitlab-workbench:/feedback-current/${token}/${encodeURIComponent(d.path)}`);
     virtualText.set(left.toString(),data.before||'');virtualText.set(right.toString(),data.current||'');
     const oldSha=String(d.positionHeadSha||'').slice(0,8),head=String(full.diffRefs?.head_sha||full.diffRefs?.headSha||full.sha||full.headSha||'').slice(0,8);
-    await vscode.commands.executeCommand('vscode.diff',left,right,`${d.path} · feedback ${oldSha||'version'} → ${head||'current'}`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
+    await applyReviewDiffWhitespace();await vscode.commands.executeCommand('vscode.diff',left,right,`${d.path} · feedback ${oldSha||'version'} → ${head||'current'}${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
     return;
    }
    if(m.feedbackOpen){const d=discussions.find(x=>String(x.id)===String(m.feedbackOpen));if(d?.path){try{sourceFeedback.mr=full;sourceFeedback.discussions=discussions;sourceFeedback.activeDiscussionId=d.id;
@@ -499,7 +504,20 @@ async function submitReview(client){
  if(!review.mr)return;review.pending=await loadDraftNotes(client,review.mr);const count=review.pending.length;
  const outcome=await vscode.window.showQuickPick([{label:'$(check) Approve',description:'Publish comments and approve',value:'approve'},{label:'$(comment-discussion) Comment',description:'Publish comments without approval',value:'comment'},{label:'$(error) Request Changes',description:'Publish comments and block for changes',value:'request_changes'}],{title:`Submit Review · ${count} pending comment${count===1?'':'s'}`,placeHolder:'Choose review outcome',ignoreFocusOut:true});if(!outcome)return;
  const summary=await vscode.window.showInputBox({title:'Review Summary',prompt:'Optional summary published with the review',placeHolder:'Summary (optional)…',ignoreFocusOut:true});if(summary===undefined)return;
- try{const result=await client().submitReview(review.mr,{summary,outcome:outcome.value});review.pending=[];review.discussions=await loadDiscussions(client,review.mr);review.pending=await loadDraftNotes(client,review.mr);reviewTree.refresh();await showReviewFile();tree.refresh();mrWebview?.refresh();vscode.window.showInformationMessage(result.message);}catch(err){vscode.window.showErrorMessage(`Could not submit review: ${String(err.stderr||err.message||err)}`);}
+ try{
+  const reviewedMr=review.mr;
+  const result=await client().submitReview(reviewedMr,{summary,outcome:outcome.value});
+  const reviewedHead=await client().markReviewed?.(reviewedMr);
+  reviewedMr.reviewedHead=reviewedHead||reviewVersion(reviewedMr);reviewedMr.changesSinceReview=0;reviewedMr.changesSinceMyComment=0;
+  review.pending=[];review.discussions=await loadDiscussions(client,reviewedMr);review.pending=await loadDraftNotes(client,reviewedMr);
+  // We are inside the dedicated Review Explorer now. Do not refresh the MR-list
+  // webview here: it may have been disposed when reviewActive hid the normal MR view.
+  // The list will refresh when the user returns to it.
+  tree.refresh();
+  try{reviewTree.refresh();}catch(err){liveClient?.log?.(`[review-flow] post-submit explorer refresh skipped: ${String(err?.message||err)}`);}
+  try{await showReviewFile();}catch(err){liveClient?.log?.(`[review-flow] post-submit file refresh skipped: ${String(err?.message||err)}`);}
+  vscode.window.showInformationMessage(result.message);
+ }catch(err){vscode.window.showErrorMessage(`Could not submit review: ${String(err.stderr||err.message||err)}`);}
 }
 async function discardPendingReview(client){
  if(!review.mr)return;review.pending=await loadDraftNotes(client,review.mr);if(!review.pending.length){vscode.window.showInformationMessage('There are no pending review comments.');return;}
@@ -521,30 +539,35 @@ function mapNewLineToGitLabPosition(diff,targetNewLine){
  return null;
 }
 
+function reviewFileInfo(file){
+ const info=file?.[3]||{},display=file?.[0]||info.new_path||info.old_path||'file';
+ const oldPath=info.old_path||info.oldPath||display,newPath=info.new_path||info.newPath||display;
+ return {display,oldPath,newPath,renamed:oldPath!==newPath};
+}
+async function applyReviewDiffWhitespace(){
+ const desired=!!review.ignoreWhitespace;
+ const cfg=vscode.workspace.getConfiguration('diffEditor'),current=cfg.get('ignoreTrimWhitespace',true);
+ if(current!==desired)await cfg.update('ignoreTrimWhitespace',desired,vscode.ConfigurationTarget.Workspace);
+}
 async function openDemoDiff(mr,file){
  if(!file)return;ensureTextProvider();
- const token=encodeURIComponent(`${mr.repo}|${mr.iid}|${file[0]}`);
- const left=vscode.Uri.parse(`gitlab-workbench:/base/${token}/${encodeURIComponent(file[0])}`);
- let right=vscode.Uri.parse(`gitlab-workbench:/head/${token}/${encodeURIComponent(file[0])}`);
+ const fi=reviewFileInfo(file),token=encodeURIComponent(`${mr.repo}|${mr.iid}|${fi.oldPath}|${fi.newPath}`);
+ const left=vscode.Uri.parse(`gitlab-workbench:/base/${token}/${encodeURIComponent(fi.oldPath)}`);
+ let right=vscode.Uri.parse(`gitlab-workbench:/head/${token}/${encodeURIComponent(fi.newPath)}`);
  if(!isDemo()){
   try{
    const v=await liveClient.getReviewFileVersions(mr,file);virtualText.set(left.toString(),v.base);
    const session=liveClient.getReviewSession(mr);
-   const info=file[3]||{};const newPath=info.new_path||info.newPath||file[0];
-   if(session?.worktree&&newPath){right=vscode.Uri.file(path.join(session.worktree,...String(newPath).split('/')));}
+   if(session?.worktree&&fi.newPath){right=vscode.Uri.file(path.join(session.worktree,...String(fi.newPath).split('/')));}
    else virtualText.set(right.toString(),v.head);
   }catch(e){vscode.window.showErrorMessage(`Could not load GitLab diff contents: ${String(e.stderr||e.message||e)}`);return;}
  }
- await vscode.commands.executeCommand('vscode.diff',left,right,`${file[0]} (!${mr.iid})`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
- // VS Code's diff API does not expose renderSideBySide per invocation. When the user
- // wants unified review diffs and their normal setting is side-by-side, toggle only the
- // active diff editor after opening it.
+ await applyReviewDiffWhitespace();
+ const rename=fi.renamed?`${fi.oldPath} → ${fi.newPath}`:fi.newPath;
+ await vscode.commands.executeCommand('vscode.diff',left,right,`${rename} (!${mr.iid})${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
  const unified=vscode.workspace.getConfiguration('gitlabWorkbench').get('unifiedDiff',true);
  const sideBySide=vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide',true);
- if(unified && sideBySide){
-  try{await vscode.commands.executeCommand('toggle.diff.renderSideBySide');}
-  catch(e){liveClient?.log?.(`[review-diff] could not toggle unified diff: ${String(e?.message||e)}`);}
- }
+ if(unified && sideBySide){try{await vscode.commands.executeCommand('toggle.diff.renderSideBySide');}catch(e){liveClient?.log?.(`[review-diff] could not toggle unified diff: ${String(e?.message||e)}`);}}
 }
 async function prepareJavaReview(options={}){
  if(!review.mr||isDemo()){vscode.window.showWarningMessage('Start a live merge request review first.');return;}

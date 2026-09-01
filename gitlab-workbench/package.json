@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.50",
+  "version": "0.16.61",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -233,6 +233,11 @@
         "command": "gitlabWorkbench.replySourceFeedbackById",
         "title": "GitLab Workbench: Reply to Source Feedback",
         "icon": "$(reply)"
+      },
+      {
+        "command": "gitlabWorkbench.toggleReviewWhitespace",
+        "title": "Toggle Review Whitespace",
+        "icon": "$(whitespace)"
       }
     ],
     "viewsContainers": {
@@ -472,6 +477,21 @@
           "command": "gitlabWorkbench.toggleResolvedComments",
           "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
           "group": "navigation@1.8"
+        },
+        {
+          "command": "gitlabWorkbench.addProject",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@5"
+        },
+        {
+          "command": "gitlabWorkbench.manageProjects",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@6"
+        },
+        {
+          "command": "gitlabWorkbench.toggleReviewWhitespace",
+          "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [

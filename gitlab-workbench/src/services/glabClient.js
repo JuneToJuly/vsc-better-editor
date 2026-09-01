@@ -8,6 +8,17 @@ const execFile = util.promisify(cp.execFile);
 class GlabClient {
  constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.mrActivityCache=new Map();this.output=vscode.window.createOutputChannel('GitLab Workbench');}
  log(message){this.output.appendLine(message);}
+ reviewMarkerKey(mr,repo){return `gitlabWorkbench.reviewedHead:${(repo?.host||'').toLowerCase()}/${(repo?.project||mr.repo||'').toLowerCase()}!${mr.iid}`;}
+ reviewedHead(mr,repo){return this.context.workspaceState.get(this.reviewMarkerKey(mr,repo),'');}
+ async markReviewed(mr){
+  const repo=await this.repo(mr.repo);
+  let head=mr.sha||mr.headSha||mr.diffRefs?.head_sha||mr.diffRefs?.headSha||'';
+  if(!head)try{const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests/${mr.iid}`,[],repo.cwd);head=pick(JSON.parse(raw||'{}'),'sha','head_sha','headSha')||'';}catch{}
+  if(head)await this.context.workspaceState.update(this.reviewMarkerKey(mr,repo),head);
+  // Activity cache may contain the old "changed" result.
+  this.mrActivityCache.clear();
+  return head;
+ }
  workspaceReviewRoot(){
   const folders=this.vscode.workspace.workspaceFolders||[];
   if(!folders.length)throw new Error('Open a VS Code workspace folder before starting a local review.');
@@ -115,7 +126,15 @@ class GlabClient {
     if(!arr.length)out.push({repo:repo.id,repoName:repo.name,kind:'empty'});
     const me=await this.currentUserForRepo(repo);
     const normalized=arr.map(x=>this.normalize(x,repo));
-    const enriched=await Promise.all(normalized.map(mr=>this.enrichMergeRequestActivity(mr,repo,me)));
+    const enriched=await Promise.all(normalized.map(async mr=>{
+     const [activity,approval]=await Promise.all([this.enrichMergeRequestActivity(mr,repo,me),this.getApprovalStatus(mr,repo)]);
+     if(approval.approvedByMe){
+      const head=mr.sha||mr.headSha||mr.diffRefs?.head_sha||mr.diffRefs?.headSha||activity.reviewedHead||'';
+      activity.changesSinceReview=0;activity.reviewedHead=head;
+      if(head)await this.context.workspaceState.update(this.reviewMarkerKey(mr,repo),head);
+     }
+     return {...activity,...approval};
+    }));
     out.push(...enriched);
    }catch(e){const error=cleanError(e);this.output.appendLine(`[mr] ${repo.project}: ERROR ${error}`);out.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}
   }
@@ -155,7 +174,7 @@ class GlabClient {
   if(!me)return mr;
   const key=`${repo.id}!${mr.iid}:${mr.sha||mr.updated||''}:${me}`;const cached=this.mrActivityCache.get(key);
   if(cached&&Date.now()-cached.at<60000)return {...mr,...cached.value};
-  let value={hasMyComments:false,lastMyComment:'',changesSinceMyComment:0,lastCommit:''};
+  let value={hasMyComments:false,lastMyComment:'',changesSinceMyComment:0,changesSinceReview:0,reviewedHead:this.reviewedHead(mr,repo),lastCommit:''};
   try{
    const project=encodeURIComponent(repo.project);
    const [notesRaw,commitsRaw]=await Promise.all([
@@ -167,7 +186,13 @@ class GlabClient {
    const last=mine.map(n=>n.created_at).filter(Boolean).sort().pop()||'';
    const lastMs=last?Date.parse(last):0;
    const newer=lastMs?commits.filter(c=>Date.parse(c.committed_date||c.created_at||c.authored_date||0)>lastMs):[];
-   value={hasMyComments:mine.length>0,lastMyComment:last,changesSinceMyComment:newer.length,lastCommit:(commits.map(c=>c.committed_date||c.created_at||'').filter(Boolean).sort().pop()||'')};
+   const reviewedHead=this.reviewedHead(mr,repo);
+   let changesSinceReview=0;
+   if(reviewedHead){
+    const idx=commits.findIndex(c=>String(c.id||c.sha||'')===String(reviewedHead));
+    changesSinceReview=idx>=0?Math.max(0,commits.length-idx-1):(String(mr.sha||mr.headSha||'')===String(reviewedHead)?0:newer.length||1);
+   }else changesSinceReview=newer.length;
+   value={hasMyComments:mine.length>0,lastMyComment:last,changesSinceMyComment:newer.length,changesSinceReview,reviewedHead,lastCommit:(commits.map(c=>c.committed_date||c.created_at||'').filter(Boolean).sort().pop()||'')};
   }catch(e){this.output.appendLine(`[mr-activity] ${repo.project}!${mr.iid}: ${cleanError(e)}`);}
   this.mrActivityCache.set(key,{at:Date.now(),value});return {...mr,...value};
  }
@@ -177,6 +202,28 @@ class GlabClient {
   catch(e){this.output.appendLine(`[mr-commits] ${repo.project}!${mr.iid}: ${cleanError(e)}`);return [];}
  }
 
+ async getApprovalStatus(mr,repoArg){
+  try{
+   const repo=repoArg||await this.repo(mr.repo),project=encodeURIComponent(repo.project);
+   const raw=await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/approvals`,[],repo.cwd);
+   const a=JSON.parse(raw||'{}'),required=Number(a.approvals_required||0),left=Number(a.approvals_left||0),users=(a.approved_by||[]).map(x=>person(x.user||x));
+   const approved=required>0?left<=0:users.length>0;
+   const me=await this.currentUserForRepo(repo);
+   const approvedByMe=!!me&&users.some(u=>String(u).toLowerCase()===String(me).toLowerCase());
+   return {approved,approvedByMe,approvalCount:users.length,approvalsRequired:required,approvalsLeft:left,approvedBy:users};
+  }catch{return {approved:false,approvalCount:0,approvalsRequired:0,approvalsLeft:0,approvedBy:[]};}
+ }
+ async refreshMergeRequestListItem(mr){
+  const repo=await this.repo(mr.repo),project=encodeURIComponent(repo.project);
+  const raw=await this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}`,[],repo.cwd);
+  const fresh=this.normalize(JSON.parse(raw),repo),me=await this.currentUserForRepo(repo);
+  const [activity,approval]=await Promise.all([this.enrichMergeRequestActivity(fresh,repo,me),this.getApprovalStatus(fresh,repo)]);
+  if(approval.approvedByMe){
+   activity.changesSinceReview=0;activity.reviewedHead=fresh.sha||fresh.headSha||activity.reviewedHead||'';
+   const head=activity.reviewedHead;if(head)await this.context.workspaceState.update(this.reviewMarkerKey(fresh,repo),head);
+  }
+  return {...activity,...approval};
+ }
  async getMergeReadiness(mr){
   const repo=await this.repo(mr.repo),project=encodeURIComponent(repo.project);
   const approvalsPromise=this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/approvals`,[],repo.cwd)
