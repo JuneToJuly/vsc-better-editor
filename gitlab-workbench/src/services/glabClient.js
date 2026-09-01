@@ -24,18 +24,18 @@ class GlabClient {
   if(!folders.length)throw new Error('Open a VS Code workspace folder before starting a local review.');
   return path.join(folders[0].uri.fsPath,'.glw');
  }
- async run(args,cwd){
+ async run(args,cwd,timeoutMs){
   const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
   const bin=cfg.get('glabPath','glab'),started=Date.now();
   const label=args[0]==='api'?`api ${args.find(x=>String(x).startsWith('projects/'))||''}`:args.slice(0,3).join(' ');
   try{
-   const {stdout}=await execFile(bin,args,{cwd,env:{...process.env,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1'},maxBuffer:20*1024*1024,windowsHide:true});
+   const {stdout}=await execFile(bin,args,{cwd,env:{...process.env,GLAB_NO_PROMPT:'1',GLAB_PROMPT_DISABLED:'1'},maxBuffer:20*1024*1024,windowsHide:true,...(timeoutMs?{timeout:timeoutMs,killSignal:'SIGKILL'}:{})});
    this.output.appendLine(`[perf] glab ${label} ${Date.now()-started}ms`);
    return stdout.trim();
   }catch(e){this.output.appendLine(`[perf] glab ${label} FAILED ${Date.now()-started}ms`);throw e;}
  }
  async status(){await this.run(['auth','status']); return {mode:'live',authenticated:true};}
- async api(host,endpoint,args=[],cwd){return this.run(['api','--hostname',host,endpoint,...args],cwd);}
+ async api(host,endpoint,args=[],cwd,timeoutMs){return this.run(['api','--hostname',host,endpoint,...args],cwd,timeoutMs);}
  async managedProjects(){
   const values=this.vscode.workspace.getConfiguration('gitlabWorkbench').get('managedProjects',[])||[];
   return values.map(parseProjectUrl).filter(Boolean);
@@ -95,7 +95,7 @@ class GlabClient {
   }catch(e){const error=cleanError(e);this.output.appendLine(`[issue] ${repo.project}: ERROR ${error}`);out.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}}
   return out;
  }
- normalizeIssue(x,repo){return {repo:repo.id,repoName:repo.name,project:repo.project,host:repo.host,iid:Number(x.iid),title:x.title||'(untitled)',author:person(x.author),state:x.state||'opened',labels:Array.isArray(x.labels)?x.labels:[],assignees:(x.assignees||[]).map(a=>a.username||a.name).filter(Boolean),updated:x.updated_at||'',description:x.description||'',webUrl:x.web_url||'',commentCount:Number(x.user_notes_count||0)};}
+ normalizeIssue(x,repo){return {repo:repo.id,repoName:repo.name,project:repo.project,host:repo.host,iid:Number(x.iid),title:x.title||'(untitled)',author:person(x.author),reviewers:(x.reviewers||[]).map(person),state:x.state||'opened',labels:Array.isArray(x.labels)?x.labels:[],assignees:(x.assignees||[]).map(a=>a.username||a.name).filter(Boolean),updated:x.updated_at||'',description:x.description||'',webUrl:x.web_url||'',commentCount:Number(x.user_notes_count||0)};}
  async getIssue(repoId,iid){const repo=await this.repo(repoId);const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${iid}`,[],repo.cwd);return this.normalizeIssue(JSON.parse(raw),repo);}
  async listIssueNotes(issue){const repo=await this.repo(issue.repo);const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}/notes?sort=asc&per_page=100`,[],repo.cwd);return (JSON.parse(raw)||[]).filter(n=>!n.system).map(n=>({id:String(n.id),author:person(n.author),body:n.body||'',created:n.created_at||''}));}
  async addIssueNote(issue,body){const repo=await this.repo(issue.repo);await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}/notes`,['--method','POST','-f',`body=${body}`],repo.cwd);return {message:'Comment added'};}
@@ -103,6 +103,92 @@ class GlabClient {
  async updateIssue(issue,data){const repo=await this.repo(issue.repo);const args=['--method','PUT'];if(data.title!==undefined)args.push('-f',`title=${data.title}`);if(data.description!==undefined)args.push('-f',`description=${data.description}`);if(data.labels!==undefined)args.push('-f',`labels=${data.labels.join(',')}`);if(data.state_event)args.push('-f',`state_event=${data.state_event}`);if(data.assignees!==undefined){const ids=[];for(const u of data.assignees){if(u)ids.push(await this.userId(repo,u));}args.push('-f',`assignee_ids=${ids.join(',')}`);}const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/issues/${issue.iid}`,args,repo.cwd);return this.normalizeIssue(JSON.parse(raw),repo);}
  async userId(repo,username){const raw=await this.api(repo.host,`users?username=${encodeURIComponent(username)}`,[],repo.cwd);const users=JSON.parse(raw)||[];if(!users.length)throw new Error(`GitLab user not found: ${username}`);return users[0].id;}
  async currentUser(){const projects=await this.projectList();if(!projects.length)return null;const r=projects[0];const raw=await this.api(r.host,'user',[],r.cwd);const u=JSON.parse(raw);return u.username||u.name;}
+ watcherSnapshotKey(){return 'gitlabWorkbench.watcherSnapshot.v1';}
+ watcherEventStateKey(){return 'gitlabWorkbench.watcherEventState.v1';}
+ async markWatcherEvent(id,state){const map=this.context.workspaceState.get(this.watcherEventStateKey(),{})||{};map[id]=state;await this.context.workspaceState.update(this.watcherEventStateKey(),map);}
+ async listMergeRequestsForWatchers(){
+  const repos=await this.projectList();
+  const groups=await Promise.all(repos.map(async repo=>{try{
+   this.output.appendLine(`[watchers] ${repo.project}: scanning open MRs`);
+   const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests?state=opened&per_page=${this.vscode.workspace.getConfiguration('gitlabWorkbench').get('perPage',50)}`,[],repo.cwd,15000);
+   const arr=JSON.parse(raw||'[]')||[];
+   const me=await this.currentUserForRepo(repo);
+   const normalized=arr.map(x=>this.normalize(x,repo));
+   return Promise.all(normalized.map(async mr=>{
+    const approval=await this.getApprovalStatus(mr,repo);
+    const reviewedHead=this.context.workspaceState.get(this.reviewMarkerKey(mr,repo),'')||'';
+    return {...mr,...approval,reviewedHead,currentUser:me};
+   }));
+  }catch(e){this.output.appendLine(`[watchers] ${repo.project}: ERROR ${cleanError(e)}`);return [];} }));
+  return groups.flat();
+ }
+ watcherInboxKey(){return 'gitlabWorkbench.watcherInbox.v2';}
+ async scanWatchers(){
+  const started=Date.now(),cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench'),types=new Set(cfg.get('watchers.types',['replies','reviewChanges','authorFeedback','feedbackResolved','approvals','reviewRequests','changesRequested'])||[]),testMode=cfg.get('watchers.testMode',false);
+  this.output.appendLine(`[watchers] refresh begin${testMode?' (TEST)':''}`);
+  const mrs=await this.listMergeRequestsForWatchers(),previous=this.context.workspaceState.get(this.watcherSnapshotKey(),{})||{},states=this.context.workspaceState.get(this.watcherEventStateKey(),{})||{},next={},fresh=[];
+  const inbox=this.context.workspaceState.get(this.watcherInboxKey(),{})||{};
+  const scanOne=async mr=>{
+   const repo=await this.repo(mr.repo),me=mr.currentUser||await this.currentUserForRepo(repo),project=encodeURIComponent(repo.project),k=`${mr.repo}!${mr.iid}`;
+   let discussions=[],reviewerStates=[];
+   try{
+    const [discussionRaw,reviewerRaw]=await Promise.all([
+     this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/discussions?per_page=100`,[],repo.cwd,15000),
+     this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/reviewers`,[],repo.cwd,15000).catch(e=>{this.output.appendLine(`[watchers] ${k}: reviewers: ${cleanError(e)}`);return '[]';})
+    ]);
+    discussions=JSON.parse(discussionRaw||'[]')||[];
+    reviewerStates=(JSON.parse(reviewerRaw||'[]')||[]).map(r=>({user:person(r.user||r),state:String(r.state||'').toLowerCase()}));
+   }catch(e){this.output.appendLine(`[watchers] ${k}: ${cleanError(e)}`);return;}
+   const notes=[];const resolved={};for(const d of discussions){resolved[String(d.id)]=!!d.resolved;for(const n of d.notes||[]){if(!n.system)notes.push({id:String(n.id),discussionId:String(d.id),author:person(n.author),body:n.body||'',created:n.created_at||'',resolvable:!!d.resolvable,resolved:!!d.resolved,path:n.position?.new_path||n.position?.old_path||d.position?.new_path||d.position?.old_path||'',line:Number(n.position?.new_line||n.position?.old_line||d.position?.new_line||d.position?.old_line||0)});}}
+   notes.sort((a,b)=>Date.parse(a.created||0)-Date.parse(b.created||0));const mine=notes.filter(n=>sameUser(n.author,me)),participated=new Set(mine.map(n=>n.discussionId));
+   const approvedBy=Array.isArray(mr.approvedBy)?mr.approvedBy:[];
+   // approvalEpochs makes each absent -> present approval transition a distinct
+   // notification occurrence. Using only reviewer + head meant a re-approval on
+   // the same head reused an old (often Done) event id and was silently hidden.
+   const old=previous[k];
+   const oldApprovedSet=new Set(old?.approvedBy||[]);
+   const oldApprovalEpochs=old?.approvalEpochs||{};
+   const approvalEpochs={};
+   for(const who of approvedBy)approvalEpochs[who]=oldApprovedSet.has(who)?Number(oldApprovalEpochs[who]||1):Number(oldApprovalEpochs[who]||0)+1;
+   const assignedReviewers=Array.isArray(mr.reviewers)?mr.reviewers:[];
+   const reviewRequested=assignedReviewers.some(who=>sameUser(who,me));
+   this.output.appendLine(`[watchers] ${k}: reviewers=[${assignedReviewers.join(', ')}] me=${me||'?'} assigned=${reviewRequested}`);
+   const oldReviewRequested=!!old?.reviewRequested;
+   const reviewRequestEpoch=reviewRequested?(oldReviewRequested?Number(old?.reviewRequestEpoch||1):Number(old?.reviewRequestEpoch||0)+1):Number(old?.reviewRequestEpoch||0);
+   // The MR's overall detailed_merge_status is not a reliable source for who
+   // requested changes. The reviewers endpoint gives the actual reviewer state.
+   const requestingReviewers=reviewerStates.filter(r=>r.state==='requested_changes').map(r=>r.user);
+   const changesRequested=requestingReviewers.length>0;
+   const oldRequesters=new Set(old?.changesRequesters||[]);
+   const changesRequesters=requestingReviewers.map(r=>String(r||''));
+   const newRequester=requestingReviewers.find(r=>!oldRequesters.has(String(r||'')));
+   const changesRequestEpoch=(changesRequested&&!old?.changesRequested)||newRequester?Number(old?.changesRequestEpoch||0)+1:Number(old?.changesRequestEpoch||0);
+   const snap={head:mr.sha||'',noteIds:notes.map(n=>n.id),resolved,updated:mr.updated||'',approvedBy,approvalEpochs,reviewRequested,reviewRequestEpoch,changesRequested,changesRequesters,changesRequestEpoch,reviewed:!!(mr.reviewedHead||mr.approvedByMe||mine.length)};next[k]=snap;if(!old)return;
+   const oldNotes=new Set(old.noteIds||[]);for(const n of notes.filter(n=>!oldNotes.has(n.id))){
+    const selfAllowed=testMode||!sameUser(n.author,me);
+    // A note on my own MR can also be in a discussion I participated in. Emit one
+    // actionable inbox item, preferring the more specific author-feedback event.
+    if(types.has('authorFeedback')&&sameUser(mr.author,me)&&selfAllowed){
+     const positioned=!!n.path;
+     pushWatcher(fresh,states,{kind:positioned?'author-feedback':'author-comment',label:positioned?'New review feedback':'New comment on your MR',mr,actor:n.author,body:n.body,at:n.created,discussionId:n.discussionId,path:n.path,line:n.line,id:`feedback:${k}:${n.id}`});
+    } else if(types.has('replies')&&participated.has(n.discussionId)&&selfAllowed)pushWatcher(fresh,states,{kind:'reply',label:'Reply to your discussion',mr,actor:n.author,body:n.body,at:n.created,discussionId:n.discussionId,path:n.path,line:n.line,id:`reply:${k}:${n.id}`});
+   }
+   if(types.has('reviewChanges')&&old.head&&snap.head&&old.head!==snap.head&&old.reviewed)pushWatcher(fresh,states,{kind:'review-changes',label:'New commits after your review',mr,actor:mr.author,body:`New commits on ${mr.source} → ${mr.target}`,at:mr.updated,id:`head:${k}:${snap.head}`});
+   if(types.has('feedbackResolved'))for(const [id,val] of Object.entries(resolved)){if(val&&old.resolved&&old.resolved[id]===false){const dnotes=notes.filter(n=>n.discussionId===id);if(dnotes.some(n=>sameUser(n.author,me)))pushWatcher(fresh,states,{kind:'resolved',label:'Your feedback was resolved',mr,actor:mr.author,body:dnotes.find(n=>sameUser(n.author,me))?.body||'Discussion resolved',at:mr.updated,discussionId:id,id:`resolved:${k}:${id}:${snap.head}`});}}
+   if(types.has('reviewRequests')&&reviewRequested&&!oldReviewRequested&&(testMode||!sameUser(mr.author,me)))pushWatcher(fresh,states,{kind:'review-request',label:'Review requested',mr,actor:mr.author,body:`${mr.author||'Author'} requested your review of !${mr.iid}`,at:mr.updated,id:`review-request:${k}:${reviewRequestEpoch}`});
+   if(types.has('changesRequested')&&sameUser(mr.author,me)&&newRequester)pushWatcher(fresh,states,{kind:'changes-requested',label:'Changes requested',mr,actor:newRequester,body:`${newRequester} requested changes on !${mr.iid}`,at:mr.updated,id:`changes-requested:${k}:${changesRequestEpoch}`});
+   if(types.has('approvals')&&sameUser(mr.author,me)){
+    const oldApproved=new Set(old.approvedBy||[]);for(const who of approvedBy)if(!oldApproved.has(who)&&(testMode||!sameUser(who,me))){const epoch=snap.approvalEpochs[who]||1;pushWatcher(fresh,states,{kind:'approval',label:'Your MR was approved',mr,actor:who,body:`${who} approved !${mr.iid}`,at:mr.updated,id:`approval:${k}:${who}:${snap.head}:${epoch}`});}
+   }
+  };
+  await Promise.all(mrs.map(scanOne));
+  for(const e of fresh)inbox[e.id]=e;
+  for(const [id,e] of Object.entries(inbox)){e.state=states[id]||e.state||'new';if(e.state==='done')delete inbox[id];}
+  await Promise.all([this.context.workspaceState.update(this.watcherSnapshotKey(),next),this.context.workspaceState.update(this.watcherInboxKey(),inbox)]);
+  const events=Object.values(inbox).sort((a,b)=>Date.parse(b.at||0)-Date.parse(a.at||0));
+  this.output.appendLine(`[watchers] refresh complete: ${events.length} active, ${fresh.length} new (${Date.now()-started}ms)`);
+  return {events,testMode};
+ }
  async listMergeRequests(){
   const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
   const local=cfg.get('discoverLocalRepositories',false)?await this.discoverRepositories():[];
@@ -158,7 +244,7 @@ class GlabClient {
 
    source:pick(x,'source_branch','sourceBranch','source_branch_name')||'',
    target:pick(x,'target_branch','targetBranch','target_branch_name')||'',
-   pipeline:String(pipeline).toLowerCase(),approvals,
+   pipeline:String(pipeline).toLowerCase(),approvals,detailedMergeStatus:pick(x,'detailed_merge_status','detailedMergeStatus')||'',
    conflicts:!!pick(x,'has_conflicts','hasConflicts','conflicts'),
    updated:pick(x,'updated_at','updatedAt')||'',description:pick(x,'description','Description')||'',
    webUrl:pick(x,'web_url','webUrl','url'),diffRefs:pick(x,'diff_refs','diffRefs')||null,files:[]
@@ -533,6 +619,8 @@ function shortRepoKey(repo){
 function repoLabel(mr){return mr.project||mr.repoName||mr.repo||'project';}
 
 function pick(o,...keys){if(!o)return undefined;for(const k of keys)if(o[k]!==undefined&&o[k]!==null)return o[k];return undefined;}
+function sameUser(a,b){return !!a&&!!b&&String(a).toLowerCase()===String(b).toLowerCase();}
+function pushWatcher(out,states,e){e.state=states[e.id]||'new';if(e.state!=='done')out.push(e);}
 function person(v){return typeof v==='string'?v:(v&&(v.username||v.name))||'';}
 function cleanError(e){return String(e.stderr||e.message||e).trim().split(/\r?\n/).slice(0,3).join(' ');}
 function countAdded(diff=''){return String(diff).split(/\r?\n/).filter(l=>l.startsWith('+')&&!l.startsWith('+++')).length;}

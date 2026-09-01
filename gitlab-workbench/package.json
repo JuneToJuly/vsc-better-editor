@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.61",
+  "version": "0.16.78",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -238,6 +238,11 @@
         "command": "gitlabWorkbench.toggleReviewWhitespace",
         "title": "Toggle Review Whitespace",
         "icon": "$(whitespace)"
+      },
+      {
+        "command": "gitlabWorkbench.refreshWatchers",
+        "title": "GitLab Workbench: Refresh Watchers",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -251,6 +256,12 @@
     },
     "views": {
       "gitlabWorkbench": [
+        {
+          "id": "gitlabWorkbench.watchers",
+          "name": "Watchers",
+          "when": "!gitlabWorkbench.reviewActive",
+          "type": "webview"
+        },
         {
           "id": "gitlabWorkbench.mergeRequests",
           "name": "Merge Requests",
@@ -330,6 +341,36 @@
           "type": "boolean",
           "default": false,
           "description": "Whether the People Board tracked-person selection has been explicitly configured."
+        },
+        "gitlabWorkbench.watchers.types": {
+          "type": "array",
+          "default": [
+            "replies",
+            "reviewChanges",
+            "authorFeedback",
+            "feedbackResolved",
+            "approvals",
+            "reviewRequests",
+            "changesRequested"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "replies",
+              "reviewChanges",
+              "authorFeedback",
+              "feedbackResolved",
+              "approvals",
+              "reviewRequests",
+              "changesRequested"
+            ]
+          },
+          "description": "Watcher event types: replies to discussions you participated in, commits after your review, feedback on your MRs, resolution of feedback you left, and approvals on your MRs."
+        },
+        "gitlabWorkbench.watchers.testMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Watcher test mode. When enabled, your own GitLab comments/replies can trigger watcher events so the watcher pipeline can be tested with one account."
         }
       }
     },
@@ -492,6 +533,11 @@
           "command": "gitlabWorkbench.toggleReviewWhitespace",
           "when": "view == gitlabWorkbench.reviewExplorer && gitlabWorkbench.reviewActive",
           "group": "navigation@4"
+        },
+        {
+          "command": "gitlabWorkbench.refreshWatchers",
+          "when": "view == gitlabWorkbench.watchers && !gitlabWorkbench.reviewActive",
+          "group": "navigation@0"
         }
       ],
       "view/item/context": [
