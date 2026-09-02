@@ -7,7 +7,7 @@ const {MrWebviewProvider}=require('./providers/mrWebview');
 const {IssueTreeProvider}=require('./providers/issueTree');
 const {ReviewWebviewProvider}=require('./providers/reviewWebview');
 const {WatcherWebviewProvider}=require('./providers/watcherWebview');
-let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,watcherWebview,commentController,extensionContext; let sourceFeedback={mr:null,discussions:[],threads:[],threadMap:new WeakMap(),activeDiscussionId:null}; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:true,hideResolved:false,expandedDiscussionId:null,ignoreWhitespace:true}; let reviewComments=[];
+let demoClient,liveClient,tree,mrWebview,issueTree,reviewTree,watcherWebview,commentController,extensionContext; let sourceFeedback={mr:null,discussions:[],threads:[],threadMap:new WeakMap(),activeDiscussionId:null}; let review={mr:null,index:0,discussions:[],viewColumn:undefined,worktree:undefined,compositeRoot:undefined,pending:[],commentsCollapsed:true,hideResolved:false,expandedDiscussionId:null,ignoreWhitespace:true,compareMode:'range',compareBase:'',compareHead:'',compareBaseLabel:'Target',compareHeadLabel:'Current',compareLabel:'All changes',commits:[],compareFiles:null}; let reviewComments=[];
 function activate(context){
  extensionContext=context;
  // Review/feedback UI state is transient. Always start from the normal Workbench
@@ -28,6 +28,10 @@ function activate(context){
  const cmd=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,fn));
  cmd('gitlabWorkbench.refresh',()=>{tree.refresh();mrWebview?.refresh();issueTree.refresh();watcherWebview?.refresh();});
  cmd('gitlabWorkbench.refreshWatchers',()=>watcherWebview?.refresh());
+ cmd('gitlabWorkbench.changeReviewBase',async value=>{await changeReviewRange('base',value);});
+ cmd('gitlabWorkbench.changeReviewHead',async value=>{await changeReviewRange('head',value);});
+ cmd('gitlabWorkbench.selectReviewCommit',async (sha,extend)=>{await selectReviewCommit(sha,extend);});
+ cmd('gitlabWorkbench.selectReviewRangeShortcut',async value=>{await selectReviewRangeShortcut(value);});
  cmd('gitlabWorkbench.showOutput',()=>liveClient.output.show(true));
  cmd('gitlabWorkbench.addProject',async()=>{
   const value=await vscode.window.showInputBox({title:'Add GitLab Project',prompt:'Paste an HTTPS or SSH GitLab project URL',placeHolder:'https://gitlab.com/group/project  or  git@gitlab.com:group/project.git',ignoreFocusOut:true});if(!value)return;
@@ -116,7 +120,7 @@ function activate(context){
  cmd('gitlabWorkbench.toggleReviewed',async index=>{if(!review.mr)return;const f=review.mr.files[Number(index)];if(!f)return;await setReviewed(review.mr,f[0],!isReviewed(review.mr,f[0]));reviewTree.refresh();tree.refresh();});
  cmd('gitlabWorkbench.prepareJavaReview',()=>prepareJavaReview());
  cmd('gitlabWorkbench.switchJavaReviewRoot',()=>switchJavaReviewRoot());
- cmd('gitlabWorkbench.finishReview',async()=>{if(!review.mr)return;await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',false);clearRenderedComments();review.mr=null;review.index=0;review.discussions=[];review.pending=[];review.worktree=undefined;review.compositeRoot=undefined;reviewTree.refresh();vscode.window.showInformationMessage('Review session finished. Fast Composite JDT root is left unchanged; switch back when you are ready.');});
+ cmd('gitlabWorkbench.finishReview',async()=>{if(!review.mr)return;await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',false);clearRenderedComments();review.mr=null;review.index=0;review.discussions=[];review.pending=[];review.worktree=undefined;review.compositeRoot=undefined;review.compareFiles=null;reviewTree.refresh();vscode.window.showInformationMessage('Review session finished. Fast Composite JDT root is left unchanged; switch back when you are ready.');});
  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e=>{if(e.affectsConfiguration('gitlabWorkbench')){tree.refresh();mrWebview?.refresh();issueTree.refresh();}}));
 }
 async function action(client,mr,method){try{const r=await client()[method](mr);vscode.window.showInformationMessage(r.message);tree.refresh();if(method==='approve')await mrWebview?.refreshOne(mr);else mrWebview?.refresh();}catch(e){vscode.window.showErrorMessage(String(e.stderr||e.message||e));}}
@@ -275,7 +279,7 @@ async function openMr(client,mr,options={}){
     const right=vscode.Uri.parse(`gitlab-workbench:/feedback-current/${token}/${encodeURIComponent(d.path)}`);
     virtualText.set(left.toString(),data.before||'');virtualText.set(right.toString(),data.current||'');
     const oldSha=String(d.positionHeadSha||'').slice(0,8),head=String(full.diffRefs?.head_sha||full.diffRefs?.headSha||full.sha||full.headSha||'').slice(0,8);
-    await applyReviewDiffWhitespace();await vscode.commands.executeCommand('vscode.diff',left,right,`${d.path} · feedback ${oldSha||'version'} → ${head||'current'}${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
+    await applyReviewDiffWhitespace();await vscode.commands.executeCommand('vscode.diff',left,right,`${d.path} · feedback ${oldSha||'version'} → ${head||'current'}${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:true,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
     return;
    }
    if(m.feedbackOpen){const d=discussions.find(x=>String(x.id)===String(m.feedbackOpen));if(d?.path){try{sourceFeedback.mr=full;sourceFeedback.discussions=discussions;sourceFeedback.activeDiscussionId=d.id;
@@ -370,7 +374,7 @@ async function startReview(client,mr){
    progress.report({message:'Loading review discussions…'});liveClient.log('[review-flow] stage=discussions begin');review.discussions=await loadDiscussions(client,full);review.pending=await loadDraftNotes(client,full);liveClient.log(`[review-flow] stage=discussions complete count=${review.discussions.length} pending=${review.pending.length}`);
   });
  }else {review.discussions=await loadDiscussions(client,full);review.pending=await loadDraftNotes(client,full);}
- liveClient?.log?.('[review-flow] stage=session-state begin'); review.mr=full; review.index=0; review.commentsCollapsed=true; review.expandedDiscussionId=null; review.hideResolved=false; liveClient?.log?.(`[review-flow] stage=session-state complete files=${review.mr.files?.length||0}`); await vscode.commands.executeCommand('setContext','gitlabWorkbench.hideResolvedComments',false); clearRenderedComments(); await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',true); liveClient?.log?.('[review-flow] stage=review-ui active'); reviewTree.beginReview?.();
+ liveClient?.log?.('[review-flow] stage=session-state begin'); review.mr=full; review.index=0; review.commentsCollapsed=true; review.expandedDiscussionId=null; review.hideResolved=false; review.compareMode='range'; review.compareBase=''; review.compareHead=''; review.compareBaseLabel='Target'; review.compareHeadLabel='Current'; review.compareLabel='Target → Current'; review.compareFiles=null; review.commits=await client().listMergeRequestCommits(full).catch(()=>[]); liveClient?.log?.(`[review-flow] stage=session-state complete files=${review.mr.files?.length||0}`); await vscode.commands.executeCommand('setContext','gitlabWorkbench.hideResolvedComments',false); clearRenderedComments(); await vscode.commands.executeCommand('setContext','gitlabWorkbench.reviewActive',true); liveClient?.log?.('[review-flow] stage=review-ui active'); reviewTree.beginReview?.();
  // Composite/JDT preparation is optional. Standard reviews only use the local checkout.
  if(!isDemo() && vscode.workspace.getConfiguration('gitlabWorkbench').get('prepareCompositeRootOnStart',false)){
   liveClient.log('[review-flow] stage=java-root begin (enabled)');
@@ -379,7 +383,71 @@ async function startReview(client,mr){
  }else if(!isDemo()) liveClient.log('[review-flow] stage=java-root skipped (standard checkout mode)');
  liveClient?.log?.('[review-flow] stage=open-first-file begin');if(review.mr.files?.length){await showReviewFile();liveClient?.log?.('[review-flow] stage=open-first-file complete');}else{liveClient?.log?.('[review-flow] stage=open-first-file skipped: MR has no changed files');} await vscode.commands.executeCommand('workbench.view.extension.gitlabWorkbench');await vscode.commands.executeCommand('gitlabWorkbench.reviewExplorer.focus');liveClient?.log?.('[review-flow] Start Review complete');
 }
-async function moveReview(delta){if(!review.mr)return;review.expandedDiscussionId=null;review.index=(review.index+delta+review.mr.files.length)%review.mr.files.length;reviewTree.refresh();await showReviewFile();}
+function reviewRangePoint(value){
+ const refs=review.mr?.diffRefs||{},commits=review.commits||[],target=refs.base_sha||refs.baseSha||'',current=refs.head_sha||refs.headSha||review.mr?.sha||review.mr?.headSha||'';
+ const v=String(value||'');
+ if(v==='target')return {ref:target,label:`Target · ${String(target).slice(0,8)}`};
+ if(v==='current')return {ref:current,label:`Current · ${String(current).slice(0,8)}`};
+ if(v==='reviewed'){const ref=review.mr?.reviewedHead||liveClient?.reviewedHead?.(review.mr)||'';return {ref,label:`Last reviewed · ${String(ref).slice(0,8)}`};}
+ if(v.startsWith('commit:')){const ref=v.slice(7),c=commits.find(x=>String(x.id)===ref);return {ref,label:`${c?.shortId||ref.slice(0,8)} · ${c?.title||'Commit'}`};}
+ return {ref:'',label:'Unknown'};
+}
+async function changeReviewRange(side,value){
+ if(!review.mr)return;
+ const point=reviewRangePoint(value);if(!point.ref){vscode.window.showInformationMessage(`${point.label} is not available for this merge request.`);reviewTree.refresh();return;}
+ if(side==='head'){review.compareHead=point.ref;review.compareHeadLabel=point.label;}
+ else {review.compareBase=point.ref;review.compareBaseLabel=point.label;}
+ const refs=review.mr.diffRefs||{},target=refs.base_sha||refs.baseSha||'',current=refs.head_sha||refs.headSha||review.mr.sha||review.mr.headSha||'';
+ const base=review.compareBase||target,head=review.compareHead||current;
+ review.compareLabel=`${review.compareBaseLabel||'Target'} → ${review.compareHeadLabel||'Current'}`;
+ if(base===target&&head===current)review.compareFiles=null;
+ else if(isDemo())review.compareFiles=review.mr.files||[];
+ else{
+  try{review.compareFiles=await liveClient.getReviewComparisonFiles(review.mr,base,head);}
+  catch(e){review.compareFiles=null;vscode.window.showWarningMessage(`Could not calculate comparison file list: ${String(e.message||e)}`);}
+ }
+ const shown=review.compareFiles||review.mr.files||[],currentPath=(review.mr.files||[])[review.index]?.[0];
+ if(shown.length){const selected=shown.find(f=>f[0]===currentPath)||shown[0],idx=(review.mr.files||[]).findIndex(f=>f[0]===selected[0]);if(idx>=0)review.index=idx;}
+ reviewTree.refresh();if(shown.length)await showReviewFile();
+}
+async function applyReviewRange(base,head,baseLabel,headLabel){
+ if(!review.mr||!base||!head)return;
+ review.compareBase=base;review.compareHead=head;review.compareBaseLabel=baseLabel;review.compareHeadLabel=headLabel;review.compareLabel=`${baseLabel} → ${headLabel}`;
+ const refs=review.mr.diffRefs||{},target=refs.base_sha||refs.baseSha||'',current=refs.head_sha||refs.headSha||review.mr.sha||review.mr.headSha||'';
+ if(base===target&&head===current)review.compareFiles=null;
+ else if(isDemo())review.compareFiles=review.mr.files||[];
+ else{
+  try{review.compareFiles=await liveClient.getReviewComparisonFiles(review.mr,base,head);}
+  catch(e){review.compareFiles=null;vscode.window.showWarningMessage(`Could not calculate comparison file list: ${String(e.message||e)}`);}
+ }
+ const shown=review.compareFiles||review.mr.files||[],currentPath=(review.mr.files||[])[review.index]?.[0];
+ if(shown.length){const selected=shown.find(f=>f[0]===currentPath)||shown[0],idx=(review.mr.files||[]).findIndex(f=>f[0]===selected[0]);if(idx>=0)review.index=idx;}
+ reviewTree.refresh();if(shown.length)await showReviewFile();
+}
+async function selectReviewCommit(sha,extend=false){
+ if(!review.mr)return;const raw=review.commits||[],head=String(review.mr.diffRefs?.head_sha||review.mr.diffRefs?.headSha||review.mr.sha||review.mr.headSha||'');
+ const commits=raw.length&&String(raw[0]?.id)===head?raw.slice().reverse():raw.slice();
+ const i=commits.findIndex(c=>String(c.id)===String(sha));if(i<0)return;
+ const refs=review.mr.diffRefs||{},target=refs.base_sha||refs.baseSha||'',clicked=commits[i],previous=i>0?commits[i-1]:null;
+ if(!extend){
+  await applyReviewRange(previous?.id||target,clicked.id,previous?`${previous.shortId||String(previous.id).slice(0,8)}`:'Target',`${clicked.shortId||String(clicked.id).slice(0,8)}`);
+  return;
+ }
+ // Shift-click extends from the existing selected stack to the clicked commit.
+ // Convert the current base/head into commit boundaries, then select the union.
+ const baseIndex=commits.findIndex(c=>String(c.id)===String(review.compareBase)),headIndex=commits.findIndex(c=>String(c.id)===String(review.compareHead));
+ let first=headIndex>=0?headIndex:i,last=i;
+ if(baseIndex>=0)first=baseIndex+1;
+ first=Math.min(first,i);last=Math.max(headIndex>=0?headIndex:i,i);
+ const before=first>0?commits[first-1]:null,end=commits[last];
+ await applyReviewRange(before?.id||target,end.id,before?`${before.shortId||String(before.id).slice(0,8)}`:'Target',`${end.shortId||String(end.id).slice(0,8)}`);
+}
+async function selectReviewRangeShortcut(value){
+ if(!review.mr)return;const refs=review.mr.diffRefs||{},target=refs.base_sha||refs.baseSha||'',current=refs.head_sha||refs.headSha||review.mr.sha||review.mr.headSha||'';
+ if(value==='reviewed'){const reviewed=review.mr.reviewedHead||liveClient?.reviewedHead?.(review.mr)||'';if(!reviewed){vscode.window.showInformationMessage('No last-reviewed commit is available.');return;}await applyReviewRange(reviewed,current,`Last reviewed · ${String(reviewed).slice(0,8)}`,`Current · ${String(current).slice(0,8)}`);return;}
+ await applyReviewRange(target,current,`Target · ${String(target).slice(0,8)}`,`Current · ${String(current).slice(0,8)}`);
+}
+async function moveReview(delta){if(!review.mr)return;review.expandedDiscussionId=null;const shown=review.compareFiles||review.mr.files||[];if(!shown.length)return;const current=(review.mr.files||[])[review.index]?.[0],at=Math.max(0,shown.findIndex(f=>f[0]===current)),next=shown[(at+delta+shown.length)%shown.length],idx=(review.mr.files||[]).findIndex(f=>f[0]===next[0]);if(idx>=0)review.index=idx;reviewTree.refresh();await showReviewFile();}
 async function showReviewFile(){const f=review.mr.files[review.index];liveClient?.log?.(`[review-flow] opening review file index=${review.index} path=${f?.[0]||'<unknown>'} in normal editor group 1`);await openDemoDiff(review.mr,f);liveClient?.log?.('[review-flow] diff opened; rendering discussion threads');await renderDiscussionThreads(f);vscode.window.setStatusBarMessage(`MR !${review.mr.iid} review: ${review.index+1}/${review.mr.files.length} · ${f[0]} · F7 next · Shift+F7 previous`,5000);}
 async function markReviewed(){if(!review.mr)return;const f=review.mr.files[review.index];if(!f)return;await setReviewed(review.mr,f[0],true);vscode.window.showInformationMessage(`Reviewed ${f[0]} (${review.index+1}/${review.mr.files.length})`);tree.refresh();reviewTree.refresh();if(review.index<review.mr.files.length-1){review.index++;reviewTree.refresh();await showReviewFile();}else{vscode.window.showInformationMessage('All changed files reviewed.');}}
 function reviewVersion(mr){const r=mr?.diffRefs||{};return r.head_sha||r.headSha||mr?.sha||mr?.headSha||'current';}
@@ -435,7 +503,7 @@ async function openSourceFeedback(d){
  if(!sourceFeedback.mr)return;const uri=await findProjectSourceUri(d.path);
  if(!uri){vscode.window.showWarningMessage(`Could not find ${d.path} in the current workspace. Open the project that owns this merge request, then try again.`);return;}
  sourceFeedback.activeDiscussionId=d.id;
- await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:vscode.ViewColumn.One,preview:false,preserveFocus:false});
+ await vscode.commands.executeCommand('vscode.open',uri,{viewColumn:vscode.ViewColumn.One,preview:true,preserveFocus:false});
  const editor=vscode.window.visibleTextEditors.find(x=>x.document.uri.toString()===uri.toString()&&x.viewColumn===vscode.ViewColumn.One)||vscode.window.visibleTextEditors.find(x=>x.document.uri.toString()===uri.toString());
  if(!editor){vscode.window.showWarningMessage(`VS Code did not open ${d.path} in the normal editor area.`);return;}
  await renderSourceFeedbackThreads(editor,d.path);
@@ -564,20 +632,25 @@ async function applyReviewDiffWhitespace(){
 }
 async function openDemoDiff(mr,file){
  if(!file)return;ensureTextProvider();
- const fi=reviewFileInfo(file),token=encodeURIComponent(`${mr.repo}|${mr.iid}|${fi.oldPath}|${fi.newPath}`);
+ const fi=reviewFileInfo(file),compareBase=review.mr===mr?review.compareBase:'',compareHead=review.mr===mr?review.compareHead:'',token=encodeURIComponent(`${mr.repo}|${mr.iid}|${compareBase||'target'}|${compareHead||'current'}|${fi.oldPath}|${fi.newPath}`);
  const left=vscode.Uri.parse(`gitlab-workbench:/base/${token}/${encodeURIComponent(fi.oldPath)}`);
  let right=vscode.Uri.parse(`gitlab-workbench:/head/${token}/${encodeURIComponent(fi.newPath)}`);
  if(!isDemo()){
   try{
-   const v=await liveClient.getReviewFileVersions(mr,file);virtualText.set(left.toString(),v.base);
+   const v=await liveClient.getReviewFileVersions(mr,file,compareBase||undefined,compareHead||undefined);virtualText.set(left.toString(),v.base);
    const session=liveClient.getReviewSession(mr);
-   if(session?.worktree&&fi.newPath){right=vscode.Uri.file(path.join(session.worktree,...String(fi.newPath).split('/')));}
+   const currentHead=String(mr.diffRefs?.head_sha||mr.diffRefs?.headSha||mr.sha||mr.headSha||session?.head||'');
+   const selectedHead=String(compareHead||currentHead);
+   // Only use the real checkout file when the selected range ends at the
+   // current MR HEAD. Historical commit ranges must render both sides from
+   // Git objects or the right side silently becomes the latest worktree.
+   if(session?.worktree&&fi.newPath&&selectedHead===currentHead){right=vscode.Uri.file(path.join(session.worktree,...String(fi.newPath).split('/')));}
    else virtualText.set(right.toString(),v.head);
   }catch(e){vscode.window.showErrorMessage(`Could not load GitLab diff contents: ${String(e.stderr||e.message||e)}`);return;}
  }
  await applyReviewDiffWhitespace();
- const rename=fi.renamed?`${fi.oldPath} → ${fi.newPath}`:fi.newPath;
- await vscode.commands.executeCommand('vscode.diff',left,right,`${rename} (!${mr.iid})${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:false,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
+ const rename=fi.renamed?`${fi.oldPath} → ${fi.newPath}`:fi.newPath;const compareSuffix=(review.mr===mr&&review.compareLabel)?` · ${review.compareLabel}`:'';
+ await vscode.commands.executeCommand('vscode.diff',left,right,`${rename} (!${mr.iid})${compareSuffix}${review.ignoreWhitespace?' · whitespace ignored':''}`,{preview:true,preserveFocus:false,viewColumn:vscode.ViewColumn.One});
  const unified=vscode.workspace.getConfiguration('gitlabWorkbench').get('unifiedDiff',true);
  const sideBySide=vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide',true);
  if(unified && sideBySide){try{await vscode.commands.executeCommand('toggle.diff.renderSideBySide');}catch(e){liveClient?.log?.(`[review-diff] could not toggle unified diff: ${String(e?.message||e)}`);}}

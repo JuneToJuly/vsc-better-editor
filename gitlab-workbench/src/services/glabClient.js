@@ -435,13 +435,36 @@ class GlabClient {
   return {reviewRoot,worktree:session.worktree};
  }
  async hasObjects(gitDir,...shas){for(const sha of shas){try{await this.git(['cat-file','-e',`${sha}^{commit}`],gitDir);}catch{return false;}}return true;}
- async getReviewFileVersions(mr,file){
+ async getReviewComparisonFiles(mr,baseRef,headOverride){
+  const session=this.reviewRepos.get(`${mr.repo}!${mr.iid}`)||await this.prepareReview(mr);
+  const head=headOverride||session.head;
+  if(!baseRef||!head)return mr.files||[];
+  // --numstat gives the exact additions/deletions for the selected comparison.
+  // -z keeps paths lossless; rename entries are represented with two path fields.
+  const raw=await this.git(['diff','--numstat','-z','--find-renames',baseRef,head],session.worktree);
+  const parts=raw.split('\0');const files=[];
+  for(let i=0;i<parts.length;){
+   const stat=parts[i++];if(!stat)continue;
+   const m=/^([^\t]+)\t([^\t]+)\t(.*)$/.exec(stat);if(!m)continue;
+   const added=m[1]==='-'?0:Number(m[1]||0),removed=m[2]==='-'?0:Number(m[2]||0);
+   let oldPath=m[3],newPath=m[3];
+   // With -z, renamed files have an empty pathname in the numstat record,
+   // followed by old and new path fields.
+   if(!oldPath){oldPath=parts[i++]||'';newPath=parts[i++]||oldPath;}
+   const display=newPath||oldPath;
+   files.push([display,added,removed,{old_path:oldPath,new_path:newPath,renamed_file:oldPath!==newPath}]);
+  }
+  this.output.appendLine(`[review-diff] ${mr.repo}!${mr.iid}: ${String(baseRef).slice(0,8)}..${String(head).slice(0,8)} => ${files.length} files`);
+  return files;
+ }
+ async getReviewFileVersions(mr,file,baseOverride,headOverride){
   const session=this.reviewRepos.get(`${mr.repo}!${mr.iid}`)||await this.prepareReview(mr);
   const info=Array.isArray(file)?(file[3]||{}):(file||{});
   const display=Array.isArray(file)?file[0]:(file.path||file.new_path||file.old_path);
   const oldPath=info.old_path||info.oldPath||display,newPath=info.new_path||info.newPath||display;
   const read=async(ref,p)=>{if(!p)return '';try{return await this.git(['show',`${ref}:${p}`],session.gitDir);}catch{return '';}};
-  const [baseText,headText]=await Promise.all([read(session.base,oldPath),read(session.head,newPath)]);
+  const baseRef=baseOverride||session.base,headRef=headOverride||session.head;
+  const [baseText,headText]=await Promise.all([read(baseRef,oldPath),read(headRef,newPath)]);
   return {base:baseText,head:headText,source:session.source};
  }
  async checkout(mr){const r=await this.repo(mr.repo);if(!r.cwd)throw new Error('This project is not cloned locally. Clone or associate a local repository before checkout.');await this.run(['mr','checkout',String(mr.iid)],r.cwd);return {message:`Checked out ${r.name}!${mr.iid}`};}
