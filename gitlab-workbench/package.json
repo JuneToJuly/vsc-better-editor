@@ -2,7 +2,7 @@
   "name": "gitlab-developer-workbench",
   "displayName": "GitLab Developer Workbench",
   "description": "A developer-first GitLab interface for VS Code powered by glab, with a built-in demo backend for testing.",
-  "version": "0.16.87",
+  "version": "0.16.91",
   "engines": {
     "vscode": "^1.95.0"
   },

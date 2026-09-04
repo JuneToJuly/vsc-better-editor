@@ -14,9 +14,9 @@ class MrWebviewProvider {
  }
  async refresh(){
   if(!this.view)return;
-  this.view.webview.html=loading();
-  try{this.all=await this.clientFactory().listMergeRequests();this.render();}
-  catch(e){this.view.webview.html=page(`<div class="empty">Unable to load merge requests<br><small>${esc(String(e.message||e))}</small></div>`);}
+  const client=this.clientFactory(),started=Date.now();client.log?.('[refresh:mr-ui] BEGIN');this.view.webview.html=loading();
+  try{const fs=Date.now();this.all=await client.listMergeRequests();const fetchMs=Date.now()-fs,rs=Date.now();this.render();client.log?.(`[refresh:mr-ui] fetch=${fetchMs}ms render=${Date.now()-rs}ms TOTAL=${Date.now()-started}ms items=${this.all.length}`);}
+  catch(e){client.log?.(`[refresh:mr-ui] FAILED TOTAL=${Date.now()-started}ms ${String(e.message||e)}`);this.view.webview.html=page(`<div class="empty">Unable to load merge requests<br><small>${esc(String(e.message||e))}</small></div>`);}
  }
  render(){if(this.view)this.view.webview.html=render(this.all,this.showApproved);}
  async copyLinks(){

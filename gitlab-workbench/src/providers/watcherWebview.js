@@ -3,9 +3,9 @@ class WatcherWebviewProvider{
  constructor(clientFactory,context){this.clientFactory=clientFactory;this.context=context;this.view=null;this.events=[];this.loading=false;this.testMode=false;this.refreshGeneration=0;}
  resolveWebviewView(view){this.view=view;view.onDidDispose(()=>{if(this.view===view)this.view=null;});view.webview.options={enableScripts:true};view.webview.onDidReceiveMessage(async m=>{if(m.type==='refresh')await this.refresh();if(m.type==='open'&&m.event){await this.markSeen(m.event.id);vscode.commands.executeCommand('gitlabWorkbench.openWatcherEvent',m.event);}if(m.type==='done'&&m.id){await this.setDone(m.id);}if(m.type==='clearAll'){await this.clearAll();}});this.refresh();}
  async refresh(){
-  const generation=++this.refreshGeneration;
+  const generation=++this.refreshGeneration,client=this.clientFactory(),started=Date.now();client.log?.(`[refresh:watcher-ui] BEGIN generation=${generation}`);
   this.loading=true;this.render({events:this.events,testMode:this.testMode,loading:true});
-  try{const result=await this.clientFactory().scanWatchers();if(generation!==this.refreshGeneration)return;this.events=result.events||[];this.testMode=!!result.testMode;this.render(result);}
+  try{const ss=Date.now();const result=await client.scanWatchers();const scanMs=Date.now()-ss;if(generation!==this.refreshGeneration)return;this.events=result.events||[];this.testMode=!!result.testMode;const rs=Date.now();this.render(result);client.log?.(`[refresh:watcher-ui] scan=${scanMs}ms render=${Date.now()-rs}ms TOTAL=${Date.now()-started}ms events=${this.events.length}`);}
   catch(e){if(generation!==this.refreshGeneration)return;this.render({events:this.events,error:String(e.stderr||e.message||e),testMode:this.testMode});}
   finally{if(generation===this.refreshGeneration){this.loading=false;this.render({events:this.events,testMode:this.testMode});}}
  }

@@ -1,4 +1,5 @@
-const cp = require('child_process');
+
+  this.apiGetCache=new Map();this.apiGetTtlMs=3000;const cp = require('child_process');
 const path = require('path');
 const util = require('util');
 const fs = require('fs/promises');
@@ -6,7 +7,7 @@ const crypto = require('crypto');
 const execFile = util.promisify(cp.execFile);
 
 class GlabClient {
- constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.mrActivityCache=new Map();this.output=vscode.window.createOutputChannel('GitLab Workbench');}
+ constructor(vscode,context){this.vscode=vscode;this.context=context;this.repos=new Map();this.reviewRepos=new Map();this.mrActivityCache=new Map();this.apiGetCache=new Map();this.apiGetTtlMs=3000;this.output=vscode.window.createOutputChannel('GitLab Workbench');}
  log(message){this.output.appendLine(message);}
  reviewMarkerKey(mr,repo){return `gitlabWorkbench.reviewedHead:${(repo?.host||'').toLowerCase()}/${(repo?.project||mr.repo||'').toLowerCase()}!${mr.iid}`;}
  reviewedHead(mr,repo){return this.context.workspaceState.get(this.reviewMarkerKey(mr,repo),'');}
@@ -35,7 +36,18 @@ class GlabClient {
   }catch(e){this.output.appendLine(`[perf] glab ${label} FAILED ${Date.now()-started}ms`);throw e;}
  }
  async status(){await this.run(['auth','status']); return {mode:'live',authenticated:true};}
- async api(host,endpoint,args=[],cwd,timeoutMs){return this.run(['api','--hostname',host,endpoint,...args],cwd,timeoutMs);}
+ async api(host,endpoint,args=[],cwd,timeoutMs){
+  const cacheable=!args?.length;
+  if(!cacheable)return this.run(['api','--hostname',host,endpoint,...args],cwd,timeoutMs);
+  const key=`${host}|${endpoint}|${cwd||''}`,now=Date.now(),hit=this.apiGetCache.get(key);
+  if(hit?.promise){this.output.appendLine(`[cache] JOIN ${endpoint}`);return hit.promise;}
+  if(hit&&now-hit.time<this.apiGetTtlMs){this.output.appendLine(`[cache] HIT ${endpoint} age=${now-hit.time}ms`);return hit.value;}
+  if(hit)this.apiGetCache.delete(key);
+  const promise=this.run(['api','--hostname',host,endpoint,...args],cwd,timeoutMs);
+  this.apiGetCache.set(key,{promise,time:now});
+  try{const value=await promise;this.apiGetCache.set(key,{value,time:Date.now()});return value;}
+  catch(e){if(this.apiGetCache.get(key)?.promise===promise)this.apiGetCache.delete(key);throw e;}
+ }
  async managedProjects(){
   const values=this.vscode.workspace.getConfiguration('gitlabWorkbench').get('managedProjects',[])||[];
   return values.map(parseProjectUrl).filter(Boolean);
@@ -86,8 +98,9 @@ class GlabClient {
  async listIssues(){
   const repos=await this.projectList();
   if(!repos.length)return [{kind:'status',repo:'__status__',repoName:'No managed GitLab projects',error:'Add a project URL with GitLab Workbench: Add Project.'}];
-  const out=[];
-  for(const repo of repos){try{
+  const out=[],listStarted=Date.now();this.output.appendLine(`[refresh:mrs] BEGIN repos=${repos.length}`);
+  for(const repo of repos){
+   const repoStarted=Date.now();try{
    this.output.appendLine(`[issue] ${repo.project}: querying ${repo.host}`);
    const endpoint=`projects/${encodeURIComponent(repo.project)}/issues?state=opened&per_page=100&order_by=updated_at&sort=desc`;
    const raw=await this.api(repo.host,endpoint,[],repo.cwd);const arr=raw?JSON.parse(raw):[];this.output.appendLine(`[issue] ${repo.project}: ${arr.length} open`);
@@ -202,18 +215,23 @@ class GlabClient {
   const repos=[...byKey.values()]; this.repos.clear();
   for(const r of repos){r.id=`${r.host}/${r.project}`;r.name=r.project.split('/').pop();this.repos.set(r.id,r);}
   if(!repos.length)return [{kind:'status',repo:'__status__',repoName:'No managed GitLab projects',error:'Add a project URL with GitLab Workbench: Add Project.'}];
-  const out=[];
-  for(const repo of repos){
+  const out=[],listStarted=Date.now();this.output.appendLine(`[refresh:mrs] BEGIN repos=${repos.length}`);
+  const repoResults=await Promise.all(repos.map(async repo=>{ 
+   const repoStarted=Date.now(); 
+   const repoOut=[];
    try{
     this.output.appendLine(`[mr] ${repo.project}: querying ${repo.host}${repo.cwd?` (local: ${repo.cwd})`:' (remote only)'}`);
     const endpoint=`projects/${encodeURIComponent(repo.project)}/merge_requests?state=opened&per_page=${this.vscode.workspace.getConfiguration('gitlabWorkbench').get('perPage',50)}`;
-    const raw=await this.api(repo.host,endpoint,[],repo.cwd);const arr=raw?JSON.parse(raw):[];
-    this.output.appendLine(`[mr] ${repo.project}: ${arr.length} open`);
+    const apiStarted=Date.now();const raw=await this.api(repo.host,endpoint,[],repo.cwd);const listApiMs=Date.now()-apiStarted;const arr=raw?JSON.parse(raw):[];
+    this.output.appendLine(`[mr] ${repo.project}: ${arr.length} open (list=${listApiMs}ms)`);
     if(!arr.length)out.push({repo:repo.id,repoName:repo.name,kind:'empty'});
     const me=await this.currentUserForRepo(repo);
     const normalized=arr.map(x=>this.normalize(x,repo));
+    const enrichStarted=Date.now();
     const enriched=await Promise.all(normalized.map(async mr=>{
-     const [activity,approval]=await Promise.all([this.enrichMergeRequestActivity(mr,repo,me),this.getApprovalStatus(mr,repo)]);
+     const mrStarted=Date.now(),as=Date.now(),activityPromise=this.enrichMergeRequestActivity(mr,repo,me).then(v=>({v,ms:Date.now()-as})),ps=Date.now(),approvalPromise=this.getApprovalStatus(mr,repo).then(v=>({v,ms:Date.now()-ps}));
+     const [ar,pr]=await Promise.all([activityPromise,approvalPromise]),activity=ar.v,approval=pr.v;
+     this.output.appendLine(`[refresh:mr] ${repo.project}!${mr.iid} activity=${ar.ms}ms approval=${pr.ms}ms wall=${Date.now()-mrStarted}ms`);
      if(approval.approvedByMe){
       const head=mr.sha||mr.headSha||mr.diffRefs?.head_sha||mr.diffRefs?.headSha||activity.reviewedHead||'';
       activity.changesSinceReview=0;activity.reviewedHead=head;
@@ -221,9 +239,12 @@ class GlabClient {
      }
      return {...activity,...approval};
     }));
-    out.push(...enriched);
-   }catch(e){const error=cleanError(e);this.output.appendLine(`[mr] ${repo.project}: ERROR ${error}`);out.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}
-  }
+    repoOut.push(...enriched);this.output.appendLine(`[refresh:repo] ${repo.project} enrich=${Date.now()-enrichStarted}ms TOTAL=${Date.now()-repoStarted}ms`);
+   }catch(e){const error=cleanError(e);this.output.appendLine(`[mr] ${repo.project}: ERROR ${error}`);repoOut.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}
+   return repoOut;
+  }));
+  out.push(...repoResults.flat());
+  this.output.appendLine(`[refresh:mrs] TOTAL=${Date.now()-listStarted}ms repos=${repos.length} items=${out.length}`);
   return out;
  }
 

@@ -26,7 +26,7 @@ function activate(context){
  watcherWebview=new WatcherWebviewProvider(client,context); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.watchers',watcherWebview,{webviewOptions:{retainContextWhenHidden:true}}));
  reviewTree=new ReviewWebviewProvider(review,(mr,path)=>isReviewed(mr,path)); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.reviewExplorer',reviewTree,{webviewOptions:{retainContextWhenHidden:true}}));
  const cmd=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,fn));
- cmd('gitlabWorkbench.refresh',()=>{tree.refresh();mrWebview?.refresh();issueTree.refresh();watcherWebview?.refresh();});
+ cmd('gitlabWorkbench.refresh',()=>{const started=Date.now();liveClient?.log?.('[refresh:global] BEGIN fan-out=tree,mrs,issues,watchers');tree.refresh();const mr=mrWebview?.refresh();issueTree.refresh();const watchers=watcherWebview?.refresh();Promise.allSettled([mr,watchers].filter(Boolean)).then(()=>liveClient?.log?.(`[refresh:global] ASYNC COMPLETE ${Date.now()-started}ms`));});
  cmd('gitlabWorkbench.refreshWatchers',()=>watcherWebview?.refresh());
  cmd('gitlabWorkbench.changeReviewBase',async value=>{await changeReviewRange('base',value);});
  cmd('gitlabWorkbench.changeReviewHead',async value=>{await changeReviewRange('head',value);});
