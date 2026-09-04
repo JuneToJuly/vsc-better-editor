@@ -1,5 +1,5 @@
 
-  this.apiGetCache=new Map();this.apiGetTtlMs=3000;const cp = require('child_process');
+  this.apiGetCache=new Map();this.apiGetTtlMs=3000;this.mrListBurst=null;this.rawMrBurst=null;const cp = require('child_process');
 const path = require('path');
 const util = require('util');
 const fs = require('fs/promises');
@@ -120,22 +120,9 @@ class GlabClient {
  watcherEventStateKey(){return 'gitlabWorkbench.watcherEventState.v1';}
  async markWatcherEvent(id,state){const map=this.context.workspaceState.get(this.watcherEventStateKey(),{})||{};map[id]=state;await this.context.workspaceState.update(this.watcherEventStateKey(),map);}
  async listMergeRequestsForWatchers(){
-  const repos=await this.projectList();
-  const groups=await Promise.all(repos.map(async repo=>{try{
-   this.output.appendLine(`[watchers] ${repo.project}: scanning open MRs`);
-   const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests?state=opened&per_page=${this.vscode.workspace.getConfiguration('gitlabWorkbench').get('perPage',50)}`,[],repo.cwd,15000);
-   const arr=JSON.parse(raw||'[]')||[];
-   const me=await this.currentUserForRepo(repo);
-   const normalized=arr.map(x=>this.normalize(x,repo));
-   return Promise.all(normalized.map(async mr=>{
-    const approval=await this.getApprovalStatus(mr,repo);
-    const reviewedHead=this.context.workspaceState.get(this.reviewMarkerKey(mr,repo),'')||'';
-    return {...mr,...approval,reviewedHead,currentUser:me};
-   }));
-  }catch(e){this.output.appendLine(`[watchers] ${repo.project}: ERROR ${cleanError(e)}`);return [];} }));
-  return groups.flat();
- }
- watcherInboxKey(){return 'gitlabWorkbench.watcherInbox.v2';}
+   const batches=await this.listRawOpenMergeRequests(),groups=await Promise.all(batches.map(async ({repo,items})=>{const me=await this.currentUserForRepo(repo);return items.map(x=>{const mr=this.normalize(x,repo),reviewedHead=this.context.workspaceState.get(this.reviewMarkerKey(mr,repo),'')||'';return {...mr,reviewedHead,currentUser:me};});}));return groups.flat();
+  }
+  watcherInboxKey(){return 'gitlabWorkbench.watcherInbox.v2';}
  async scanWatchers(){
   const started=Date.now(),cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench'),types=new Set(cfg.get('watchers.types',['replies','reviewChanges','authorFeedback','feedbackResolved','approvals','reviewRequests','changesRequested'])||[]),testMode=cfg.get('watchers.testMode',false);
   this.output.appendLine(`[watchers] refresh begin${testMode?' (TEST)':''}`);
@@ -145,10 +132,12 @@ class GlabClient {
    const repo=await this.repo(mr.repo),me=mr.currentUser||await this.currentUserForRepo(repo),project=encodeURIComponent(repo.project),k=`${mr.repo}!${mr.iid}`;
    let discussions=[],reviewerStates=[];
    try{
-    const [discussionRaw,reviewerRaw]=await Promise.all([
+    const [discussionRaw,reviewerRaw,approval]=await Promise.all([
      this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/discussions?per_page=100`,[],repo.cwd,15000),
-     this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/reviewers`,[],repo.cwd,15000).catch(e=>{this.output.appendLine(`[watchers] ${k}: reviewers: ${cleanError(e)}`);return '[]';})
+     this.api(repo.host,`projects/${project}/merge_requests/${mr.iid}/reviewers`,[],repo.cwd,15000).catch(e=>{this.output.appendLine(`[watchers] ${k}: reviewers: ${cleanError(e)}`);return '[]';}),
+     this.getApprovalStatus(mr,repo)
     ]);
+    Object.assign(mr,approval||{});
     discussions=JSON.parse(discussionRaw||'[]')||[];
     reviewerStates=(JSON.parse(reviewerRaw||'[]')||[]).map(r=>({user:person(r.user||r),state:String(r.state||'').toLowerCase()}));
    }catch(e){this.output.appendLine(`[watchers] ${k}: ${cleanError(e)}`);return;}
@@ -202,50 +191,27 @@ class GlabClient {
   this.output.appendLine(`[watchers] refresh complete: ${events.length} active, ${fresh.length} new (${Date.now()-started}ms)`);
   return {events,testMode};
  }
+ async listRawOpenMergeRequests(){
+  const now=Date.now(),hit=this.rawMrBurst;
+  if(hit?.promise){this.output.appendLine('[cache] JOIN raw MR list');return hit.promise;}
+  if(hit?.value&&now-hit.time<1500){this.output.appendLine(`[cache] HIT raw MR list age=${now-hit.time}ms`);return hit.value;}
+  const promise=(async()=>{const repos=await this.projectList(),perPage=this.vscode.workspace.getConfiguration('gitlabWorkbench').get('perPage',50);return Promise.all(repos.map(async repo=>{const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests?state=opened&per_page=${perPage}`,[],repo.cwd);return {repo,items:JSON.parse(raw||'[]')||[]};}));})();
+  this.rawMrBurst={promise,time:now};try{const value=await promise;this.rawMrBurst={value,time:Date.now()};return value;}catch(e){if(this.rawMrBurst?.promise===promise)this.rawMrBurst=null;throw e;}
+ }
  async listMergeRequests(){
-  const cfg=this.vscode.workspace.getConfiguration('gitlabWorkbench');
-  const local=cfg.get('discoverLocalRepositories',false)?await this.discoverRepositories():[];
-  const managed=await this.managedProjects();
-  const byKey=new Map();
-  for(const r of managed){byKey.set(`${r.host}/${r.project}`.toLowerCase(),r);}
-  for(const r of local){
-   const parsed=parseProjectUrl(r.remote);
-   if(parsed){const key=`${parsed.host}/${parsed.project}`.toLowerCase();const existing=byKey.get(key);if(existing)existing.cwd=r.cwd;else byKey.set(key,{...parsed,cwd:r.cwd,source:'local'});}
-  }
-  const repos=[...byKey.values()]; this.repos.clear();
-  for(const r of repos){r.id=`${r.host}/${r.project}`;r.name=r.project.split('/').pop();this.repos.set(r.id,r);}
-  if(!repos.length)return [{kind:'status',repo:'__status__',repoName:'No managed GitLab projects',error:'Add a project URL with GitLab Workbench: Add Project.'}];
-  const out=[],listStarted=Date.now();this.output.appendLine(`[refresh:mrs] BEGIN repos=${repos.length}`);
-  const repoResults=await Promise.all(repos.map(async repo=>{ 
-   const repoStarted=Date.now(); 
-   const repoOut=[];
-   try{
-    this.output.appendLine(`[mr] ${repo.project}: querying ${repo.host}${repo.cwd?` (local: ${repo.cwd})`:' (remote only)'}`);
-    const endpoint=`projects/${encodeURIComponent(repo.project)}/merge_requests?state=opened&per_page=${this.vscode.workspace.getConfiguration('gitlabWorkbench').get('perPage',50)}`;
-    const apiStarted=Date.now();const raw=await this.api(repo.host,endpoint,[],repo.cwd);const listApiMs=Date.now()-apiStarted;const arr=raw?JSON.parse(raw):[];
-    this.output.appendLine(`[mr] ${repo.project}: ${arr.length} open (list=${listApiMs}ms)`);
-    if(!arr.length)out.push({repo:repo.id,repoName:repo.name,kind:'empty'});
-    const me=await this.currentUserForRepo(repo);
-    const normalized=arr.map(x=>this.normalize(x,repo));
-    const enrichStarted=Date.now();
-    const enriched=await Promise.all(normalized.map(async mr=>{
-     const mrStarted=Date.now(),as=Date.now(),activityPromise=this.enrichMergeRequestActivity(mr,repo,me).then(v=>({v,ms:Date.now()-as})),ps=Date.now(),approvalPromise=this.getApprovalStatus(mr,repo).then(v=>({v,ms:Date.now()-ps}));
-     const [ar,pr]=await Promise.all([activityPromise,approvalPromise]),activity=ar.v,approval=pr.v;
-     this.output.appendLine(`[refresh:mr] ${repo.project}!${mr.iid} activity=${ar.ms}ms approval=${pr.ms}ms wall=${Date.now()-mrStarted}ms`);
-     if(approval.approvedByMe){
-      const head=mr.sha||mr.headSha||mr.diffRefs?.head_sha||mr.diffRefs?.headSha||activity.reviewedHead||'';
-      activity.changesSinceReview=0;activity.reviewedHead=head;
-      if(head)await this.context.workspaceState.update(this.reviewMarkerKey(mr,repo),head);
-     }
-     return {...activity,...approval};
-    }));
-    repoOut.push(...enriched);this.output.appendLine(`[refresh:repo] ${repo.project} enrich=${Date.now()-enrichStarted}ms TOTAL=${Date.now()-repoStarted}ms`);
-   }catch(e){const error=cleanError(e);this.output.appendLine(`[mr] ${repo.project}: ERROR ${error}`);repoOut.push({repo:repo.id,repoName:repo.name,error,kind:'error'});}
-   return repoOut;
-  }));
-  out.push(...repoResults.flat());
-  this.output.appendLine(`[refresh:mrs] TOTAL=${Date.now()-listStarted}ms repos=${repos.length} items=${out.length}`);
-  return out;
+  const now=Date.now(),hit=this.mrListBurst;
+  if(hit?.promise){this.output.appendLine('[cache] JOIN processed MR list');return hit.promise;}
+  if(hit?.value&&now-hit.time<1500){this.output.appendLine(`[cache] HIT processed MR list age=${now-hit.time}ms`);return hit.value;}
+  const promise=this.listMergeRequestsUncached();this.mrListBurst={promise,time:now};
+  try{const value=await promise;this.mrListBurst={value,time:Date.now()};return value;}
+  catch(e){if(this.mrListBurst?.promise===promise)this.mrListBurst=null;throw e;}
+ }
+ async listMergeRequestsUncached(){
+  const listStarted=Date.now(),batches=await this.listRawOpenMergeRequests(),out=[];this.output.appendLine(`[refresh:mrs] BEGIN repos=${batches.length}`);
+  const groups=await Promise.all(batches.map(async ({repo,items})=>{const repoStarted=Date.now(),me=await this.currentUserForRepo(repo),normalized=items.map(x=>this.normalize(x,repo)),enrichStarted=Date.now();
+   const enriched=await Promise.all(normalized.map(async mr=>{const mrStarted=Date.now(),as=Date.now(),ap=this.enrichMergeRequestActivity(mr,repo,me).then(v=>({v,ms:Date.now()-as})),ps=Date.now(),pp=this.getApprovalStatus(mr,repo).then(v=>({v,ms:Date.now()-ps}));const [ar,pr]=await Promise.all([ap,pp]);this.output.appendLine(`[refresh:mr] ${repo.project}!${mr.iid} activity=${ar.ms}ms approval=${pr.ms}ms wall=${Date.now()-mrStarted}ms`);return {...mr,...ar.v,...pr.v,currentUser:me};}));
+   this.output.appendLine(`[refresh:repo] ${repo.project} enrich=${Date.now()-enrichStarted}ms TOTAL=${Date.now()-repoStarted}ms`);return enriched;
+  }));out.push(...groups.flat());this.output.appendLine(`[refresh:mrs] TOTAL=${Date.now()-listStarted}ms repos=${batches.length} items=${out.length}`);return out;
  }
 
  normalize(x,repo){
