@@ -118,7 +118,7 @@ For diagnostics, run **Semantic Java Completion: Diagnose Current Completion** o
   symbols guarantee member presence.
 - The fixed value / depth-1 / depth-2 graph and fuzzy ranking are unchanged.
 
-## 0.10.7 structured receiver+method fuzzy search
+## 0.10.9 structured receiver+method fuzzy search
 
 - Added an explicit receiver+terminal-method split scorer for shorthand such as
   `ptri -> phase.trim()`, `failse -> failure.setStackTrace()`, and
@@ -130,7 +130,7 @@ For diagnostics, run **Semantic Java Completion: Diagnose Current Completion** o
   implementation fields from leaking back into completion.
 - Fixed value / depth-1 / depth-2 indexing is unchanged.
 
-## 0.10.7 conservative shorthand + symbol visibility repair
+## 0.10.9 conservative shorthand + symbol visibility repair
 
 - Replaced fuzzy receiver/member splitting with strict prefix splitting.
   `ptri -> phase.trim()`, `failse -> failure.setStackTrace()`, and
@@ -140,3 +140,22 @@ For diagnostics, run **Semantic Java Completion: Diagnose Current Completion** o
   so public methods in JDK/decompiled classes are not accidentally discarded.
 - Package-private/private JDK implementation helpers remain excluded.
 - The fixed value / depth-1 / depth-2 graph is unchanged.
+
+## 0.10.9 clean method signatures in completion UI
+
+- Snippet placeholders such as `${1:e}` are no longer used as the visible
+  completion label. They remain only in the inserted snippet so Tab navigation
+  still works.
+- Completion labels now show Java-like method signatures with resolved parameter
+  types and names when available, e.g. `events.add(String e)`.
+- JDT document-symbol fallback now distinguishes zero-argument methods from
+  parameterized methods instead of turning every symbol with parentheses into
+  `(${1:arg})`.
+- Search, ranking, accessibility filtering, and the fixed depth-0/1/2 graph are unchanged.
+
+## 0.10.9 no automatic semicolon for member-intent completions
+
+- Blank-line/member-intent completions now insert only the selected expression
+  or method call.
+- The extension no longer appends `;` automatically, allowing continued typing,
+  chaining, assignment, or manual statement termination.

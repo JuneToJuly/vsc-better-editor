@@ -453,6 +453,51 @@ function symbolKindIsField(kind) {
   return kind === S.Field || kind === S.Property || kind === S.Variable || kind === S.Constant;
 }
 
+
+function parseDocumentSymbolMethod(rawName, detail = '') {
+  const text = String(rawName || '').trim();
+  const open = text.indexOf('(');
+  const close = open >= 0 ? text.lastIndexOf(')') : -1;
+  if (open < 0 || close < open) {
+    return { name: text, params: [], hasSignature: false };
+  }
+
+  const name = text.slice(0, open).trim();
+  const inside = text.slice(open + 1, close).trim();
+  if (!inside) return { name, params: [], hasSignature: true };
+
+  const params = [];
+  const pieces = semantic.splitTopLevel(inside, ',');
+  for (let i = 0; i < pieces.length; i++) {
+    const raw = String(pieces[i] || '').trim();
+    if (!raw) continue;
+
+    // JDT symbol names vary by source/decompiled view:
+    //   add(E)
+    //   add(E e)
+    //   add(int index, E element)
+    // Parse from the right so the last identifier is treated as a parameter
+    // name only when whitespace actually separates it from a Java type.
+    const named = raw.match(/^(.+?)\s+([A-Za-z_$][\w$]*)$/);
+    if (named) {
+      params.push({ type: semantic.normalizeType(named[1]), name: named[2] });
+    } else {
+      params.push({ type: raw, name: `arg${i + 1}` });
+    }
+  }
+  return { name, params, hasSignature: true };
+}
+
+function symbolReturnType(detail) {
+  const d = String(detail || '').trim();
+  if (!d) return '';
+  // Common JDT details include either a plain return type or a compact method
+  // signature. Only accept a simple leading Java-ish type; unknown is safer
+  // than inventing one.
+  const m = d.match(/^([A-Za-z_$][\w$.[\]<>?, ?&]*)\s*(?:$|[-:])/);
+  return m ? semantic.normalizeType(m[1]) : '';
+}
+
 async function documentSymbolMembers(doc, requestedType, token, accessOptions = {}) {
   if (!doc) return [];
   let symbols = [];
@@ -519,23 +564,24 @@ async function documentSymbolMembers(doc, requestedType, token, accessOptions = 
     if (!isMemberAccessible(modifiers, typeKind, accessOptions)) continue;
 
     if (symbolKindIsMethod(child.kind)) {
-      // JDT document symbols don't consistently expose parameter types through
-      // VS Code, but they do give us the authoritative callable member names.
-      // Use a generic call shape; overloads are collapsed later at the UI layer.
-      const hasParens = /\(/.test(rawName);
-      const call = hasParens ? '(${1:arg})' : '()';
-      const key = `method:${name}`;
+      const sig = parseDocumentSymbolMethod(rawName, child.detail);
+      const methodName = sig.name || name;
+      const params = sig.params || [];
+      const call = params.length
+        ? `(${params.map((p, i) => `\${${i + 1}:${p.name || `arg${i + 1}`}}`).join(', ')})`
+        : '()';
+      const key = `method:${methodName}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({
-        name,
+        name: methodName,
         call,
-        type: '',
+        type: symbolReturnType(child.detail),
         kind: 'method',
-        arity: hasParens ? 1 : 0,
-        paramTypes: [],
-        paramNames: [],
-        isSnippet: hasParens,
+        arity: params.length,
+        paramTypes: params.map(p => p.type || ''),
+        paramNames: params.map((p, i) => p.name || `arg${i + 1}`),
+        isSnippet: params.length > 0,
         isStatic: false,
         sourceUri: doc.uri.toString(),
         fromDocumentSymbol: true
@@ -687,4 +733,4 @@ function invalidateSourceUri(uri) {
 
 function clearCache() { cache.clear(); inflight.clear(); }
 
-module.exports = { resolveTypeMembers, parseTypeSource, isMemberAccessible, splitTypeName, candidateJavaFilePatterns, observedMembersForReceiver, clearCache, invalidateSourceUri, genericArguments, substituteType, typeDefinitionDocuments, resolvedMemberIdentityKey, packageNameOf, importedQualifiedType, documentDeclaresQualifiedType, qualifiedTypeIdentity, documentSymbolMembers };
+module.exports = { resolveTypeMembers, parseTypeSource, isMemberAccessible, splitTypeName, candidateJavaFilePatterns, observedMembersForReceiver, clearCache, invalidateSourceUri, genericArguments, substituteType, typeDefinitionDocuments, resolvedMemberIdentityKey, packageNameOf, importedQualifiedType, documentDeclaresQualifiedType, qualifiedTypeIdentity, documentSymbolMembers, parseDocumentSymbolMethod, symbolReturnType };

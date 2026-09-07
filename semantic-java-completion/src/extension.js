@@ -226,9 +226,46 @@ async function ensureGraphDepth(document, baseCandidates, targetDepth, maxSeeds,
   return entry;
 }
 
+
+function simpleDisplayType(type) {
+  const normalized = semantic.normalizeType(type || '');
+  if (!normalized) return '';
+  // Keep useful generic structure but remove java.lang noise in the popup.
+  return normalized
+    .replace(/\bjava\.lang\./g, '')
+    .replace(/\bjava\.util\./g, '');
+}
+
+function methodDisplayParameters(member) {
+  if (!member || member.kind !== 'method') return '';
+  const types = Array.isArray(member.paramTypes) ? member.paramTypes : [];
+  const names = Array.isArray(member.paramNames) ? member.paramNames : [];
+  const arity = Number.isFinite(member.arity) ? member.arity : Math.max(types.length, names.length);
+  const parts = [];
+  for (let i = 0; i < arity; i++) {
+    const type = simpleDisplayType(types[i] || '');
+    const name = String(names[i] || '').trim();
+    if (type && name) parts.push(`${type} ${name}`);
+    else if (type) parts.push(type);
+    else if (name) parts.push(name);
+    else parts.push(`arg${i + 1}`);
+  }
+  return parts.join(', ');
+}
+
+function cleanMemberDisplayExpression(state, member) {
+  const receiver = String(state?.expression || state?.root || '').trim();
+  if (!member) return receiver;
+  if (member.kind === 'method') {
+    return `${receiver}.${member.name}(${methodDisplayParameters(member)})`;
+  }
+  return `${receiver}.${member.name}`;
+}
+
 function makeGraphCandidate(document, state, member, expression, depth) {
   return {
     name: expression,
+    displayLabel: cleanMemberDisplayExpression(state, member),
     matchName: member.name,
     matchNames: [
       `${state.root}${member.name}`, `${state.expression}${member.name}`,
@@ -239,6 +276,9 @@ function makeGraphCandidate(document, state, member, expression, depth) {
     insertText: expression,
     isSnippet: !!member.isSnippet,
     type: member.type,
+    paramTypes: Array.isArray(member.paramTypes) ? [...member.paramTypes] : [],
+    paramNames: Array.isArray(member.paramNames) ? [...member.paramNames] : [],
+    arity: member.arity,
     kind: member.kind === 'field' ? 'receiverField' : 'receiverMethod',
     root: state.root,
     lineDistance: state.lineDistance,
@@ -798,11 +838,13 @@ async function provideMemberIntentCompletionItems(document, position, token, cfg
 }
 
 function makeMemberIntentCompletion(document, position, candidate, prefix, index) {
-  const item = new vscode.CompletionItem(candidate.name, vscode.CompletionItemKind.Method);
-  const lineBefore = document.lineAt(position.line).text.slice(0, position.character);
-  const isWholeStatement = /^\s*[A-Za-z_$][\w$]*$/.test(lineBefore);
+  const visibleLabel = candidate.displayLabel || candidate.name;
+  const item = new vscode.CompletionItem(visibleLabel, vscode.CompletionItemKind.Method);
   const inserted = candidate.insertText || candidate.name;
-  const finalText = isWholeStatement ? `${inserted};` : inserted;
+  // Do not terminate blank-line/member-intent completions. Completion should
+  // insert only the selected expression/call and leave statement punctuation
+  // to the user so they can continue chaining or typing naturally.
+  const finalText = inserted;
   item.insertText = candidate.isSnippet ? new vscode.SnippetString(finalText) : finalText;
   // Explicitly replace the bare intent prefix (`getM`) with the full reachable
   // expression. Relying on VS Code's default completion range is inconsistent
@@ -819,7 +861,7 @@ function makeMemberIntentCompletion(document, position, candidate, prefix, index
   // broad candidates as the user keeps typing.
   item.filterText = candidate.filterAlias || candidate.matchName || candidate.name;
   item.detail = `${candidate.type || '?'}  • reachable from ${candidate.root || 'in-scope value'}`;
-  item.documentation = new vscode.MarkdownString(`Member-intent completion: \`${candidate.name}\` matches \`${prefix}\`.`);
+  item.documentation = new vscode.MarkdownString(`Member-intent completion: \`${candidate.displayLabel || candidate.name}\` matches \`${prefix}\`.`);
   // No custom cross-provider sort key: let VS Code rank this alongside JDT by
   // the user's typed text. filterText carries the intent (e.g. getM).
   // Bare semantic intent is explicitly what the user typed for. Keep these
@@ -997,7 +1039,7 @@ async function buildContext(document, position) {
 }
 
 function makeSemanticCompletion(candidate, ctx, index) {
-  const label = candidate.name;
+  const label = candidate.displayLabel || candidate.name;
   const item = new vscode.CompletionItem(
     label,
     (candidate.kind === 'method' || candidate.kind === 'receiverMethod') ? vscode.CompletionItemKind.Method :

@@ -2,7 +2,7 @@
   "name": "semantic-java-completion",
   "displayName": "Semantic Java Completion",
   "description": "Intent-aware Java completion using JDT-backed type/member resolution, recursive scope-graph search, IntelliJ-style postfix/double-dot commands, and cursor-aware introduce refactoring.",
-  "version": "0.10.7",
+  "version": "0.10.9",
   "publisher": "local",
   "engines": {
     "vscode": "^1.95.0"
