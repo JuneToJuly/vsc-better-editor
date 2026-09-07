@@ -1,7 +1,7 @@
 const vscode=require('vscode');
 
 class MrWebviewProvider {
- constructor(clientFactory){this.clientFactory=clientFactory;this.view=null;this.all=[];this.showApproved=false;}
+ constructor(clientFactory,context){this.clientFactory=clientFactory;this.context=context;this.view=null;this.all=[];this.showApproved=false;this.foldState=context?.workspaceState.get('gitlabWorkbench.mrFoldState.v1',{})||{};}
  resolveWebviewView(view){
   this.view=view;view.webview.options={enableScripts:true};
   view.webview.onDidReceiveMessage(m=>{
@@ -9,6 +9,7 @@ class MrWebviewProvider {
    if(m.type==='review'&&m.mr)vscode.commands.executeCommand('gitlabWorkbench.reviewMr',m.mr);
    if(m.type==='toggleApproved'){this.showApproved=!this.showApproved;this.render();}
    if(m.type==='copyLinks')this.copyLinks();
+   if(m.type==='fold'&&m.key){this.foldState[m.key]=!!m.open;void this.context?.workspaceState.update('gitlabWorkbench.mrFoldState.v1',this.foldState);}
   });
   this.refresh();
  }
@@ -18,7 +19,7 @@ class MrWebviewProvider {
   try{const fs=Date.now();this.all=await client.listMergeRequests();const fetchMs=Date.now()-fs,rs=Date.now();this.render();client.log?.(`[refresh:mr-ui] fetch=${fetchMs}ms render=${Date.now()-rs}ms TOTAL=${Date.now()-started}ms items=${this.all.length}`);}
   catch(e){client.log?.(`[refresh:mr-ui] FAILED TOTAL=${Date.now()-started}ms ${String(e.message||e)}`);this.view.webview.html=page(`<div class="empty">Unable to load merge requests<br><small>${esc(String(e.message||e))}</small></div>`);}
  }
- render(){if(this.view)this.view.webview.html=render(this.all,this.showApproved);}
+ render(){if(this.view)this.view.webview.html=render(this.all,this.showApproved,this.foldState);}
  async copyLinks(){
   const all=this.all.filter(x=>!x.kind);
   if(!all.length){vscode.window.showInformationMessage('No merge requests available.');return;}
@@ -38,7 +39,7 @@ class MrWebviewProvider {
   }catch{await this.refresh();}
  }
 }
-function render(all,showApproved=false){
+function render(all,showApproved=false,foldState={}){
  const allMrs=all.filter(x=>!x.kind),special=all.filter(x=>x.kind==='error');
  const approvedCount=allMrs.filter(m=>m.approved).length;
  const mrs=showApproved?allMrs:allMrs.filter(m=>!m.approved);
@@ -49,16 +50,17 @@ function render(all,showApproved=false){
  let html=`<div class="mr-toolbar"><span class="toolbar-spacer"></span><button class="filter-toggle" data-copy-links>Copy MR links</button><button class="filter-toggle ${showApproved?'active':''}" data-toggle-approved>${showApproved?'Hide approved':`Show approved${approvedCount?` (${approvedCount})`:''}`}</button></div>`;
  if(reviews.length){
   const changed=reviews.filter(m=>Number(m.changesSinceReview ?? m.changesSinceMyComment ?? 0)>0).length;
-  html+=`<details open class="section"><summary><span class="chev"></span><span class="eye">◉</span><b>My Reviews</b><span class="badge">${reviews.length} open</span>${changed?`<span class="badge changed">${changed} changed</span>`:''}</summary>
-   <div class="section-body">${[...reviewGroups.values()].map(project).join('')}</div></details>`;
+  html+=`<details ${isOpen(foldState,'section:my-reviews')?'open':''} data-fold-key="section:my-reviews" class="section"><summary><span class="chev"></span><span class="eye">◉</span><b>My Reviews</b><span class="badge">${reviews.length} open</span>${changed?`<span class="badge changed">${changed} changed</span>`:''}</summary>
+   <div class="section-body">${[...reviewGroups.values()].map(g=>project(g,foldState,'reviews')).join('')}</div></details>`;
  }
- for(const g of groups.values())html+=project(g);
+ for(const g of groups.values())html+=project(g,foldState,'other');
  if(!mrs.length&&!special.length)html='<div class="empty">No open merge requests.</div>';
  if(special.length)html+=special.map(x=>`<div class="empty">${esc(x.error||x.repoName||'GitLab query failed')}</div>`).join('');
  return page(html);
 }
+function isOpen(state,key){return state[key]!==false;}
 function group(items){const m=new Map();for(const mr of items){const k=mr.repo||mr.repoName||'Project';if(!m.has(k))m.set(k,{name:mr.repoName||k,items:[]});m.get(k).items.push(mr);}return m;}
-function project(g){return `<details open class="project"><summary><span class="chev"></span><span class="repo">▣</span><b>${esc(g.name)}</b><span class="badge">${g.items.length} open</span></summary><div class="cards">${g.items.map(card).join('')}</div></details>`;}
+function project(g,foldState={},section='other'){const fk=`project:${section}:${g.name}`;return `<details ${isOpen(foldState,fk)?'open':''} data-fold-key="${esc(fk)}" class="project"><summary><span class="chev"></span><span class="repo">▣</span><b>${esc(g.name)}</b><span class="badge">${g.items.length} open</span></summary><div class="cards">${g.items.map(card).join('')}</div></details>`;}
 function card(mr){
  const changed=Number(mr.changesSinceReview ?? mr.changesSinceMyComment ?? 0),age=ageText(mr.created);
  const cls=mr.approved?'approved':changed?'warn':mr.pipeline==='failed'?'bad':'normal';
@@ -87,6 +89,7 @@ const vscode=acquireVsCodeApi();
 document.querySelectorAll('.card').forEach(c=>c.addEventListener('click',()=>{try{vscode.postMessage({type:'open',mr:JSON.parse(decodeURIComponent(c.dataset.mr))})}catch{}}));
 document.querySelector('[data-toggle-approved]')?.addEventListener('click',()=>vscode.postMessage({type:'toggleApproved'}));
 document.querySelector('[data-copy-links]')?.addEventListener('click',()=>vscode.postMessage({type:'copyLinks'}));
+document.querySelectorAll('details[data-fold-key]').forEach(d=>d.addEventListener('toggle',()=>vscode.postMessage({type:'fold',key:d.dataset.foldKey,open:d.open})));
 </script></body></html>`}
 function loading(){return page('<div class="empty">Loading merge requests…</div>')}
 function shareSummary(text){const s=String(text||'').replace(/\r/g,'').split(/\n\s*\n/)[0].replace(/[#>*_`~]/g,'').replace(/\s+/g,' ').trim();return s.length>220?s.slice(0,217).trimEnd()+'...':s;}

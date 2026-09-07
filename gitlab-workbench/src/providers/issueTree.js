@@ -1,21 +1,24 @@
 const vscode=require('vscode');
 class IssueTreeProvider{
- constructor(clientFactory){this.clientFactory=clientFactory;this.filter={type:'all',label:'All'};this.search='';this.mode='board';this._onDidChangeTreeData=new vscode.EventEmitter();this.onDidChangeTreeData=this._onDidChangeTreeData.event;}
+ constructor(clientFactory,context){this.clientFactory=clientFactory;this.context=context;this.filter={type:'all',label:'All'};this.search='';this.mode='board';this.foldState=context?.workspaceState.get('gitlabWorkbench.issueFoldState.v1',{})||{};this._onDidChangeTreeData=new vscode.EventEmitter();this.onDidChangeTreeData=this._onDidChangeTreeData.event;}
  refresh(){this._onDidChangeTreeData.fire();}
  setFilter(filter){this.filter=filter||{type:'all',label:'All'};this.refresh();}
  setSearch(value){this.search=String(value||'').trim();this.refresh();}
  setMode(mode){this.mode=mode==='projects'?'projects':'board';this.refresh();}
+ foldKey(el){if(el.kind==='repo')return `repo:${el.repo}`;if(el.kind==='person')return `person:${el.name}`;if(el.kind==='statusGroup')return `status:${el.owner||''}:${el.key}`;return '';}
+ setExpanded(el,open){const k=this.foldKey(el);if(!k)return;this.foldState[k]=!!open;void this.context?.workspaceState.update('gitlabWorkbench.issueFoldState.v1',this.foldState);}
+ collapseState(el){const k=this.foldKey(el);return this.foldState[k]===false?vscode.TreeItemCollapsibleState.Collapsed:vscode.TreeItemCollapsibleState.Expanded;}
  async getChildren(element){
   if(!element){const c=this.clientFactory();let issues=await c.listIssues();const special=issues.filter(i=>i.kind);issues=issues.filter(i=>!i.kind&&matchesFilter(i,this.filter)&&matchesSearch(i,this.search));if(this.mode==='projects')return projectRoots(issues,special);let mrs=[];try{mrs=(await c.listMergeRequests()).filter(m=>!m.kind&&!m.error);}catch{}return boardRoots(issues,special,mrs);}
   if(element.kind==='repo')return element.items.map(issue=>wrapIssue(issue));
-  if(element.kind==='person')return element.statuses.map(s=>({kind:'statusGroup',...s}));
+  if(element.kind==='person')return element.statuses.map(s=>({kind:'statusGroup',owner:element.name,...s}));
   if(element.kind==='statusGroup')return element.items.map(item=>item.__mr?{kind:'mr',mr:item}:{kind:'issue',issue:item});
   return [];
  }
  getTreeItem(el){
-  if(el.kind==='repo'){const good=el.items.filter(x=>!x.kind);const t=new vscode.TreeItem(el.name,vscode.TreeItemCollapsibleState.Expanded);t.description=`${good.length} · ${this.filter.label}`;t.tooltip=el.repo;t.iconPath=new vscode.ThemeIcon('repo');return t;}
-  if(el.kind==='person'){const t=new vscode.TreeItem(el.name,vscode.TreeItemCollapsibleState.Expanded);t.description=`${el.count} task${el.count===1?'':'s'}`;t.tooltip=`Issues assigned to ${el.name}`;t.iconPath=new vscode.ThemeIcon(el.unassigned?'person':'account');return t;}
-  if(el.kind==='statusGroup'){const t=new vscode.TreeItem(el.label,vscode.TreeItemCollapsibleState.Expanded);t.description=String(el.items.length);t.iconPath=new vscode.ThemeIcon(statusIcon(el.key));return t;}
+  if(el.kind==='repo'){const good=el.items.filter(x=>!x.kind);const t=new vscode.TreeItem(el.name,this.collapseState(el));t.id=`issue-repo:${el.repo}`;t.description=`${good.length} · ${this.filter.label}`;t.tooltip=el.repo;t.iconPath=new vscode.ThemeIcon('repo');return t;}
+  if(el.kind==='person'){const t=new vscode.TreeItem(el.name,this.collapseState(el));t.id=`issue-person:${el.name}`;t.description=`${el.count} task${el.count===1?'':'s'}`;t.tooltip=`Issues assigned to ${el.name}`;t.iconPath=new vscode.ThemeIcon(el.unassigned?'person':'account');return t;}
+  if(el.kind==='statusGroup'){const t=new vscode.TreeItem(el.label,this.collapseState(el));t.id=`issue-status:${el.owner||''}:${el.key}`;t.description=String(el.items.length);t.iconPath=new vscode.ThemeIcon(statusIcon(el.key));return t;}
   if(el.kind==='mr'){const m=el.mr;const t=new vscode.TreeItem(`!${m.iid}  ${m.title}`,vscode.TreeItemCollapsibleState.None);t.description=[m.repoName||m.repo].filter(Boolean).join(' · ');t.iconPath=new vscode.ThemeIcon(m.pipeline==='failed'?'error':m.pipeline==='running'?'sync~spin':'git-pull-request');t.command={command:'gitlabWorkbench.openMr',title:'Open Merge Request',arguments:[m]};return t;}
   if(el.kind==='empty'){const t=new vscode.TreeItem('No open issues',vscode.TreeItemCollapsibleState.None);t.iconPath=new vscode.ThemeIcon('check');return t;}
   if(el.kind==='status'){const t=new vscode.TreeItem(el.issue.repoName||'GitLab Workbench status',vscode.TreeItemCollapsibleState.None);t.description='status';t.tooltip=el.issue.error||'';t.iconPath=new vscode.ThemeIcon('info');return t;}

@@ -21,8 +21,8 @@ function activate(context){
   if(hit)await renderSourceFeedbackThreads(editor,hit.path);else clearSourceFeedbackThreads();
  }));
  const client=()=>vscode.workspace.getConfiguration('gitlabWorkbench').get('demoMode',true)?demoClient:liveClient;
- tree=new MrTreeProvider(client); mrWebview=new MrWebviewProvider(client); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.mergeRequests',mrWebview,{webviewOptions:{retainContextWhenHidden:true}}));
- issueTree=new IssueTreeProvider(client); context.subscriptions.push(vscode.window.registerTreeDataProvider('gitlabWorkbench.issues',issueTree));
+ tree=new MrTreeProvider(client); mrWebview=new MrWebviewProvider(client,context); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.mergeRequests',mrWebview,{webviewOptions:{retainContextWhenHidden:true}}));
+ issueTree=new IssueTreeProvider(client,context); const issueView=vscode.window.createTreeView('gitlabWorkbench.issues',{treeDataProvider:issueTree}); context.subscriptions.push(issueView); context.subscriptions.push(issueView.onDidExpandElement(e=>issueTree.setExpanded(e.element,true)),issueView.onDidCollapseElement(e=>issueTree.setExpanded(e.element,false)));
  watcherWebview=new WatcherWebviewProvider(client,context); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.watchers',watcherWebview,{webviewOptions:{retainContextWhenHidden:true}}));
  reviewTree=new ReviewWebviewProvider(review,(mr,path)=>isReviewed(mr,path)); context.subscriptions.push(vscode.window.registerWebviewViewProvider('gitlabWorkbench.reviewExplorer',reviewTree,{webviewOptions:{retainContextWhenHidden:true}}));
  const cmd=(name,fn)=>context.subscriptions.push(vscode.commands.registerCommand(name,fn));
@@ -558,6 +558,7 @@ async function resolveDiscussion(client,arg){
 }
 async function addReviewComment(client){
  if(!review.mr){vscode.window.showWarningMessage('Start a merge request review first.');return;}
+ if(review.compareMode!=='range'||review.compareBase||review.compareHead){vscode.window.showWarningMessage('Historical comparison — switch to All MR changes (Target → Current HEAD) to comment.');return;}
  const editor=vscode.window.activeTextEditor;
  if(!editor){vscode.window.showWarningMessage('Place the cursor on a review diff line first.');return;}
  const session=liveClient?.getReviewSession?.(review.mr);const isVirtualHead=editor.document.uri.scheme==='gitlab-workbench'&&editor.document.uri.path.includes('/head/');const isWorktreeHead=!isDemo()&&session?.worktree&&editor.document.uri.scheme==='file'&&path.resolve(editor.document.uri.fsPath).startsWith(path.resolve(session.worktree)+path.sep);
@@ -568,8 +569,8 @@ async function addReviewComment(client){
  try{
   if(!isDemo()){
    const patch=file[3]?.diff||'';
-   const position=mapNewLineToGitLabPosition(patch,line+1);
-   if(!position){vscode.window.showWarningMessage(`Line ${line+1} is not part of a GitLab MR diff hunk. Choose a line that is inside one of the GitLab diff hunks.`);return;}
+   let position=mapNewLineToGitLabPosition(patch,line+1);
+   if(!position)position={kind:'added',newLine:line+1};
    await client().addDraftReviewComment(review.mr,file,position,body);
    review.pending=await loadDraftNotes(client,review.mr);
    reviewTree.refresh();await renderDiscussionThreads(file);
