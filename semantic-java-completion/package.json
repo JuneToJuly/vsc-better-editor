@@ -1,0 +1,122 @@
+{
+  "name": "semantic-java-completion",
+  "displayName": "Semantic Java Completion",
+  "description": "Intent-aware Java completion using JDT-backed type/member resolution, recursive scope-graph search, IntelliJ-style postfix/double-dot commands, and cursor-aware introduce refactoring.",
+  "version": "0.10.7",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:java"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Semantic Java Completion",
+      "properties": {
+        "semanticJavaCompletion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable expected-type-aware Java completion suggestions."
+        },
+        "semanticJavaCompletion.minimumPrefixLength": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Minimum typed identifier prefix before semantic suggestions are emitted."
+        },
+        "semanticJavaCompletion.includeFields": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include class fields as semantic completion candidates."
+        },
+        "semanticJavaCompletion.includeMethods": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include methods whose declared return type matches the expected type."
+        },
+        "semanticJavaCompletion.maxSuggestions": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of semantic suggestions injected for one completion request."
+        },
+        "semanticJavaCompletion.receiverSearchDepth": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "How many zero-argument member hops to explore from in-scope variables when looking for expressions that produce the expected type. Set to 0 to disable receiver-expression discovery."
+        },
+        "semanticJavaCompletion.maxReceiverSeeds": {
+          "type": "number",
+          "default": 64,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of method-scope variables/fields preindexed as roots for recursive semantic expression discovery."
+        },
+        "semanticJavaCompletion.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write semantic completion diagnostics to the Semantic Java Completion output channel."
+        },
+        "semanticJavaCompletion.postfix.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable IntelliJ-style Java postfix completion templates such as .new, .out, .var, .if, and .for."
+        },
+        "semanticJavaCompletion.postfix.disabledTemplates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Postfix template keys to disable (for example: [\"fori\", \"optional\"])."
+        },
+        "semanticJavaCompletion.includeConstruction": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include new ExpectedType(...) as an intent-aware completion candidate when the expected type looks constructible."
+        },
+        "semanticJavaCompletion.commandCompletion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable IntelliJ-style double-dot command completion such as expression.. for discoverable postfix and refactoring actions."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "semanticJavaCompletion.showContext",
+        "title": "Semantic Java Completion: Show Current Context"
+      },
+      {
+        "command": "semanticJavaCompletion.diagnoseCurrentCompletion",
+        "title": "Semantic Java Completion: Diagnose Current Completion"
+      },
+      {
+        "command": "semanticJavaCompletion.showDebugOutput",
+        "title": "Semantic Java Completion: Show Debug Output"
+      },
+      {
+        "command": "semanticJavaCompletion.introduceVariable",
+        "title": "Semantic Java Completion: Introduce Variable"
+      },
+      {
+        "command": "semanticJavaCompletion.introduceField",
+        "title": "Semantic Java Completion: Introduce Field"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node test/semantic.test.js && node test/postfix.test.js && node test/commandCompletion.test.js && node test/introduce.test.js && node test/scopeIndex.test.js && node test/memberResolver.test.js"
+  },
+  "devDependencies": {}
+}
