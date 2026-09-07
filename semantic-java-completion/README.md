@@ -159,3 +159,36 @@ For diagnostics, run **Semantic Java Completion: Diagnose Current Completion** o
   or method call.
 - The extension no longer appends `;` automatically, allowing continued typing,
   chaining, assignment, or manual statement termination.
+
+## 0.10.12 receiver-field visibility fix
+
+- JDT document-symbol fallback no longer leaks synthetic/private backing fields
+  from external receiver types.
+- In particular, Java record internals such as `reservation.sku` are not emitted;
+  the legal record accessor `reservation.sku()` remains available.
+- Symbol-only fields are admitted only when their own declaration is explicitly
+  public. Normal source parsing continues to handle legitimately accessible
+  fields.
+- Ranking, fuzzy search, method signatures, and the fixed depth-0/1/2 graph are unchanged.
+
+## 0.10.12 receiver backing-field filtering
+
+- Source parsing still models Java accessibility accurately, including fields
+  legally accessible through package/nestmate rules.
+- The resolved member surface used by semantic receiver completion now removes
+  every non-public field before caching and graph construction.
+- Record backing state such as `reservation.sku`, `reservation.quantity`, and
+  `reservation.sequence` is removed; public accessors `sku()`, `quantity()`, and
+  `sequence()` remain.
+- Methods, fuzzy ranking, display signatures, and the fixed depth-0/1/2 graph are unchanged.
+
+## 0.10.12 eliminate DocumentSymbol field leakage
+
+- Document-symbol fallback no longer contributes fields to receiver completion.
+- JDT can report record components/backing fields as field symbols on the same
+  line as a `public record` declaration, which made private components appear as
+  `request.lines`, `request.customerId`, `reservation.sku`, etc.
+- Explicit public fields are still discovered through normal source parsing.
+- Document symbols remain a fallback for methods, where they are needed for
+  JDK/decompiled APIs.
+- Ranking, fuzzy matching, signatures, and fixed depth-0/1/2 behavior are unchanged.

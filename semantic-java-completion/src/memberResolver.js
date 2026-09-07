@@ -173,7 +173,16 @@ function parseTypeSource(text, requestedType, options = {}) {
     const key = `${name}:${type}`;
     if (!type || seen.has(key)) continue;
     seen.add(key);
-    members.push({ name, call: '', type, kind: 'field', arity: 0, isStatic: /\bstatic\b/.test(modifiers), typeOffset: open + 1 + m.index + Math.max(0, m[0].indexOf(m[2])) });
+    members.push({
+      name,
+      call: '',
+      type,
+      kind: 'field',
+      arity: 0,
+      isStatic: /\bstatic\b/.test(modifiers),
+      isPublic: /\bpublic\b/.test(modifiers),
+      typeOffset: open + 1 + m.index + Math.max(0, m[0].indexOf(m[2]))
+    });
   }
 
   const parents = [];
@@ -587,19 +596,17 @@ async function documentSymbolMembers(doc, requestedType, token, accessOptions = 
         fromDocumentSymbol: true
       });
     } else if (symbolKindIsField(child.kind)) {
-      const key = `field:${name}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({
-        name,
-        call: '',
-        type: '',
-        kind: 'field',
-        arity: 0,
-        isStatic: false,
-        sourceUri: doc.uri.toString(),
-        fromDocumentSymbol: true
-      });
+      // Do not synthesize receiver fields from DocumentSymbol at all.
+      //
+      // JDT exposes record components/private backing fields as field-like
+      // symbols, and their selection range can sit on the `public record ...`
+      // declaration line. Inferring visibility from that line incorrectly turns
+      // `request.lines` / `reservation.sku` into public API.
+      //
+      // Explicit public fields are already discovered by parseTypeSource(), so
+      // the symbol fallback is only necessary for METHODS that the source parser
+      // misses (notably JDK/decompiled classes).
+      continue;
     }
   }
   return out;
@@ -711,8 +718,19 @@ async function resolveTypeMembers(document, type, token, depth = 0, visiting = n
     // do not overwrite a successful entry and do not let an anchored failure poison
     // the type globally. Anchored retries are specifically how recursive graph hops
     // recover JDK/dependency types from their declaration tokens.
-    if (all.length > 0 || (!Number.isFinite(options.anchorOffset) && !options.anchorUri)) cache.set(key, all);
-    return all;
+    // Receiver-expression completion should expose an object's public API, not
+    // private/protected/package backing state. Keep methods under normal Java
+    // accessibility rules, but remove non-public fields before caching/returning
+    // the type's completion surface. This prevents record backing fields such as
+    // `reservation.sku` while preserving `reservation.sku()`.
+    const completionMembers = all.filter(member =>
+      member.kind !== 'field' || member.isPublic === true
+    );
+
+    if (completionMembers.length > 0 || (!Number.isFinite(options.anchorOffset) && !options.anchorUri)) {
+      cache.set(key, completionMembers);
+    }
+    return completionMembers;
   })();
 
   inflight.set(key, work);
