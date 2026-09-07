@@ -21,7 +21,7 @@ if (source.includes('getAllFiles()')) throw new Error('Workspace files should no
 const pkg = require('./package.json');
 if (pkg.main !== './extension.js') throw new Error('Unexpected extension entrypoint');
 if (!pkg.contributes?.keybindings?.some(k => k.command === 'recentBuffers.show' && k.key === 'ctrl+e')) throw new Error('Ctrl+E keybinding missing');
-if (pkg.version !== '0.3.7') throw new Error('Expected version 0.3.7');
+if (pkg.version !== '0.3.9') throw new Error('Expected version 0.3.9');
 if (pkg.contributes.configuration.properties['recentBuffers.allFilesLimit']) throw new Error('Legacy allFilesLimit setting should be removed');
 console.log('Recent Buffers source/package checks passed.');
 
@@ -63,10 +63,19 @@ if (!source.includes("minmax(190px, 275px)")) throw new Error("Filename column w
 console.log("Unified search/readability regression checks passed.");
 
 if (!source.includes("async function getWorkspaceFileIndex()")) throw new Error("Missing lazy workspace file index");
-if (!source.includes("searchText: `${label} ${path}`")) throw new Error("Indexed files must use filename + path");
-if (!source.includes("fuzzyScore(normalized, item.searchText)")) throw new Error("All Files must use the shared fuzzy matcher");
 if (!source.includes("addWorkspaceFilesToIndex")) throw new Error("Missing create-file index update");
 if (!source.includes("removeWorkspaceFilesFromIndex")) throw new Error("Missing delete-file index update");
 if (!source.includes("renameWorkspaceFilesInIndex")) throw new Error("Missing rename-file index update");
 if (!pkg.contributes.configuration.properties["recentBuffers.workspaceIndexLimit"]) throw new Error("Missing workspace index limit");
 console.log("Lazy-index regression checks passed.");
+
+if (!source.includes("onDidChangeConfiguration")) throw new Error("Missing configuration-change listener");
+for (const key of ["files.exclude", "search.exclude", "recentBuffers.include", "recentBuffers.exclude"]) {
+  if (!source.includes(`affectsConfiguration('${key}')`)) throw new Error(`Missing index invalidation for ${key}`);
+}
+if (!source.includes("getWorkspaceIncludeGlob")) throw new Error("Missing include-only glob builder");
+if (!source.includes("getWorkspaceExcludeGlob")) throw new Error("Missing merged exclude glob builder");
+if (!pkg.contributes.configuration.properties["recentBuffers.include"]) throw new Error("Missing recentBuffers.include setting");
+if (!source.includes("fileMatchScore(normalized, item.label, item.path)")) throw new Error("All Files does not use filename/path-aware scorer");
+if (!source.includes("fileMatchScore(query, label, path)")) throw new Error("Recent rows do not use shared filename/path-aware scorer");
+console.log("Filtering/config rebuild checks passed.");

@@ -1,3 +1,22 @@
+## 0.3.9
+
+- Replaced fuzzy matching with the ordered fuzzy-match contract.
+- Added semantic boundaries including camelCase and letter/digit transitions.
+- Added amplified first-boundary bonus, consecutive bonuses, gap-open/gap-extension penalties, and span penalties.
+- Filename is the primary field; path is secondary.
+- Added executable contract regression tests.
+
+## 0.3.8
+
+- Rebuilds the loaded workspace file index when `files.exclude`, `search.exclude`, `recentBuffers.exclude`, `recentBuffers.include`, or the index limit changes.
+- Combines VS Code `files.exclude` and `search.exclude` with the extension's additional exclusion glob.
+- Added `recentBuffers.include` for include-only indexing/search.
+- Reworked fuzzy ranking for developer navigation: exact filename, filename stem, prefix, and contiguous filename matches strongly outrank weak path matches.
+- Whitespace-separated query terms are ANDed; path segments contribute to disambiguation without dominating filename quality.
+- Recent-buffer recency remains a tie-breaker after textual relevance.
+- Clear History now invalidates the workspace index too.
+- Preserves the single lazy index architecture; no second search/index system was added.
+
 ## 0.3.7
 
 - Replaced progressive glob probing with a lazy in-memory workspace file index.

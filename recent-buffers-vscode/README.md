@@ -36,3 +36,27 @@ This intentionally does not create or manage editor groups.
 ## Previous Buffer
 
 Use **Recent Buffers: Previous Buffer** (`recentBuffers.previousBuffer`) to immediately switch to the most recently visited file other than the current file. Repeating the command toggles between the last two files. Bind it to any shortcut you prefer in Keyboard Shortcuts.
+
+
+## Workspace index filtering
+
+All Files uses one lazy workspace index. The index honors VS Code `files.exclude`,
+VS Code `search.exclude`, and the extension's `recentBuffers.exclude`.
+
+Use `recentBuffers.include` for include-only indexing. An empty array means all
+workspace files are eligible. Example:
+
+```json
+"recentBuffers.include": [
+  "**/*.java",
+  "**/*.kt",
+  "**/*.kts",
+  "**/*.js",
+  "**/*.json",
+  "**/*.gradle",
+  "**/*.gradle.kts"
+]
+```
+
+Changing any include/exclude setting used by the index automatically invalidates
+and, when already loaded, rebuilds the index.

@@ -2,7 +2,7 @@
   "name": "recent-buffers",
   "displayName": "Recent Buffers",
   "description": "JetBrains-style recent buffer navigation for VS Code with cursor restoration and on-demand bounded file search.",
-  "version": "0.3.7",
+  "version": "0.3.9",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -90,7 +90,7 @@
         "recentBuffers.exclude": {
           "type": "string",
           "default": "{**/.git/**,**/.gradle/**,**/build/**,**/bin/**,**/node_modules/**,**/.idea/**,**/.vscode/**}",
-          "description": "Glob used to exclude generated or metadata files from project/workspace fallback search."
+          "description": "Additional exclusion glob for the All Files index. This is combined with VS Code files.exclude and search.exclude."
         },
         "recentBuffers.fileSearchMinChars": {
           "type": "number",
@@ -112,11 +112,19 @@
           "minimum": 1000,
           "maximum": 250000,
           "description": "Maximum number of workspace files kept in the lazy in-memory All Files index."
+        },
+        "recentBuffers.include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Optional include-only glob patterns for the All Files index. Empty means all workspace files. Example: [\"**/*.java\", \"**/*.kt\", \"**/*.js\", \"**/*.json\", \"**/*.gradle\", \"**/*.gradle.kts\"]."
         }
       }
     }
   },
   "scripts": {
-    "test": "node --check extension.js && node test.js"
+    "test": "node --check extension.js && node test.js && node scorer-test.js"
   }
 }

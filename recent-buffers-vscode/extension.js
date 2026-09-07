@@ -27,7 +27,18 @@ function activate(context) {
       if (e.textEditor !== vscode.window.activeTextEditor || !isNavigableDocument(e.textEditor.document)) return;
       history.touch(e.textEditor.document.uri, e.selections[0]);
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => invalidateWorkspaceFileIndex()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => rebuildWorkspaceFileIndexIfLoaded()),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (
+        e.affectsConfiguration('files.exclude') ||
+        e.affectsConfiguration('search.exclude') ||
+        e.affectsConfiguration('recentBuffers.include') ||
+        e.affectsConfiguration('recentBuffers.exclude') ||
+        e.affectsConfiguration('recentBuffers.workspaceIndexLimit')
+      ) {
+        void rebuildWorkspaceFileIndexIfLoaded();
+      }
+    }),
     vscode.workspace.onDidCreateFiles((e) => addWorkspaceFilesToIndex(e.files)),
     vscode.workspace.onDidDeleteFiles((e) => removeWorkspaceFilesFromIndex(e.files)),
     vscode.workspace.onDidRenameFiles((e) => renameWorkspaceFilesInIndex(e.files)),
@@ -42,6 +53,7 @@ function activate(context) {
     vscode.commands.registerCommand('recentBuffers.applySingleViewportSettings', applySingleViewportSettings),
     vscode.commands.registerCommand('recentBuffers.clearHistory', async () => {
       await history.clear();
+      invalidateWorkspaceFileIndex();
       if (activePanel) await sendState(activePanel, history, '');
       vscode.window.setStatusBarMessage('Recent Buffers history cleared.', 2500);
     }),
@@ -237,7 +249,7 @@ function buildRecentRows(history, query, sourceUri) {
     const uri = vscode.Uri.parse(entry.uri);
     const label = basename(uri.path);
     const path = relativeDisplayPath(uri);
-    const score = query ? fuzzyScore(query, `${label} ${path}`) : 1;
+    const score = query ? fileMatchScore(query, label, path) : 1;
     if (score < 0) continue;
     scored.push({ entry, uri, label, path, score });
   }
@@ -261,7 +273,7 @@ function buildFileRows(files, query, history) {
     if (uri.toString() === currentUri) continue;
     const label = basename(uri.path);
     const path = relativeDisplayPath(uri);
-    const score = query ? fuzzyScore(query, `${label} ${path}`) : 0;
+    const score = query ? fileMatchScore(query, label, path) : 0;
     if (query && score < 0) continue;
     const recent = history.get(uri);
     scored.push({ uri, label, path, score, recent });
@@ -344,7 +356,7 @@ async function searchFiles(query) {
 
   const scored = [];
   for (const item of files) {
-    const score = fuzzyScore(normalized, item.searchText);
+    const score = fileMatchScore(normalized, item.label, item.path);
     if (score < 0) continue;
     scored.push({ uri: item.uri, score, label: item.label, path: item.path });
   }
@@ -370,9 +382,10 @@ async function getWorkspaceFileIndex() {
   const generation = workspaceFileIndexGeneration;
   workspaceFileIndexPromise = (async () => {
     const config = vscode.workspace.getConfiguration('recentBuffers');
-    const exclude = config.get('exclude');
     const maxFiles = config.get('workspaceIndexLimit', 50000);
-    const uris = await vscode.workspace.findFiles('**/*', exclude, maxFiles);
+    const include = getWorkspaceIncludeGlob();
+    const exclude = getWorkspaceExcludeGlob();
+    const uris = await vscode.workspace.findFiles(include, exclude, maxFiles);
     const index = uris.map(makeIndexedFile);
 
     if (generation !== workspaceFileIndexGeneration) return undefined;
@@ -390,6 +403,47 @@ async function getWorkspaceFileIndex() {
   return getWorkspaceFileIndex();
 }
 
+function getWorkspaceIncludeGlob() {
+  const configured = vscode.workspace.getConfiguration('recentBuffers').get('include', []);
+  const patterns = Array.isArray(configured)
+    ? configured.map(String).map(s => s.trim()).filter(Boolean)
+    : [String(configured || '').trim()].filter(Boolean);
+  return patterns.length ? combineGlobPatterns(patterns) : '**/*';
+}
+
+function getWorkspaceExcludeGlob() {
+  const patterns = [];
+
+  const extensionExclude = vscode.workspace.getConfiguration('recentBuffers').get('exclude', '');
+  if (typeof extensionExclude === 'string' && extensionExclude.trim()) {
+    patterns.push(extensionExclude.trim());
+  }
+
+  appendEnabledExcludePatterns(patterns, vscode.workspace.getConfiguration('files').get('exclude', {}));
+  appendEnabledExcludePatterns(patterns, vscode.workspace.getConfiguration('search').get('exclude', {}));
+
+  return patterns.length ? combineGlobPatterns(patterns) : undefined;
+}
+
+function appendEnabledExcludePatterns(target, configValue) {
+  if (!configValue || typeof configValue !== 'object') return;
+  for (const [pattern, enabled] of Object.entries(configValue)) {
+    // VS Code exclusion entries can be true or an object with a `when`
+    // condition. A conditional exclusion is still an enabled exclusion rule
+    // for indexing purposes.
+    if (enabled === true || (enabled && typeof enabled === 'object')) {
+      target.push(pattern);
+    }
+  }
+}
+
+function combineGlobPatterns(patterns) {
+  const unique = [...new Set(patterns.filter(Boolean))];
+  if (!unique.length) return undefined;
+  if (unique.length === 1) return unique[0];
+  return `{${unique.join(',')}}`;
+}
+
 function makeIndexedFile(uri) {
   const label = basename(uri.path);
   const path = relativeDisplayPath(uri);
@@ -397,8 +451,7 @@ function makeIndexedFile(uri) {
     uri,
     uriString: uri.toString(),
     label,
-    path,
-    searchText: `${label} ${path}`
+    path
   };
 }
 
@@ -409,16 +462,27 @@ function invalidateWorkspaceFileIndex() {
   fileSearchCache.clear();
 }
 
+async function rebuildWorkspaceFileIndexIfLoaded() {
+  const wasLoaded = !!workspaceFileIndex || !!workspaceFileIndexPromise;
+  invalidateWorkspaceFileIndex();
+  if (!wasLoaded) return;
+  try {
+    await getWorkspaceFileIndex();
+    if (activePanel) {
+      activePanel.webview.postMessage({ type: 'refreshSearch' });
+    }
+  } catch (error) {
+    console.error('Recent Buffers: failed to rebuild workspace file index', error);
+  }
+}
+
 function addWorkspaceFilesToIndex(files) {
   fileSearchCache.clear();
   if (!workspaceFileIndex) return;
-  const existing = new Set(workspaceFileIndex.map(item => item.uriString));
-  for (const uri of files || []) {
-    const key = uri.toString();
-    if (existing.has(key)) continue;
-    workspaceFileIndex.push(makeIndexedFile(uri));
-    existing.add(key);
-  }
+  // Includes/excludes may be workspace-folder scoped and can contain complex
+  // glob rules. Rebuilding keeps incremental events correct without creating
+  // a second glob-matching implementation.
+  void rebuildWorkspaceFileIndexIfLoaded();
 }
 
 function removeWorkspaceFilesFromIndex(files) {
@@ -431,36 +495,115 @@ function removeWorkspaceFilesFromIndex(files) {
 function renameWorkspaceFilesInIndex(changes) {
   fileSearchCache.clear();
   if (!workspaceFileIndex) return;
-
-  const removed = new Set((changes || []).map(change => change.oldUri.toString()));
-  workspaceFileIndex = workspaceFileIndex.filter(item => !removed.has(item.uriString));
-
-  const existing = new Set(workspaceFileIndex.map(item => item.uriString));
-  for (const change of changes || []) {
-    const key = change.newUri.toString();
-    if (existing.has(key)) continue;
-    workspaceFileIndex.push(makeIndexedFile(change.newUri));
-    existing.add(key);
-  }
+  void rebuildWorkspaceFileIndexIfLoaded();
 }
 
-function fuzzyScore(query, candidate) {
-  const q = query.toLowerCase();
-  const c = candidate.toLowerCase();
-  if (!q) return 0;
-  const direct = c.indexOf(q);
-  if (direct >= 0) return 10000 - direct * 3 - (c.length - q.length) * 0.01;
-  let qi = 0, score = 0, streak = 0, first = -1;
-  for (let i = 0; i < c.length && qi < q.length; i++) {
-    if (c[i] !== q[qi]) { streak = 0; continue; }
-    if (first < 0) first = i;
-    streak += 1;
-    score += 12 + streak * 6;
-    if (i === 0 || '/\\_- .'.includes(c[i - 1])) score += 20;
-    qi += 1;
+function fileMatchScore(query, label, path) {
+  const tokens = tokenizeQuery(query);
+  if (!tokens.length) return 0;
+  let total = 0;
+  for (const token of tokens) {
+    const primary = fuzzyFieldScore(token, label || '');
+    const secondary = fuzzyFieldScore(token, path || '');
+    const best = primary >= 0 ? primary + 900 : secondary;
+    if (best < 0) return -1;
+    total += best;
   }
-  if (qi !== q.length) return -1;
-  return score - first * 0.5 - (c.length - q.length) * 0.02;
+  return total;
+}
+
+function tokenizeQuery(query) {
+  return query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+}
+
+const FUZZY_CHAR_SCORE = 100;
+const FUZZY_CONSECUTIVE_BONUS = 85;
+const FUZZY_BOUNDARY_BONUS = 70;
+const FUZZY_FIRST_BOUNDARY_BONUS = 180;
+const FUZZY_GAP_OPEN_PENALTY = 65;
+const FUZZY_GAP_EXTEND_PENALTY = 12;
+const FUZZY_SPAN_PENALTY = 4;
+
+function fuzzyFieldScore(query, candidate) {
+  if (!query || !candidate) return -1;
+  const q = query.toLowerCase(), c = candidate.toLowerCase();
+  let previous = new Map();
+
+  for (let ci = 0; ci < candidate.length; ci++) {
+    if (c[ci] !== q[0]) continue;
+    previous.set(ci, {
+      score: FUZZY_CHAR_SCORE + (semanticBoundary(candidate, ci) ? FUZZY_FIRST_BOUNDARY_BONUS : 0),
+      first: ci, last: ci, gaps: 0, gapOpens: 0
+    });
+  }
+  if (!previous.size) return -1;
+
+  for (let qi = 1; qi < q.length; qi++) {
+    const current = new Map();
+    for (let ci = 0; ci < candidate.length; ci++) {
+      if (c[ci] !== q[qi]) continue;
+      let best = null;
+      for (const [pi, state] of previous) {
+        if (pi >= ci) continue;
+        const gapLength = ci - pi - 1;
+        let score = state.score + FUZZY_CHAR_SCORE;
+        let gaps = state.gaps, gapOpens = state.gapOpens;
+        if (gapLength === 0) {
+          score += FUZZY_CONSECUTIVE_BONUS;
+        } else {
+          gapOpens++;
+          gaps += gapLength;
+          score -= FUZZY_GAP_OPEN_PENALTY;
+          score -= Math.max(0, gapLength - 1) * FUZZY_GAP_EXTEND_PENALTY;
+        }
+        if (semanticBoundary(candidate, ci)) score += FUZZY_BOUNDARY_BONUS;
+        const next={score,first:state.first,last:ci,gaps,gapOpens};
+        if (betterFuzzyState(next,best)) best=next;
+      }
+      if(best) current.set(ci,best);
+    }
+    if(!current.size) return -1;
+    previous=current;
+  }
+
+  let best=null;
+  for(const state of previous.values()){
+    const span=state.last-state.first+1;
+    const finalized={...state,score:state.score-Math.max(0,span-q.length)*FUZZY_SPAN_PENALTY};
+    if(betterFuzzyState(finalized,best)) best=finalized;
+  }
+  return best ? best.score : -1;
+}
+
+function betterFuzzyState(a,b){
+  if(!b) return true;
+  if(a.score!==b.score) return a.score>b.score;
+  const as=a.last-a.first+1, bs=b.last-b.first+1;
+  if(as!==bs) return as<bs;
+  if(a.gapOpens!==b.gapOpens) return a.gapOpens<b.gapOpens;
+  if(a.gaps!==b.gaps) return a.gaps<b.gaps;
+  if(a.first!==b.first) return a.first<b.first;
+  return a.last<b.last;
+}
+
+function semanticBoundary(candidate,index){
+  if(index===0) return true;
+  const p=candidate[index-1], c=candidate[index];
+  if('/\\-_. \t\r\n'.includes(p)) return true;
+  if(isLower(p)&&isUpper(c)) return true;
+  if(isLetter(p)&&isDigit(c)) return true;
+  if(isDigit(p)&&isLetter(c)) return true;
+  return false;
+}
+function isLower(ch){return ch>='a'&&ch<='z';}
+function isUpper(ch){return ch>='A'&&ch<='Z';}
+function isLetter(ch){return isLower(ch)||isUpper(ch);}
+function isDigit(ch){return ch>='0'&&ch<='9';}
+
+// Retained for tests/compatibility; file navigation uses fileMatchScore so it
+// can weight filenames separately from paths.
+function fuzzyScore(query, candidate) {
+  return fuzzyFieldScore(query, candidate);
 }
 
 function relativeDisplayPath(uri) {
@@ -719,6 +862,9 @@ function getWebviewHtml(webview) {
     else if (m.type==='focusSearch') {
       claimSearchFocus();
     }
+    else if (m.type==='refreshSearch') {
+      sendSearch();
+    }
     else if (m.type==='moveSelection') {
       moveSelection(Number(m.delta) < 0 ? -1 : 1);
       search.focus();
@@ -757,4 +903,4 @@ function getWebviewHtml(webview) {
 </html>`;
 }
 
-module.exports = { activate, deactivate, _test: { fuzzyScore, formatAge, basename, fileKind } };
+module.exports = { activate, deactivate, _test: { fuzzyScore, fileMatchScore, formatAge, basename, fileKind } };
