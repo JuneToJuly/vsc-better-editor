@@ -6,12 +6,11 @@ async function waitForFoldsToFinish(editor, timeoutMs = 2000) {
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    await sleep(50); // poll every 50ms
+    await sleep(50);
     const currentTop = editor.visibleRanges[0]?.start.line ?? 0;
 
     if (currentTop === lastTop) {
       stableCount++;
-      // consider it settled if the visible range hasn't changed for ~250ms
       if (stableCount >= 5) break;
     } else {
       stableCount = 0;
@@ -25,55 +24,155 @@ const vscode = require('vscode');
 let visibleLines = new Set();
 let foldMode = false;
 let lastSearchTerm = '';
+let searchScope = 'document'; // 'document' | 'method'
 
-function lineMatchesAnyTerm(line, terms) {
-  return terms.some(t => line.toLowerCase().includes(t.toLowerCase()));
+function parseQuery(searchTerm) {
+  const raw = Array.isArray(searchTerm) ? searchTerm.join(' ') : String(searchTerm ?? '');
+
+  // '~' separates OR groups. Whitespace (and the legacy comma separator)
+  // separates AND terms within each group.
+  return raw
+    .split('~')
+    .map(group => group.split(/[,\s]+/).filter(Boolean))
+    .filter(group => group.length > 0);
 }
 
-function lineMatchesAllTerm(line, terms) {
-  return terms.every(t => line.toLowerCase().includes(t.toLowerCase()));
+function lineMatchesQuery(line, queryGroups) {
+  const lowerLine = line.toLowerCase();
+  return queryGroups.some(group =>
+    group.every(term => lowerLine.includes(term.toLowerCase()))
+  );
+}
+
+function flattenQueryTerms(queryGroups) {
+  return queryGroups.flat();
+}
+
+function isMethodLikeSymbol(symbol) {
+  return symbol.kind === vscode.SymbolKind.Method ||
+    symbol.kind === vscode.SymbolKind.Function ||
+    symbol.kind === vscode.SymbolKind.Constructor;
+}
+
+function collectContainingMethodSymbols(symbols, position, result = []) {
+  for (const symbol of symbols ?? []) {
+    if (!symbol.range?.contains(position)) continue;
+
+    if (isMethodLikeSymbol(symbol)) {
+      result.push(symbol);
+    }
+
+    if (Array.isArray(symbol.children) && symbol.children.length > 0) {
+      collectContainingMethodSymbols(symbol.children, position, result);
+    }
+  }
+  return result;
+}
+
+async function getSearchRange(editor) {
+  const doc = editor.document;
+
+  if (searchScope === 'document') {
+    return {
+      startLine: 0,
+      endLine: Math.max(0, doc.lineCount - 1),
+      label: 'document'
+    };
+  }
+
+  let symbols;
+  try {
+    symbols = await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      doc.uri
+    );
+  } catch {
+    symbols = undefined;
+  }
+
+  if (!Array.isArray(symbols)) {
+    vscode.window.showInformationMessage(
+      'FoldSearch: method-only mode requires document symbols for this file.'
+    );
+    return null;
+  }
+
+  const cursor = editor.selection.active;
+  const containing = collectContainingMethodSymbols(symbols, cursor);
+
+  if (containing.length === 0) {
+    vscode.window.showInformationMessage(
+      'FoldSearch: cursor is not inside a method or function.'
+    );
+    return null;
+  }
+
+  // Prefer the narrowest enclosing method/function when symbols are nested.
+  containing.sort((a, b) => {
+    const aSpan = a.range.end.line - a.range.start.line;
+    const bSpan = b.range.end.line - b.range.start.line;
+    if (aSpan !== bSpan) return aSpan - bSpan;
+    return a.range.end.character - a.range.start.character -
+      (b.range.end.character - b.range.start.character);
+  });
+
+  const symbol = containing[0];
+  return {
+    startLine: symbol.range.start.line,
+    endLine: symbol.range.end.line,
+    label: symbol.name || 'method'
+  };
 }
 
 async function frameMutator() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
-  foldNonMatching(editor, lastSearchTerm, 'mutator')
+  await foldNonMatching(editor, lastSearchTerm, 'mutator');
 }
 
 async function frameAccessor() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  foldNonMatching(editor, lastSearchTerm, 'accessor')
+
+  await foldNonMatching(editor, lastSearchTerm, 'accessor');
 }
 
 async function foldNonMatching(editor, searchTerm, mode = 'any') {
   const doc = editor.document;
   const lines = doc.getText().split('\n');
+  const queryGroups = parseQuery(searchTerm);
+
+  if (queryGroups.length === 0) return;
+
+  const range = await getSearchRange(editor);
+  if (!range) return;
+
   visibleLines.clear();
 
-  // --- Remember caret line before folds begin ---
   const oldCaretLine = editor.selection.active.line;
-
-  // Build fold blocks
   const blocks = [];
-  vscode.window.setStatusBarMessage(`FoldSearch: active for "${searchTerm}"`, 3000);
-  const terms = Array.isArray(searchTerm)
-  ? searchTerm
-  : searchTerm.split(/[,\s]+/).filter(Boolean);
+  const usageTerms = flattenQueryTerms(queryGroups);
 
-  vscode.window.setStatusBarMessage(`FoldSearch: active for "${terms}"`, 3000);
-
+  // Build blocks exactly the same way for document and method scope.
+  // Method-only mode changes only whether a line is eligible to match:
+  // lines outside the enclosing method are ordinary non-matches. This keeps
+  // folding behavior identical to normal Fold Search instead of introducing
+  // a second, incompatible outside-method folding implementation.
   let blockStart = null;
   for (let i = 0; i < lines.length; i++) {
-    if(mode != 'any')
-      match = lineMatchesAllTerm(lines[i], terms) && classifyVariableUsage(lines[i], terms) == mode;
-    else
-      match = lineMatchesAllTerm(lines[i], terms)
+    const inScope = searchScope === 'document' ||
+      (i >= range.startLine && i <= range.endLine);
+    const queryMatch = inScope && lineMatchesQuery(lines[i], queryGroups);
+    const match = mode !== 'any'
+      ? queryMatch && classifyVariableUsage(lines[i], usageTerms) === mode
+      : queryMatch;
+
     if (match) visibleLines.add(i);
-    // if (match) visibleLines.add(i);
-    if (!match && blockStart === null) blockStart = i;
-    else if (match && blockStart !== null) {
+
+    if (!match && blockStart === null) {
+      blockStart = i;
+    } else if (match && blockStart !== null) {
       blocks.push([blockStart, i - 1]);
       blockStart = null;
     }
@@ -81,38 +180,53 @@ async function foldNonMatching(editor, searchTerm, mode = 'any') {
 
   if (blockStart !== null) blocks.push([blockStart, lines.length - 1]);
 
-  // --- Create folds ---
+  // This is intentionally the original Fold Search folding algorithm.
+  // Every contiguous non-matching block uses the previous line as its fold
+  // anchor, regardless of whether the non-match is inside or outside a method.
   for (const [startLine, endLine] of blocks) {
     const foldStartLine = Math.max(0, startLine - 1);
     const prevLine = lines[foldStartLine];
     const foldStartCol = prevLine ? prevLine.length : 0;
     const startPos = new vscode.Position(foldStartLine, foldStartCol);
     const endPos = new vscode.Position(endLine, lines[endLine].length);
+
+    if (startPos.line === endPos.line) continue;
+
     editor.selection = new vscode.Selection(startPos, endPos);
     await vscode.commands.executeCommand('editor.createFoldingRangeFromSelection');
     await vscode.commands.executeCommand('editor.fold');
   }
 
-  // --- Wait until folding animations fully settle ---
   await waitForFoldsToFinish(editor);
 
-  // --- Find the visible line nearest the original caret ---
   const visible = [...visibleLines].sort((a, b) => a - b);
-  let targetLine = visible[0] ?? 0;
-  for (const l of visible) {
-    if (Math.abs(l - oldCaretLine) < Math.abs(targetLine - oldCaretLine))
-      targetLine = l;
+  if (visible.length > 0) {
+    let targetLine = visible[0];
+    for (const line of visible) {
+      if (Math.abs(line - oldCaretLine) < Math.abs(targetLine - oldCaretLine)) {
+        targetLine = line;
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await vscode.commands.executeCommand('revealLine', {
+      lineNumber: targetLine,
+      at: 'center'
+    });
+
+    const pos = new vscode.Position(targetLine, 0);
+    editor.selection = new vscode.Selection(pos, pos);
+  } else {
+    // Keep the caret inside the active method rather than unexpectedly jumping
+    // to line 0 when a method-scoped query has no matches.
+    const targetLine = Math.min(Math.max(oldCaretLine, range.startLine), range.endLine);
+    const targetCol = Math.min(
+      editor.selection.active.character,
+      lines[targetLine]?.length ?? 0
+    );
+    const pos = new vscode.Position(targetLine, targetCol);
+    editor.selection = new vscode.Selection(pos, pos);
   }
-
-  // --- Delay restore until after final internal scroll ---
-  await new Promise(resolve => setTimeout(resolve, 50));
-  await vscode.commands.executeCommand('revealLine', {
-    lineNumber: targetLine,
-    at: 'center'
-  });
-
-  const pos = new vscode.Position(targetLine, 0);
-  editor.selection = new vscode.Selection(pos, pos);
 
   try {
     await vscode.commands.executeCommand('extension.vim_escape');
@@ -120,19 +234,29 @@ async function foldNonMatching(editor, searchTerm, mode = 'any') {
 
   foldMode = true;
   await vscode.commands.executeCommand('setContext', 'foldsearch.active', true);
-  vscode.window.setStatusBarMessage(`FoldSearch: active for "${searchTerm}"`, 3000);
-}
+  await vscode.commands.executeCommand(
+    'setContext',
+    'foldsearch.methodOnly',
+    searchScope === 'method'
+  );
 
+  const scopeLabel = searchScope === 'method' ? `method: ${range.label}` : 'document';
+  vscode.window.setStatusBarMessage(
+    `FoldSearch [${scopeLabel}]: active for "${searchTerm}"`,
+    3000
+  );
+}
 
 async function lastSearch() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
   const term = await vscode.window.showInputBox({
-    prompt: 'Fold all lines NOT containing this term:',
+    prompt: 'Fold all lines not matching query (~ = OR, whitespace = AND):',
     value: lastSearchTerm
   });
   if (!term) return;
+
   lastSearchTerm = term;
   await foldNonMatching(editor, term);
 }
@@ -142,11 +266,57 @@ async function runSearch() {
   if (!editor) return;
 
   const term = await vscode.window.showInputBox({
-    prompt: 'Fold all lines NOT containing this term:'
+    prompt: 'Fold all lines not matching query (~ = OR, whitespace = AND):',
+    value: lastSearchTerm
   });
   if (!term) return;
+
   lastSearchTerm = term;
   await foldNonMatching(editor, term);
+}
+
+async function toggleSearchScope() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+
+  const nextScope = searchScope === 'document' ? 'method' : 'document';
+
+  // Validate method scope before changing anything. This prevents a cursor
+  // outside a method from silently falling back to document-wide behavior.
+  if (nextScope === 'method') {
+    const previousScope = searchScope;
+    searchScope = 'method';
+    const range = await getSearchRange(editor);
+    if (!range) {
+      searchScope = previousScope;
+      return;
+    }
+  } else {
+    searchScope = nextScope;
+  }
+
+  searchScope = nextScope;
+  await vscode.commands.executeCommand(
+    'setContext',
+    'foldsearch.methodOnly',
+    searchScope === 'method'
+  );
+
+  if (foldMode) {
+    await vscode.commands.executeCommand('editor.unfoldAll');
+    foldMode = false;
+    await vscode.commands.executeCommand('setContext', 'foldsearch.active', false);
+
+    if (lastSearchTerm) {
+      await foldNonMatching(editor, lastSearchTerm);
+      return;
+    }
+  }
+
+  vscode.window.setStatusBarMessage(
+    `FoldSearch scope: ${searchScope === 'method' ? 'method only' : 'document'}`,
+    2000
+  );
 }
 
 async function toggleFoldSearch() {
@@ -156,7 +326,7 @@ async function toggleFoldSearch() {
   if (foldMode) {
     await vscode.commands.executeCommand('editor.unfoldAll');
     foldMode = false;
-    vscode.commands.executeCommand('setContext', 'foldsearch.active', false);
+    await vscode.commands.executeCommand('setContext', 'foldsearch.active', false);
     vscode.window.setStatusBarMessage('FoldSearch: off', 2000);
   } else if (lastSearchTerm) {
     await foldNonMatching(editor, lastSearchTerm);
@@ -165,38 +335,30 @@ async function toggleFoldSearch() {
   }
 }
 
-function classifyVariableUsage(line, term) {
-  // We don't have usage with more than one var
-  if (term.length > 1) return 'any';
+function classifyVariableUsage(line, terms) {
+  // Accessor/mutator classification is only meaningful for one variable.
+  if (terms.length !== 1) return 'any';
 
-  const varName = term[0];
+  const varName = terms[0];
   const trimmed = line.trim();
 
-  // skip comments and empty lines
   if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed === '') return null;
 
-  // --- basic pattern helpers ---
-  const leftSideMutate = new RegExp(`\\b${varName}\\b\\s*=`);
-  const dotUsage = new RegExp(`\\b${varName}\\b\\s*\\.`);
+  const escapedVarName = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const leftSideMutate = new RegExp(`\\b${escapedVarName}\\b\\s*=`);
+  const dotUsage = new RegExp(`\\b${escapedVarName}\\b\\s*\\.`);
+  const rightSideAccess = new RegExp(`=\\s*[^;]*\\b${escapedVarName}\\b`);
+  const inParenAccess = new RegExp(`\\(.*\\b${escapedVarName}\\b.*\\)`);
 
-  const rightSideAccess = new RegExp(`=\\s*[^;]*\\b${varName}\\b`);
-  const inParenAccess = new RegExp(`\\(.*\\b${varName}\\b.*\\)`);
-
-  // --- MUTATOR: assignment on left side of '='
   if (leftSideMutate.test(line)) return 'mutator';
 
-  // --- MUTATOR: var.method() but only if NOT on RHS of assignment ---
   if (dotUsage.test(line) && !rightSideAccess.test(line)) {
-    // also avoid things like `return obj.method();`
-    if (!/return\s+.*\b${varName}\b\s*\./.test(line)) {
-      return 'mutator';
-    }
+    const returnDotUsage = new RegExp(`return\\s+.*\\b${escapedVarName}\\b\\s*\\.`);
+    if (!returnDotUsage.test(line)) return 'mutator';
   }
 
-  // --- ACCESSOR: appears on RHS of assignment or inside parentheses ---
   if (rightSideAccess.test(line) || inParenAccess.test(line)) return 'accessor';
 
-  // fallback
   return 'any';
 }
 
@@ -206,58 +368,53 @@ function moveDownVisible() {
   if (!editor) return;
 
   const line = editor.selection.active.line;
-  const col = editor.selection.active.character; // preserve current column
-
-  const next = [...visibleLines].find(l => l > line);
+  const col = editor.selection.active.character;
+  const next = [...visibleLines].sort((a, b) => a - b).find(l => l > line);
   if (next === undefined) return;
 
-  const pos = new vscode.Position(next, col);
+  const targetCol = Math.min(col, editor.document.lineAt(next).text.length);
+  const pos = new vscode.Position(next, targetCol);
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos));
 }
 
 function moveUpVisible() {
-  if (!foldMode) 
-    return;
+  if (!foldMode) return;
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
   const line = editor.selection.active.line;
-  const col = editor.selection.active.character; // preserve current column
-
-  const prev = [...visibleLines].reverse().find(l => l < line);
+  const col = editor.selection.active.character;
+  const prev = [...visibleLines].sort((a, b) => b - a).find(l => l < line);
   if (prev === undefined) return;
 
-  const pos = new vscode.Position(prev, col);
+  const targetCol = Math.min(col, editor.document.lineAt(prev).text.length);
+  const pos = new vscode.Position(prev, targetCol);
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos));
 }
 
-/** Activate FoldSearch with the current word under cursor (handles folds) */
+/** Activate FoldSearch with the current word under cursor (handles folds). */
 async function foldSearchCurrentWord() {
-  vscode.window.showInformationMessage('Fold at current');
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  const doc = editor.document;
-  let pos = editor.selection.active;
 
-  // Manually extract the word from the line text
+  const doc = editor.document;
+  const pos = editor.selection.active;
   const lineText = doc.lineAt(pos.line).text;
+
   if (!lineText || !lineText.trim()) {
     vscode.window.showInformationMessage('No word under cursor (folded or blank line).');
     return;
   }
 
-  vscode.window.showInformationMessage('Found word: "${foundWord}"');
-
-  // find word boundaries using regex
   const match = /[A-Za-z0-9_]+/g;
   let foundWord = null;
-  for (const m of lineText.matchAll(match)) {
-    const start = m.index;
-    const end = start + m[0].length;
+  for (const item of lineText.matchAll(match)) {
+    const start = item.index;
+    const end = start + item[0].length;
     if (pos.character >= start && pos.character <= end) {
-      foundWord = m[0];
+      foundWord = item[0];
       break;
     }
   }
@@ -267,33 +424,34 @@ async function foldSearchCurrentWord() {
     return;
   }
 
-  const word = foundWord;
   const prevSearch = lastSearchTerm;
-  lastSearchTerm = word;
+  lastSearchTerm = foundWord;
 
-  // If we already have FoldSearch active for this word, toggle off
-  if (foldMode && word === prevSearch) {
+  if (foldMode && foundWord === prevSearch) {
     await vscode.commands.executeCommand('editor.unfoldAll');
     foldMode = false;
-    await vscode.commands.executeCommand('setContext', 'foldsearchActive', false);
-    vscode.window.setStatusBarMessage(`FoldSearch toggled off for "${word}"`, 2000);
+    await vscode.commands.executeCommand('setContext', 'foldsearch.active', false);
+    vscode.window.setStatusBarMessage(`FoldSearch toggled off for "${foundWord}"`, 2000);
     return;
   }
 
-  // If active with different term, clear first
-  if (foldMode && word !== prevSearch) {
+  if (foldMode && foundWord !== prevSearch) {
     await vscode.commands.executeCommand('editor.unfoldAll');
   }
-  await foldNonMatching(editor, word);
+
+  await foldNonMatching(editor, foundWord);
 }
 
 function activate(context) {
+  vscode.commands.executeCommand('setContext', 'foldsearch.methodOnly', false);
+
   context.subscriptions.push(
     vscode.commands.registerCommand('foldsearch.search', runSearch),
     vscode.commands.registerCommand('foldsearch.accessor', frameAccessor),
     vscode.commands.registerCommand('foldsearch.mutator', frameMutator),
     vscode.commands.registerCommand('foldsearch.last', lastSearch),
     vscode.commands.registerCommand('foldsearch.toggle', toggleFoldSearch),
+    vscode.commands.registerCommand('foldsearch.toggleScope', toggleSearchScope),
     vscode.commands.registerCommand('foldsearch.word', foldSearchCurrentWord),
     vscode.commands.registerCommand('foldsearch.down', moveDownVisible),
     vscode.commands.registerCommand('foldsearch.up', moveUpVisible)
