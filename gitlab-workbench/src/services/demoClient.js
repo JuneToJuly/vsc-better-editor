@@ -30,6 +30,9 @@ class DemoClient{
  setScenario(s){this.scenario=s;this.discussionState.clear();}
  getScenario(){return this.scenario;}
  async status(){return {mode:'demo',authenticated:true,user:'demo-user',scenario:this.scenario};}
+ async listRecentCommits(options={}){const now=Date.now(),repos=['pricing-service','order-service','inventory-service','customer-service'],scope=String(options.scope||'default');return Array.from({length:28},(_,i)=>({repo:repos[i%repos.length],repoName:repos[i%repos.length],project:repos[i%repos.length],host:'demo',id:`demo${String(i).padStart(36,'0')}`,shortId:`d${String(i).padStart(6,'0')}`,title:['Improve pricing validation','Update integration contract','Fix review workflow','Add regression coverage','Refactor request handling'][i%5],message:'Demo commit for the cross-project activity dashboard.',author:i%4===0?'Sarah Chen':'demo-user',authorEmail:'demo@example.com',created:new Date(now-i*43*60000).toISOString(),webUrl:'',branches:[scope==='mrs'?'feature/review-work':i%3===0?'feature/review-work':'main'],mrs:i%3===0?[{iid:42,title:'Improve review workflow',state:'opened',source:'feature/review-work',target:'main',webUrl:''}]:[]}));}
+ async getCommitMergeRequests(commit){return commit.mrs||[];}
+ async getCommitDetails(commit){return {...commit,stats:{additions:42,deletions:11,total:53},files:[{oldPath:'src/main/java/example/Feature.java',newPath:'src/main/java/example/Feature.java',added:31,removed:8},{oldPath:'src/test/java/example/FeatureTest.java',newPath:'src/test/java/example/FeatureTest.java',added:11,removed:3}]};}
  async listIssues(){return clone(demoIssues);}
  async getIssue(repo,iid){return clone(demoIssues.find(x=>x.repo===repo&&x.iid===Number(iid)));}
  async listIssueNotes(issue){return clone(demoIssueNotes.get(`${issue.repo}#${issue.iid}`)||[]);}

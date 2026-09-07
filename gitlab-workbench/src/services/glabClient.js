@@ -95,6 +95,54 @@ class GlabClient {
   for(const r of local){const parsed=parseProjectUrl(r.remote);if(parsed){const key=`${parsed.host}/${parsed.project}`.toLowerCase();const existing=byKey.get(key);if(existing)existing.cwd=r.cwd;else byKey.set(key,{...parsed,cwd:r.cwd,source:'local'});}}
   const repos=[...byKey.values()];this.repos.clear();for(const r of repos){r.id=`${r.host}/${r.project}`;r.name=r.project.split('/').pop();this.repos.set(r.id,r);}return repos;
  }
+ async listRecentCommits(options={}){
+  const repos=await this.projectList(),perPage=Math.max(1,Math.min(100,Number(options.perPage||40))),scope=String(options.scope||'default'),started=Date.now();
+  this.output.appendLine(`[commits] BEGIN repos=${repos.length} perRepo=${perPage} scope=${scope}`);
+  const groups=await Promise.all(repos.map(async repo=>{
+   try{
+    const project=encodeURIComponent(repo.project);
+    // Default branch comes from project metadata. Open MRs are only needed for scopes that use MR branches.
+    const projectPromise=this.api(repo.host,`projects/${project}`,[],repo.cwd).catch(()=>null);
+    const mrPromise=scope==='default'?Promise.resolve(null):this.api(repo.host,`projects/${project}/merge_requests?state=opened&per_page=100`,[],repo.cwd).catch(()=>null);
+    const [projectRaw,mrRaw]=await Promise.all([projectPromise,mrPromise]);
+    const projectInfo=projectRaw?JSON.parse(projectRaw):{},defaultBranch=projectInfo.default_branch||'main',mrs=mrRaw?(JSON.parse(mrRaw)||[]):[];
+    const refs=[];
+    if(scope==='default'||scope==='all')refs.push({name:defaultBranch,kind:'default'});
+    if(scope==='mrs'||scope==='all')for(const mr of mrs)if(mr.source_branch)refs.push({name:mr.source_branch,kind:'mr',mr});
+    const uniqueRefs=[...new Map(refs.map(r=>[r.name,r])).values()];
+    const batches=await Promise.all(uniqueRefs.map(async ref=>{
+     const endpoint=`projects/${project}/repository/commits?ref_name=${encodeURIComponent(ref.name)}&per_page=${perPage}&order=default`;
+     try{const raw=await this.api(repo.host,endpoint,[],repo.cwd);return (JSON.parse(raw||'[]')||[]).map(c=>({c,ref}));}catch{return [];}
+    }));
+    const bySha=new Map();
+    for(const {c,ref} of batches.flat()){
+     let item=bySha.get(c.id);
+     if(!item){item={repo:repo.id,repoName:repo.name,project:repo.project,host:repo.host,id:c.id||'',shortId:c.short_id||(c.id||'').slice(0,8),title:c.title||String(c.message||'Commit').split('\n')[0],message:c.message||c.title||'',author:c.author_name||c.committer_name||'',authorEmail:c.author_email||c.committer_email||'',created:c.committed_date||c.created_at||c.authored_date||'',webUrl:c.web_url||'',parentIds:c.parent_ids||[],branches:[],mrs:[],mrLookupPending:true};bySha.set(c.id,item);}
+     if(!item.branches.includes(ref.name))item.branches.push(ref.name);
+     if(ref.mr&&!item.mrs.some(x=>x.iid===Number(ref.mr.iid)))item.mrs.push({iid:Number(ref.mr.iid),title:ref.mr.title||'',state:ref.mr.state||'opened',source:ref.mr.source_branch||'',target:ref.mr.target_branch||'',webUrl:ref.mr.web_url||''});
+    }
+    return [...bySha.values()];
+   }catch(e){this.output.appendLine(`[commits] ${repo.project}: ERROR ${cleanError(e)}`);return [];}
+  }));
+  const out=groups.flat().sort((a,b)=>new Date(b.created)-new Date(a.created));
+  this.output.appendLine(`[commits] COMPLETE count=${out.length} ${Date.now()-started}ms scope=${scope}`);return out;
+ }
+ async getCommitMergeRequests(commit){
+  const repo=await this.repo(commit.repo),project=encodeURIComponent(repo.project),sha=encodeURIComponent(commit.id);
+  try{
+   const raw=await this.api(repo.host,`projects/${project}/repository/commits/${sha}/merge_requests`,[],repo.cwd),assoc=JSON.parse(raw||'[]')||[];
+   return assoc.map(m=>({iid:Number(m.iid),title:m.title||'',state:m.state||'',source:m.source_branch||'',target:m.target_branch||'',webUrl:m.web_url||''}));
+  }catch{return commit.mrs||[];}
+ }
+ async getCommitDetails(commit){
+  const repo=await this.repo(commit.repo),project=encodeURIComponent(repo.project),sha=encodeURIComponent(commit.id);
+  const [raw,diffRaw]=await Promise.all([
+   this.api(repo.host,`projects/${project}/repository/commits/${sha}`,[],repo.cwd),
+   this.api(repo.host,`projects/${project}/repository/commits/${sha}/diff?per_page=100`,[],repo.cwd).catch(()=>null)
+  ]);
+  const c=JSON.parse(raw||'{}'),diffs=diffRaw?JSON.parse(diffRaw)||[]:[];
+  return {...commit,stats:c.stats||{},files:diffs.map(d=>({oldPath:d.old_path||'',newPath:d.new_path||'',newFile:!!d.new_file,renamedFile:!!d.renamed_file,deletedFile:!!d.deleted_file,added:countAdded(d.diff),removed:countRemoved(d.diff)}))};
+ }
  async listIssues(){
   const repos=await this.projectList();
   if(!repos.length)return [{kind:'status',repo:'__status__',repoName:'No managed GitLab projects',error:'Add a project URL with GitLab Workbench: Add Project.'}];
@@ -310,16 +358,14 @@ class GlabClient {
   return {approvals,pipeline,jobs};
  }
  async getMergeRequest(repoId,iid){
-  const repo=await this.repo(repoId);
-  const raw=await this.api(repo.host,`projects/${encodeURIComponent(repo.project)}/merge_requests/${iid}`,[],repo.cwd);
+  const repo=await this.repo(repoId),project=encodeURIComponent(repo.project);
+  // MR metadata and changed-file metadata do not depend on one another.
+  const [raw,diffRaw]=await Promise.all([
+   this.api(repo.host,`projects/${project}/merge_requests/${iid}`,[],repo.cwd),
+   this.api(repo.host,`projects/${project}/merge_requests/${iid}/diffs?per_page=100`,[],repo.cwd).catch(()=>null)
+  ]);
   const mr=this.normalize(JSON.parse(raw),repo);
-  // Use the API for changed-file metadata; glab mr view does not consistently expose it.
-  try{
-   const project=await this.ensureProject(repo);
-   const diffRaw=await this.api(repo.host,`projects/${encodeURIComponent(project)}/merge_requests/${iid}/diffs?per_page=100`,[],repo.cwd);
-   const diffs=JSON.parse(diffRaw)||[];
-   mr.files=diffs.map(d=>[d.new_path||d.old_path||'',countAdded(d.diff),countRemoved(d.diff),d]);
-  }catch{}
+  if(diffRaw!=null){const diffs=JSON.parse(diffRaw)||[];mr.files=diffs.map(d=>[d.new_path||d.old_path||'',countAdded(d.diff),countRemoved(d.diff),d]);}
   return mr;
  }
 
