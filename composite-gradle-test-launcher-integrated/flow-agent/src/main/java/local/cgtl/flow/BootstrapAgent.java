@@ -316,7 +316,8 @@ public final class BootstrapAgent {
 
     // Unknown JDK internals remain opaque unless a safe semantic adapter handles them.
     if (type.getName().startsWith("java.")) {
-      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value)) + "}";
+      return "{\"type\":" + quote(type.getName()) + ",\"value\":" + quote(identityText(value))
+          + ",\"adapterCandidate\":true,\"unsupportedType\":" + quote(type.getName()) + "}";
     }
 
     StringBuilder fields = new StringBuilder("{");
@@ -454,8 +455,13 @@ public final class BootstrapAgent {
         out.append(snapshot(item, level + 1, seen, false));
       }
       body = "\"items\":" + out.append(']').toString() + ",\"size\":" + collection.size();
-    } else if (level >= snapshotMaxDepth || type.getName().startsWith("java.")) {
+    } else if (level >= snapshotMaxDepth) {
       body = "\"value\":" + quote(identityText(value));
+    } else if (type.getName().startsWith("java.")) {
+      // JDK internals are intentionally opaque unless a semantic adapter exists.
+      // Mark the value so the VS Code state tree can offer Create State Adapter.
+      body = "\"value\":" + quote(identityText(value))
+          + ",\"adapterCandidate\":true,\"unsupportedType\":" + quote(type.getName());
     } else {
       StringBuilder fields = new StringBuilder(); int count = 0;
       for (Class<?> current = type; current != null && current != Object.class && count < snapshotMaxFields; current = current.getSuperclass()) {
@@ -776,7 +782,7 @@ import java.util.HashSet;
               @Override public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
                 MethodVisitor downstream = super.visitMethod(access, name, descriptor, signature, exceptions);
                 if (downstream == null || name.startsWith("<") || isObjectUtility(name, descriptor) ||
-                    (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_SYNTHETIC | Opcodes.ACC_BRIDGE)) != 0) return downstream;
+                    (access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE | Opcodes.ACC_BRIDGE)) != 0) return downstream;
                 boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
                 return new MethodVisitor(Opcodes.ASM9, downstream) {
                   private static final int LOCAL_STATE_SLOT = 1000;

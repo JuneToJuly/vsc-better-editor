@@ -43,7 +43,8 @@ public final class FlowAgent {
             Object methodMatcher = staticCall(matchers, "isMethod");
             methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAbstract")));
             methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isNative")));
-            methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isSynthetic")));
+            // javac emits lambda bodies as private synthetic lambda$... methods on the enclosing class.
+            // Synthetic methods therefore must participate in Replay; bridge methods remain excluded.
             methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isBridge")));
             Object visitor = staticCall(advice, "to", MethodAdvice.class);
             Object transformed = call(dynamicBuilder, "visit", call(visitor, "on", methodMatcher));

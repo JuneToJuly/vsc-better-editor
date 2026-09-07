@@ -2075,7 +2075,7 @@ function renderFlowReplayHtml(result) {
   const eventLabel=e=>e.event==='callsite'?'Call '+String(e.calleeClassName||'').split('.').pop()+'.'+e.calleeMethodName+'()':e.event==='enter'?'Enter '+simple(e)+'.'+e.methodName+'()':e.event==='exit'?(e.thrown?'Exception from ':'Exit ')+simple(e)+'.'+e.methodName+'()':e.event==='resume'?'Resume '+simple(e)+'.'+e.methodName+'()':'Line '+e.line;
   const eventKind=e=>e.event==='callsite'?'Call':e.event==='enter'?'Entry':e.event==='exit'?(e.thrown?'Exception':'Exit'):e.event==='resume'?'Resume':'Line';
   const valueText=v=>{if(v===undefined)return 'not available';if(v===null)return 'null';if(typeof v==='string'||typeof v==='number'||typeof v==='boolean')return String(v);if(v.display!==undefined)return String(v.display);if(v.value!==undefined&&typeof v.value!=='object')return String(v.value);if(v.summary!==undefined)return String(v.summary);if(Array.isArray(v))return '['+v.map(valueText).join(', ')+']';const type=objectType(v);return type+(objectCount(v)!==null?' ('+objectCount(v)+')':'')};
-  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
+  const fieldsOf=s=>{if(!s||typeof s!=='object')return {};if(s.fields&&typeof s.fields==='object'&&!Array.isArray(s.fields))return s.fields;const out={};for(const[k,v]of Object.entries(s)){if(!['type','className','display','identity','identityHash','id','value','summary','size','items','entries','snapshotId','checkpointSequence','adapter','adapterCandidate','unsupportedType','__fromCheckpoint','__checkpointSequence'].includes(k))out[k]=v}return out};
   const objectType=v=>{const raw=String(v?.type||v?.className||v?.summary||'Object');return raw.includes('@')?raw.slice(0,raw.indexOf('@')).split('.').pop():raw.split('.').pop()};
   const objectIdentity=v=>String(v?.identity||v?.identityHash||v?.id||v?.summary||'').match(/@([0-9a-fA-F]+)/)?.[1]||'';
   const objectCount=v=>v?.size!==undefined?Number(v.size):Array.isArray(v?.items)?v.items.length:Array.isArray(v?.entries)?v.entries.length:null;
@@ -4413,7 +4413,7 @@ function replayValueLabel(value) {
 function replayObjectFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
   if (value.fields && typeof value.fields === 'object' && !Array.isArray(value.fields)) return Object.entries(value.fields);
-  const ignored = new Set(['type','className','display','identity','identityHash','id','value','summary','size','snapshotId','checkpointSequence','adapter','__fromCheckpoint','__checkpointSequence']);
+  const ignored = new Set(['type','className','display','identity','identityHash','id','value','summary','size','snapshotId','checkpointSequence','adapter','adapterCandidate','unsupportedType','__fromCheckpoint','__checkpointSequence']);
   return Object.entries(value).filter(([key]) => !ignored.has(key));
 }
 
@@ -5197,8 +5197,14 @@ class ReplayValueItem extends vscode.TreeItem {
     );
     this.value = value; this.depth = depth; this.children = children; this.searchActive = searchActive;
     this.description = replayValueLabel(value);
-    this.tooltip = `${label}: ${replayValueLabel(value)}`;
-    this.iconPath = new vscode.ThemeIcon(children.length ? 'symbol-object' : 'symbol-field');
+    const unsupportedType = value && typeof value === 'object' && value.adapterCandidate === true
+      ? String(value.unsupportedType || value.type || value.className || '').trim() : '';
+    this.unsupportedType = unsupportedType || undefined;
+    this.contextValue = unsupportedType ? 'replayStateValue.unsupported' : 'replayStateValue';
+    this.tooltip = unsupportedType
+      ? `${label}: ${replayValueLabel(value)}\n\nReplay does not have a semantic adapter for ${unsupportedType}. Right-click to create one.`
+      : `${label}: ${replayValueLabel(value)}`;
+    this.iconPath = new vscode.ThemeIcon(unsupportedType ? 'warning' : (children.length ? 'symbol-object' : 'symbol-field'));
   }
 }
 class ReplayStateGroupItem extends vscode.TreeItem {
@@ -5748,18 +5754,24 @@ module.exports.activate = async function patchedActivate(context) {
     if (!className) return;
     await updateFlowPrefixSetting('flowStateAdapterClasses', values => values.filter(v => v !== className));
   }));
-  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.create', async () => {
+  async function createReplayStateAdapter(item) {
     const activeUri = vscode.window.activeTextEditor?.document?.uri;
     const folder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : (vscode.workspace.workspaceFolders || [])[0];
     if (!folder) return vscode.window.showWarningMessage('Open a workspace before creating a Replay state adapter.');
-    const targetType = normalizeFlowPrefix(await vscode.window.showInputBox({
-      title: 'Create Replay State Adapter',
-      prompt: 'Fully qualified type this adapter should display',
-      placeHolder: 'com.example.order.Money',
-      validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java type name.'
-    }));
+
+    let targetType = normalizeFlowPrefix(item?.unsupportedType || item?.value?.unsupportedType || '');
+    if (!targetType) {
+      targetType = normalizeFlowPrefix(await vscode.window.showInputBox({
+        title: 'Create Replay State Adapter',
+        prompt: 'Fully qualified type this adapter should display',
+        placeHolder: 'com.example.order.Money',
+        validateInput: value => /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(String(value || '').trim()) ? undefined : 'Enter a fully qualified Java type name.'
+      }));
+    }
     if (!targetType) return;
-    const targetSimple = targetType.split('.').pop().replace(/[^A-Za-z0-9_$]/g, '') || 'Value';
+
+    const targetSimple = targetType.split('.').pop().replace(/[^A-Za-z0-9_$]/g, '').split('$').pop() || 'Value';
+    const sourceTargetType = targetType.replace(/\$/g, '.');
     const adapterSimple = await vscode.window.showInputBox({
       title: 'Create Replay State Adapter', prompt: 'Adapter class name', value: `${targetSimple}ReplayAdapter`,
       validateInput: value => /^[A-Za-z_$][\w$]*$/.test(String(value || '').trim()) ? undefined : 'Enter a valid Java class name.'
@@ -5778,14 +5790,19 @@ module.exports.activate = async function patchedActivate(context) {
     const directory = path.join(projectRoot, 'src', 'test', 'java', ...packageName.split('.'));
     fs.mkdirSync(directory, { recursive: true });
     const filePath = path.join(directory, `${adapterSimple.trim()}.java`);
-    if (fs.existsSync(filePath)) return vscode.window.showWarningMessage(`Replay adapter already exists: ${filePath}`);
-    const source = `package ${packageName};\n\nimport java.util.LinkedHashMap;\nimport java.util.Map;\n\n/** CGTL Replay state adapter for ${targetType}. */\npublic final class ${adapterSimple.trim()} {\n    private ${adapterSimple.trim()}() {}\n\n    public static boolean supports(Class<?> type) {\n        return \"${targetType}\".equals(type.getName());\n    }\n\n    public static Object snapshot(Object value) {\n        Map<String, Object> state = new LinkedHashMap<>();\n        // Cast value to ${targetType} and add the state that matters to you.\n        // state.put(\"$display\", \"compact label shown in Replay\");\n        // state.put(\"fieldName\", typedValue.someSafeAccessor());\n        state.put(\"runtimeType\", value.getClass().getName());\n        return state;\n    }\n}\n`;
+    if (fs.existsSync(filePath)) {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+      await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
+      return;
+    }
+    const source = `package ${packageName};\n\nimport ${sourceTargetType};\nimport java.util.LinkedHashMap;\nimport java.util.Map;\n\n/**\n * CGTL Replay state adapter for ${targetType}.\n *\n * CGTL discovers this class from compositeGradleTests.flowStateAdapterClasses.\n * supports(Class<?>) selects the runtime type; snapshot(Object) returns the state\n * Replay should display. Values may be scalars, Maps, Collections, arrays, or\n * ordinary objects. Put $display in the returned map for a compact tree label.\n */\npublic final class ${adapterSimple.trim()} {\n    private ${adapterSimple.trim()}() {}\n\n    public static boolean supports(Class<?> type) {\n        return ${targetSimple}.class.isAssignableFrom(type);\n    }\n\n    public static Object snapshot(Object value) {\n        ${targetSimple} typedValue = (${targetSimple}) value;\n        Map<String, Object> state = new LinkedHashMap<>();\n\n        // TODO: expose the semantic state that matters during Replay.\n        // state.put("$display", typedValue.toString());\n        // state.put("fieldName", typedValue.someSafeAccessor());\n\n        return state;\n    }\n}\n`;
     fs.writeFileSync(filePath, source, 'utf8');
     await updateFlowPrefixSetting('flowStateAdapterClasses', values => [...values, adapterClass]);
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-    await vscode.window.showTextDocument(document, { preview: false });
+    await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
     instrumentationProvider?.refresh();
-  }));
+  }
+  context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.adapters.create', createReplayStateAdapter));
 
   // Backward-compatible alias for older command palette/menu references.
   context.subscriptions.push(vscode.commands.registerCommand('compositeGradleTests.replay.instrumentation.addInclude', () => vscode.commands.executeCommand('compositeGradleTests.replay.instrumentation.addPackage')));
