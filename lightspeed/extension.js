@@ -1,131 +1,285 @@
 const vscode = require('vscode');
 
 /**
- * CONFIG
+ * LightSpeed 0.0.9
+ *
+ * Interaction:
+ *   invoke -> all visible targets immediately show <initial><selector>
+ *   type initial -> type selector -> jump immediately
+ *
+ * All target codes use one uniform color. There is no InputBox and no
+ * confirmation key. For unusually large same-initial buckets, selectors may
+ * require more than one character; the full code is still shown up front.
  */
-const COLORS = [
-  { key: 'a', hex: '#757d84' },
-  { key: 'y', hex: '#ffd700' },
-  { key: 'w', hex: '#ffffff' },
-  { key: 'r', hex: '#ff4646' },
-  { key: 'b', hex: '#64aaff' },
-  { key: 'g', hex: '#50dc82' },
-  { key: 'o', hex: '#ff8c00' },
-  { key: 'p', hex: '#a064ff' },
-];
+
+const LABEL_KEYS = 'asdfghjklqwertyuiopzxcvbnm';
+
+const labelDecoration = vscode.window.createTextEditorDecorationType({
+  opacity: '0',
+  letterSpacing: '-1ch'
+});
+
 const flashDecoration = vscode.window.createTextEditorDecorationType({
-  backgroundColor: 'rgb(0, 174, 255)', 
+  backgroundColor: 'rgb(0, 174, 255)',
   borderRadius: '5px'
 });
 
-function flashPosition(editor, pos) {
-  const range = editor.document.getWordRangeAtPosition(pos);
+let session = null;
 
-  editor.setDecorations(flashDecoration, [{ range }]);
-
-  setTimeout(() => {
-    editor.setDecorations(flashDecoration, []);
-  }, 500); // 🔥 duration (tweak this)
-}
-
-const decorationMap = new Map();
-const targetMap = new Map();
-
-/**
- * ACTIVATE
- */
 function activate(context) {
-
-  createDecorations();
-
-  const editor = vscode.window.activeTextEditor;
-  if (editor) applyDecorations(editor);
-
   context.subscriptions.push(
-    vscode.commands.registerCommand('lightspeed.start', async () => {
-
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) return;
-
-      applyDecorations(editor);
-
-      const inputBox = vscode.window.createInputBox();
-
-      inputBox.prompt = "Lightspeed: <letter><encoding>";
-      inputBox.placeholder = "ea / eeg / eaa / eeaa";
-      inputBox.ignoreFocusOut = true;
-
-      let currentValue = '';
-
-      inputBox.onDidChangeValue(value => {
-        currentValue = value;
-
-        // 🔥 SPACE = CONFIRM
-        if (value.endsWith(' ') || value.endsWith(';')) {
-          inputBox.hide();
-          executeJump(value.trim().replace(";", ""));
-        }
-      });
-
-      inputBox.onDidAccept(() => {
-        inputBox.hide();
-        executeJump(currentValue.trim());
-      });
-
-      inputBox.onDidHide(() => {
-        clearDecorations(editor);
-        inputBox.dispose();
-      });
-
-      inputBox.show();
-
-      if (!input) {
-        clearDecorations(editor);
-        return;
-      }
-
-      executeJump(input);
+    labelDecoration,
+    flashDecoration,
+    vscode.commands.registerCommand('lightspeed.start', startLightspeed),
+    vscode.commands.registerCommand('lightspeed.type', typeLightspeedKey),
+    vscode.commands.registerCommand('lightspeed.cancel', cancelLightspeed),
+    vscode.commands.registerCommand('lightspeed.backspace', backspaceLightspeed),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      if (session) cancelLightspeed();
     })
   );
 }
 
 exports.activate = activate;
 
-/**
- * CREATE DECORATIONS
- */
-function createDecorations() {
-  for (let c of COLORS) {
-    for (let letterHold of [false, true]) {
-      for (let colorHold of [false, true]) {
+async function startLightspeed() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
 
-        const key = `${c.key}-${letterHold}-${colorHold}`;
+  if (session) {
+    clearLabels(session.editor);
+  }
 
-        decorationMap.set(key, vscode.window.createTextEditorDecorationType({
-          opacity: '0',
-          letterSpacing: '-1ch'
-        }));
-      }
-    }
+  const targets = getWordStarts(editor).map(pos => ({
+    pos,
+    rawInitial: editor.document.getText(
+      new vscode.Range(pos, pos.translate(0, 1))
+    ),
+    initial: editor.document.getText(
+      new vscode.Range(pos, pos.translate(0, 1))
+    ).toLowerCase(),
+    label: ''
+  }));
+
+  const buckets = new Map();
+  for (const target of targets) {
+    if (!buckets.has(target.initial)) buckets.set(target.initial, []);
+    buckets.get(target.initial).push(target);
+  }
+
+  const bucketInfo = new Map();
+  for (const [initial, candidates] of buckets) {
+    const labelLength = requiredLabelLength(candidates.length);
+    const labelMap = new Map();
+
+    candidates.forEach((target, index) => {
+      target.label = indexToLabel(index, labelLength);
+      labelMap.set(target.label, target);
+    });
+
+    bucketInfo.set(initial, {
+      candidates,
+      labelLength,
+      labelMap
+    });
+  }
+
+  session = {
+    editor,
+    targets,
+    buckets: bucketInfo,
+    mode: 'initial',
+    selectedInitial: '',
+    typedLabel: ''
+  };
+
+  // Render the complete code immediately. No first-key wait.
+  renderAllCodes();
+  await vscode.commands.executeCommand('setContext', 'lightspeed.active', true);
+}
+
+function typeLightspeedKey(arg) {
+  if (!session) return;
+
+  const key = typeof arg === 'string' ? arg : arg && arg.key;
+  if (!key || key.length !== 1) return;
+
+  if (session.editor !== vscode.window.activeTextEditor) {
+    cancelLightspeed();
+    return;
+  }
+
+  const normalized = key.toLowerCase();
+
+  if (session.mode === 'initial') {
+    chooseInitial(normalized);
+    return;
+  }
+
+  if (session.mode === 'label') {
+    chooseLabel(normalized);
   }
 }
 
-/**
- * FIND WORD STARTS
- */
+function chooseInitial(initial) {
+  const bucket = session.buckets.get(initial);
+
+  if (!bucket) {
+    cancelLightspeed();
+    return;
+  }
+
+  session.mode = 'label';
+  session.selectedInitial = initial;
+  session.typedLabel = '';
+
+  // The selector was already visible before this key was typed. Narrowing now
+  // only removes visual noise; it does not introduce another display/wait step.
+  renderBucket(initial);
+}
+
+function chooseLabel(key) {
+  if (!LABEL_KEYS.includes(key)) {
+    cancelLightspeed();
+    return;
+  }
+
+  const bucket = session.buckets.get(session.selectedInitial);
+  if (!bucket) {
+    cancelLightspeed();
+    return;
+  }
+
+  session.typedLabel += key;
+
+  if (session.typedLabel.length < bucket.labelLength) {
+    renderBucket(session.selectedInitial, session.typedLabel);
+    return;
+  }
+
+  const target = bucket.labelMap.get(session.typedLabel);
+  if (!target) {
+    cancelLightspeed();
+    return;
+  }
+
+  finishJump(target.pos);
+}
+
+function backspaceLightspeed() {
+  if (!session) return;
+
+  if (session.mode === 'initial') {
+    cancelLightspeed();
+    return;
+  }
+
+  if (session.typedLabel.length > 0) {
+    session.typedLabel = session.typedLabel.slice(0, -1);
+    renderBucket(session.selectedInitial, session.typedLabel);
+    return;
+  }
+
+  session.mode = 'initial';
+  session.selectedInitial = '';
+  renderAllCodes();
+}
+
+function requiredLabelLength(count) {
+  let length = 1;
+  let capacity = LABEL_KEYS.length;
+
+  while (capacity < count) {
+    length += 1;
+    capacity *= LABEL_KEYS.length;
+  }
+
+  return length;
+}
+
+function indexToLabel(index, length) {
+  const radix = LABEL_KEYS.length;
+  const chars = new Array(length);
+  let value = index;
+
+  for (let i = length - 1; i >= 0; i--) {
+    chars[i] = LABEL_KEYS[value % radix];
+    value = Math.floor(value / radix);
+  }
+
+  return chars.join('');
+}
+
+function renderAllCodes() {
+  if (!session) return;
+  renderTargets(session.targets);
+}
+
+function renderBucket(initial, labelPrefix = '') {
+  if (!session) return;
+
+  const bucket = session.buckets.get(initial);
+  if (!bucket) return;
+
+  const targets = labelPrefix
+    ? bucket.candidates.filter(target => target.label.startsWith(labelPrefix))
+    : bucket.candidates;
+
+  renderTargets(targets);
+}
+
+function renderTargets(targets) {
+  if (!session) return;
+
+  const editor = session.editor;
+  const decorations = [];
+
+  for (const target of targets) {
+    const code = target.rawInitial + target.label;
+    const line = editor.document.lineAt(target.pos.line).text;
+    const replaceLength = Math.max(
+      1,
+      Math.min(code.length, line.length - target.pos.character)
+    );
+
+    const range = new vscode.Range(
+      target.pos,
+      target.pos.translate(0, replaceLength)
+    );
+
+    decorations.push({
+      range,
+      renderOptions: {
+        before: {
+          contentText: code,
+          color: vscode.workspace.getConfiguration('lightspeed').get('labelColor', '#ffd54a'),
+          fontWeight: 'bold',
+          margin: '0',
+          textDecoration: 'none; position: relative; left: 0ch;'
+        }
+      }
+    });
+  }
+
+  editor.setDecorations(labelDecoration, decorations);
+}
+
 function getWordStarts(editor) {
   const results = [];
+  const seen = new Set();
 
   for (const vr of editor.visibleRanges) {
     for (let line = vr.start.line; line <= vr.end.line; line++) {
       const text = editor.document.lineAt(line).text;
 
-      let i = 0;
-      while (i < text.length) {
+      for (let i = 0; i < text.length; i++) {
         if (/[a-zA-Z0-9]/.test(text[i]) && (i === 0 || /\W/.test(text[i - 1]))) {
-          results.push(new vscode.Position(line, i));
+          const key = `${line}:${i}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            results.push(new vscode.Position(line, i));
+          }
         }
-        i++;
       }
     }
   }
@@ -133,154 +287,51 @@ function getWordStarts(editor) {
   return results;
 }
 
-/**
- * APPLY DECORATIONS
- */
-function applyDecorations(editor) {
-  const starts = getWordStarts(editor);
+function finishJump(pos) {
+  if (!session) return;
 
-  const buckets = new Map();
-  targetMap.clear();
-
-  const letterBuckets = new Map();
-
-  for (const pos of starts) {
-    const rawLetter = editor.document.getText(
-      new vscode.Range(pos, pos.translate(0, 1))
-    );
-
-    const letter = rawLetter.toLowerCase();
-
-    if (!letterBuckets.has(letter)) {
-      letterBuckets.set(letter, []);
-    }
-
-    letterBuckets.get(letter).push({ pos, rawLetter });
-  }
-
-  for (const [letter, entries] of letterBuckets) {
-
-    entries.forEach(({ pos, rawLetter }, index) => {
-
-      const colorIndex = index % 8;
-      const color = COLORS[colorIndex];
-
-      const letterHold = ((index >> 3) & 1) === 1;
-      const colorHold = ((index >> 4) & 1) === 1;
-
-      const key = `${letter}-${color.key}-${letterHold}-${colorHold}`;
-      const decoKey = `${color.key}-${letterHold}-${colorHold}`;
-
-      const encoded =
-        (letterHold ? rawLetter + rawLetter : rawLetter) +
-        color.key +
-        (colorHold ? color.key : '');
-
-      const line = editor.document.lineAt(pos.line).text;
-      const maxLength = Math.min(encoded.length, line.length - pos.character);
-
-      const range = new vscode.Range(pos, pos.translate(0, maxLength));
-
-      if (!buckets.has(decoKey)) buckets.set(decoKey, []);
-
-      buckets.get(decoKey).push({
-        range,
-        renderOptions: {
-          before: {
-            contentText: encoded,
-            color: color.hex,
-            margin: '0',
-            textDecoration: 'none; position: relative; left: 0ch;'
-          }
-        }
-      });
-
-      if (!targetMap.has(key)) {
-        targetMap.set(key, []);
-      }
-
-      targetMap.get(key).push(pos);
-    });
-  }
-
-  for (const [key, ranges] of buckets) {
-    const deco = decorationMap.get(key);
-    if (deco) {
-      editor.setDecorations(deco, ranges);
-    }
-  }
-}
-
-/**
- * PARSE INPUT
- */
-function executeJump(input) {
-
-  const cleaned = input.replace(/\s+/g, '').toLowerCase();
-
-  if (cleaned.length < 2) return;
-
-  let i = 0;
-
-  let letter = cleaned[i];
-  let letterHold = false;
-
-  if (cleaned[i + 1] === letter && cleaned.length > 2) {
-    letterHold = true;
-    i += 2;
-  } else {
-    i += 1;
-  }
-
-  let colorKey = cleaned[i];
-  if (!colorKey) return;
-
-  let colorHold = false;
-
-  if (cleaned[i + 1] === colorKey) {
-    colorHold = true;
-  }
-
-  jump(letter, letterHold, colorKey, colorHold);
-}
-
-/**
- * JUMP
- */
-function jump(letter, letterHold, colorKey, colorHold) {
-
-  const key = `${letter}-${colorKey}-${letterHold}-${colorHold}`;
-
-  const positions = targetMap.get(key);
-
-  if (!positions || positions.length === 0) {
-    console.log("No positions found");
-    return;
-  }
-
-  const pos = positions[0];
-
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) return;
+  const editor = session.editor;
+  clearLabels(editor);
 
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos));
 
-
-  clearDecorations(editor);
-
-  // 🔥 FLASH
+  endSession();
   flashPosition(editor, pos);
 }
 
-/**
- * CLEAR DECORATIONS
- */
-function clearDecorations(editor) {
-  for (const deco of decorationMap.values()) {
-    editor.setDecorations(deco, []);
+function flashPosition(editor, pos) {
+  const range = editor.document.getWordRangeAtPosition(pos) ||
+    new vscode.Range(pos, pos.translate(0, 1));
+
+  editor.setDecorations(flashDecoration, [{ range }]);
+
+  setTimeout(() => {
+    editor.setDecorations(flashDecoration, []);
+  }, 350);
+}
+
+function clearLabels(editor) {
+  if (editor) {
+    editor.setDecorations(labelDecoration, []);
   }
 }
 
-function deactivate() { }
+function cancelLightspeed() {
+  if (!session) return;
+
+  clearLabels(session.editor);
+  endSession();
+}
+
+function endSession() {
+  session = null;
+  void vscode.commands.executeCommand('setContext', 'lightspeed.active', false);
+}
+
+function deactivate() {
+  if (session) clearLabels(session.editor);
+  void vscode.commands.executeCommand('setContext', 'lightspeed.active', false);
+}
+
 exports.deactivate = deactivate;

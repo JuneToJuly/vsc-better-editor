@@ -1,16 +1,346 @@
 {
   "name": "lightspeed",
   "displayName": "LightSpeed",
-  "version": "0.0.6",
+  "version": "0.0.10",
   "publisher": "ian.thomas",
-  "engines": { "vscode": "^1.90.0" },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
   "activationEvents": [
-    "onCommand:lightspeed.start"
+    "onCommand:lightspeed.start",
+    "onCommand:lightspeed.type",
+    "onCommand:lightspeed.cancel",
+    "onCommand:lightspeed.backspace"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "lightspeed.start", "title": "LightSpeed: Start" }
-    ]
+      {
+        "command": "lightspeed.start",
+        "title": "LightSpeed: Start"
+      },
+      {
+        "command": "lightspeed.type",
+        "title": "LightSpeed: Type Key"
+      },
+      {
+        "command": "lightspeed.cancel",
+        "title": "LightSpeed: Cancel"
+      },
+      {
+        "command": "lightspeed.backspace",
+        "title": "LightSpeed: Backspace"
+      }
+    ],
+    "keybindings": [
+      {
+        "key": "a",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "a"
+        }
+      },
+      {
+        "key": "b",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "b"
+        }
+      },
+      {
+        "key": "c",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "c"
+        }
+      },
+      {
+        "key": "d",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "d"
+        }
+      },
+      {
+        "key": "e",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "e"
+        }
+      },
+      {
+        "key": "f",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "f"
+        }
+      },
+      {
+        "key": "g",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "g"
+        }
+      },
+      {
+        "key": "h",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "h"
+        }
+      },
+      {
+        "key": "i",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "i"
+        }
+      },
+      {
+        "key": "j",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "j"
+        }
+      },
+      {
+        "key": "k",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "k"
+        }
+      },
+      {
+        "key": "l",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "l"
+        }
+      },
+      {
+        "key": "m",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "m"
+        }
+      },
+      {
+        "key": "n",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "n"
+        }
+      },
+      {
+        "key": "o",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "o"
+        }
+      },
+      {
+        "key": "p",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "p"
+        }
+      },
+      {
+        "key": "q",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "q"
+        }
+      },
+      {
+        "key": "r",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "r"
+        }
+      },
+      {
+        "key": "s",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "s"
+        }
+      },
+      {
+        "key": "t",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "t"
+        }
+      },
+      {
+        "key": "u",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "u"
+        }
+      },
+      {
+        "key": "v",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "v"
+        }
+      },
+      {
+        "key": "w",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "w"
+        }
+      },
+      {
+        "key": "x",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "x"
+        }
+      },
+      {
+        "key": "y",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "y"
+        }
+      },
+      {
+        "key": "z",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "z"
+        }
+      },
+      {
+        "key": "0",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "0"
+        }
+      },
+      {
+        "key": "1",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "1"
+        }
+      },
+      {
+        "key": "2",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "2"
+        }
+      },
+      {
+        "key": "3",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "3"
+        }
+      },
+      {
+        "key": "4",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "4"
+        }
+      },
+      {
+        "key": "5",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "5"
+        }
+      },
+      {
+        "key": "6",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "6"
+        }
+      },
+      {
+        "key": "7",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "7"
+        }
+      },
+      {
+        "key": "8",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "8"
+        }
+      },
+      {
+        "key": "9",
+        "command": "lightspeed.type",
+        "when": "lightspeed.active",
+        "args": {
+          "key": "9"
+        }
+      },
+      {
+        "key": "escape",
+        "command": "lightspeed.cancel",
+        "when": "lightspeed.active"
+      },
+      {
+        "key": "backspace",
+        "command": "lightspeed.backspace",
+        "when": "lightspeed.active"
+      }
+    ],
+    "configuration": {
+      "title": "LightSpeed",
+      "properties": {
+        "lightspeed.labelColor": {
+          "type": "string",
+          "default": "#ffd54a",
+          "description": "Color used for LightSpeed jump labels. Accepts VS Code/CSS color values such as #ffd54a, rgb(255, 213, 74), or yellow."
+        }
+      }
+    }
   }
 }
