@@ -69,17 +69,16 @@ async function startLightspeed() {
 
   const bucketInfo = new Map();
   for (const [initial, candidates] of buckets) {
-    const labelLength = requiredLabelLength(candidates.length);
+    const labels = makeAdaptiveLabels(candidates.length);
     const labelMap = new Map();
 
     candidates.forEach((target, index) => {
-      target.label = indexToLabel(index, labelLength);
+      target.label = labels[index];
       labelMap.set(target.label, target);
     });
 
     bucketInfo.set(initial, {
       candidates,
-      labelLength,
       labelMap
     });
   }
@@ -152,18 +151,22 @@ function chooseLabel(key) {
 
   session.typedLabel += key;
 
-  if (session.typedLabel.length < bucket.labelLength) {
-    renderBucket(session.selectedInitial, session.typedLabel);
+  const target = bucket.labelMap.get(session.typedLabel);
+  if (target) {
+    finishJump(target.pos);
     return;
   }
 
-  const target = bucket.labelMap.get(session.typedLabel);
-  if (!target) {
+  const stillPossible = bucket.candidates.some(
+    candidate => candidate.label.startsWith(session.typedLabel)
+  );
+
+  if (!stillPossible) {
     cancelLightspeed();
     return;
   }
 
-  finishJump(target.pos);
+  renderBucket(session.selectedInitial, session.typedLabel);
 }
 
 function backspaceLightspeed() {
@@ -185,29 +188,65 @@ function backspaceLightspeed() {
   renderAllCodes();
 }
 
-function requiredLabelLength(count) {
-  let length = 1;
-  let capacity = LABEL_KEYS.length;
+/**
+ * Generate prefix-free labels that keep as many targets as possible on a
+ * single selector key. This avoids the old all-or-nothing behavior where the
+ * 27th target forced every label in the bucket to become two characters.
+ *
+ * Examples with a 26-key alphabet:
+ *   1..26 targets  -> a, s, d, ... m
+ *   27 targets     -> 25 one-key labels, then ma, ms
+ *   28 targets     -> 25 one-key labels, then ma, ms, md
+ *
+ * A key used as an overflow prefix is never also used as a complete label,
+ * so input remains unambiguous and jumps still fire immediately.
+ */
+function makeAdaptiveLabels(count) {
+  const keys = [...LABEL_KEYS];
+  const radix = keys.length;
 
-  while (capacity < count) {
-    length += 1;
-    capacity *= LABEL_KEYS.length;
+  if (count <= radix) {
+    return keys.slice(0, count);
   }
 
-  return length;
-}
+  // Keep the implementation fast and simple for normal editor-sized buckets.
+  // Up to radix^2 targets can be represented with a mix of 1- and 2-key labels.
+  if (count <= radix * radix) {
+    const directCount = Math.max(
+      0,
+      Math.floor(((radix * radix) - count) / (radix - 1))
+    );
 
-function indexToLabel(index, length) {
-  const radix = LABEL_KEYS.length;
-  const chars = new Array(length);
-  let value = index;
+    const labels = keys.slice(0, directCount);
+    let remaining = count - directCount;
 
-  for (let i = length - 1; i >= 0; i--) {
-    chars[i] = LABEL_KEYS[value % radix];
-    value = Math.floor(value / radix);
+    for (const prefix of keys.slice(directCount)) {
+      for (const suffix of keys) {
+        if (remaining <= 0) return labels;
+        labels.push(prefix + suffix);
+        remaining -= 1;
+      }
+    }
+
+    return labels;
   }
 
-  return chars.join('');
+  // Extremely dense fallback: fixed-width labels. In practice a visible
+  // same-initial bucket this large is very unusual.
+  let width = 3;
+  while ((radix ** width) < count) width += 1;
+
+  const labels = [];
+  for (let index = 0; index < count; index++) {
+    let value = index;
+    const chars = new Array(width);
+    for (let i = width - 1; i >= 0; i--) {
+      chars[i] = keys[value % radix];
+      value = Math.floor(value / radix);
+    }
+    labels.push(chars.join(''));
+  }
+  return labels;
 }
 
 function renderAllCodes() {
