@@ -1,0 +1,111 @@
+{
+  "name": "workspace-method-search",
+  "displayName": "Workspace Method Search",
+  "description": "Fast workspace-wide method navigation with a Recent Buffers-style search window.",
+  "version": "0.8.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:workspaceMethodSearch.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "workspaceMethodSearch.open",
+        "title": "Workspace Method Search"
+      },
+      {
+        "command": "workspaceMethodSearch.moveDown",
+        "title": "Workspace Method Search: Move Down"
+      },
+      {
+        "command": "workspaceMethodSearch.moveUp",
+        "title": "Workspace Method Search: Move Up"
+      },
+      {
+        "command": "workspaceMethodSearch.rebuildIndex",
+        "title": "Workspace Method Search: Rebuild Index"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "workspaceMethodSearch.open",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m"
+      },
+      {
+        "command": "workspaceMethodSearch.moveDown",
+        "key": "ctrl+j",
+        "mac": "cmd+j",
+        "when": "workspaceMethodSearch.active"
+      },
+      {
+        "command": "workspaceMethodSearch.moveUp",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "workspaceMethodSearch.active"
+      }
+    ],
+    "configuration": {
+      "title": "Workspace Method Search",
+      "properties": {
+        "workspaceMethodSearch.maxResults": {
+          "type": "number",
+          "default": 250,
+          "minimum": 10,
+          "description": "Maximum matching methods displayed."
+        },
+        "workspaceMethodSearch.includeKinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "method",
+              "function",
+              "constructor"
+            ]
+          },
+          "default": [
+            "method",
+            "function",
+            "constructor"
+          ],
+          "description": "Symbol kinds included in search."
+        },
+        "workspaceMethodSearch.include": {
+          "type": "string",
+          "default": "**/*.{java,kt,kts,js,jsx,mjs,cjs,ts,tsx,py,cs,cpp,cc,cxx,c,h,hpp,hh,hxx,go,rs,rb,php,swift}",
+          "description": "Workspace files considered for method indexing."
+        },
+        "workspaceMethodSearch.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional glob patterns excluded from indexing. files.exclude and search.exclude are also honored."
+        },
+        "workspaceMethodSearch.maxFiles": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 100,
+          "description": "Maximum number of source files to index."
+        },
+        "workspaceMethodSearch.indexConcurrency": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 32,
+          "description": "Number of source files whose document symbols may be requested concurrently."
+        }
+      }
+    }
+  }
+}
