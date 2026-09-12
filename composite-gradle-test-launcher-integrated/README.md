@@ -1,3 +1,30 @@
+# CGTL 0.4.60 — Cohesive Replay Manager
+
+Replay Manager now uses one small mental model instead of separate local/remote configuration types:
+
+- **Receiver** — one workspace receiver is the destination for completed Replay captures. Configure its bind address/port once, then start/stop it from the manager. The authentication token is persisted securely so generated launchers keep working across receiver restarts.
+- **Launches** — create either a **JAR Launch** or **Container Launch**. A launch only describes what to execute and what packages/classes to instrument.
+- **Run** — runs that launch from VS Code on the current machine and automatically routes the completed Replay to the active receiver. If the receiver is stopped, Replay starts it automatically.
+- **Generate Script** — creates an inspectable `.ps1`/`.sh` launcher plus a sibling `replay-runtime` directory. Choose only whether the script will run on this computer or another computer; receiver host selection and container host aliases are derived automatically.
+- **Container launches** inject the agent with `JAVA_TOOL_OPTIONS`; local Docker uses `host.docker.internal` plus `host-gateway`, local Podman uses `host.containers.internal`, and remote scripts use the receiver's advertised address. No Replay port is published from the application container because the container initiates the connection to VS Code.
+- **Imports** — `Import Capture…` manually opens a `.jsonl` Replay file, while **Watched Folder** entries auto-import completed captures dropped into those directories.
+
+The manager tree is now organized as:
+
+```text
+Replay Manager
+├─ Receiver
+│  └─ Running / Stopped
+├─ Launches
+│  ├─ JAR launch
+│  └─ Container launch
+└─ Imports
+   ├─ Import Capture…
+   └─ Watched folders
+```
+
+For a launch, **Run** means “execute it here.” **Generate Script** means “I will execute it myself, here or somewhere else.” There are no separate “remote JAR” or “remote container” configuration types.
+
 
 ## 0.4.39
 
@@ -505,3 +532,8 @@ Version 0.4.57 can inject Replay into an existing Java container without changin
 The generated container receives `CGTL_REPLAY_HOST`, `CGTL_REPLAY_PORT`, and `CGTL_REPLAY_TOKEN`, plus `JAVA_TOOL_OPTIONS` containing the Replay `-javaagent`, Byte Buddy boot-classpath entry, and instrumentation settings. The Replay agent now owns capture finalization and remote upload during JVM shutdown. A wrapper script or Python uploader is not required.
 
 For Docker on the same machine as VS Code, the command uses `host.docker.internal` and `--add-host=host.docker.internal:host-gateway`. For Podman it uses `host.containers.internal`. When the container engine is on another machine, the generated command connects directly to the receiver's advertised address and tells you which Replay runtime directory must be copied to the remote container host. Because the container initiates the connection to VS Code, no `-p`/`--publish` option is required for the Replay receiver.
+
+
+### 0.4.60 Remote receiver acknowledgement fix
+
+The Replay TCP receiver now keeps its writable half open after a sender finishes uploading. This allows the receiver to flush and atomically finalize the capture before returning `OK` to the Java agent. This fixes successful uploads being reported by the agent as `Replay receiver response: null`.

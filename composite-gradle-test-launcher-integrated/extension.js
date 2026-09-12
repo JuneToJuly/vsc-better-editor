@@ -40,6 +40,11 @@ let replayRemoteToken;
 let replayRemoteStatusItem;
 const replayRemoteSockets = new Set();
 const REPLAY_REMOTE_PROTOCOL = 'cgtl-replay/1';
+const REPLAY_MANAGER_CONFIGS_KEY = 'replayManager.configurations';
+const REPLAY_MANAGER_RECEIVER_KEY = 'replayManager.receiver';
+const REPLAY_REMOTE_TOKEN_SECRET_KEY = 'compositeGradleTests.replay.remoteToken';
+let replayManagerProvider;
+const replayManagerTerminals = new Map();
 const changedProductionPaths = new Set();
 const changedProductionMethods = new Map();
 let executedLineDecoration;
@@ -83,12 +88,35 @@ async function activate(context) {
   register(context, 'compositeGradleTests.replay.remote.start', startReplayRemoteReceiver);
   register(context, 'compositeGradleTests.replay.remote.stop', stopReplayRemoteReceiver);
   register(context, 'compositeGradleTests.replay.remote.copyConnection', copyReplayRemoteConnection);
+  register(context, 'compositeGradleTests.replay.manager.add', addReplayManagerConfiguration);
+  register(context, 'compositeGradleTests.replay.manager.edit', editReplayManagerConfiguration);
+  register(context, 'compositeGradleTests.replay.manager.delete', deleteReplayManagerConfiguration);
+  register(context, 'compositeGradleTests.replay.manager.start', startReplayManagerConfiguration);
+  register(context, 'compositeGradleTests.replay.manager.stop', stopReplayManagerConfiguration);
+  register(context, 'compositeGradleTests.replay.manager.copyCommand', copyReplayManagerCommand);
+  register(context, 'compositeGradleTests.replay.manager.generateScript', generateReplayManagerScript);
+  register(context, 'compositeGradleTests.replay.manager.configureReceiver', configureReplayManagerReceiver);
+  register(context, 'compositeGradleTests.replay.manager.importCapture', importReplayCapture);
+  register(context, 'compositeGradleTests.replay.manager.refresh', () => replayManagerProvider?.refresh());
+  register(context, 'compositeGradleTests.replay.manager.openCaptureFolder', openReplayManagerCaptureFolder);
+  register(context, 'compositeGradleTests.replay.manager.copyReceiver', async () => copyReplayRemoteConnection());
+
+  replayManagerProvider = new ReplayManagerProvider();
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('compositeGradleTests.replayManager', replayManagerProvider));
 
   await refreshReplayCaptureWatchers();
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('compositeGradleTests.replayAutoImport') || event.affectsConfiguration('compositeGradleTests.replayCaptureDirectories')) {
       refreshReplayCaptureWatchers().catch(error => output.appendLine(`[CGTL FLOW] Replay watcher refresh failed: ${error?.message || error}`));
     }
+    replayManagerProvider?.refresh();
+  }));
+
+  context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
+    for (const [id, tracked] of replayManagerTerminals) {
+      if (tracked === terminal) replayManagerTerminals.delete(id);
+    }
+    replayManagerProvider?.refresh();
   }));
 
   debugEvaluatePanelProvider = new DebugEvaluatePanelProvider();
@@ -1889,7 +1917,7 @@ function handleReplayRemoteSocket(socket) {
       try {
         fs.renameSync(tempPath, finalPath);
         output?.appendLine(`[CGTL REMOTE] Received Replay capture ${path.basename(finalPath)} (${received} bytes) from ${socket.remoteAddress || '<unknown>'}.`);
-        try { socket.write('OK\n'); } catch (_) {}
+        try { socket.end('OK\n'); } catch (_) {}
         const config = vscode.workspace.getConfiguration('compositeGradleTests');
         const result = await importReplayCaptureFile(finalPath, { auto: true, open: config.get('replayAutoOpen', true) });
         if (result) vscode.window.setStatusBarMessage(`Remote Replay loaded: ${path.basename(finalPath)}`, 5000);
@@ -1902,7 +1930,7 @@ function handleReplayRemoteSocket(socket) {
   });
 }
 
-async function startReplayRemoteReceiver() {
+async function startReplayRemoteReceiver(profile) {
   if (replayRemoteServer) {
     const info = replayRemoteConnectionInfo();
     if (info) {
@@ -1912,10 +1940,15 @@ async function startReplayRemoteReceiver() {
     return;
   }
   const config = vscode.workspace.getConfiguration('compositeGradleTests');
-  const host = String(config.get('replayRemoteBindHost', '0.0.0.0') || '0.0.0.0').trim();
-  const port = Number(config.get('replayRemotePort', 57321) || 57321);
-  replayRemoteToken = crypto.randomBytes(24).toString('hex');
-  const server = net.createServer(handleReplayRemoteSocket);
+  const managerReceiver = replayManagerReceiverSettings();
+  const host = String(profile?.bindHost || managerReceiver.bindHost || config.get('replayRemoteBindHost', '0.0.0.0') || '0.0.0.0').trim();
+  const port = Number(profile?.port || managerReceiver.port || config.get('replayRemotePort', 57321) || 57321);
+  replayRemoteToken = await extensionContext.secrets.get(REPLAY_REMOTE_TOKEN_SECRET_KEY);
+  if (!replayRemoteToken) {
+    replayRemoteToken = crypto.randomBytes(24).toString('hex');
+    await extensionContext.secrets.store(REPLAY_REMOTE_TOKEN_SECRET_KEY, replayRemoteToken);
+  }
+  const server = net.createServer({ allowHalfOpen: true }, handleReplayRemoteSocket);
   replayRemoteServer = server;
   server.on('error', error => {
     output?.appendLine(`[CGTL REMOTE] Receiver error: ${error?.message || error}`);
@@ -1937,8 +1970,9 @@ async function startReplayRemoteReceiver() {
   const info = replayRemoteConnectionInfo();
   output?.appendLine(`[CGTL REMOTE] Receiver listening on ${info?.bindHost}:${info?.port}. Remote host suggestion: ${info?.host}.`);
   output?.appendLine(`[CGTL REMOTE] Captures are stored in ${replayRemoteCaptureDirectory()}.`);
-  const action = await vscode.window.showInformationMessage(`Replay receiver listening on ${info?.host}:${info?.port}. A new authentication token was generated for this receiver session.`, 'Copy Connection');
+  const action = await vscode.window.showInformationMessage(`Replay receiver listening on ${info?.host}:${info?.port}. The receiver uses the saved Replay authentication token for generated launchers.`, 'Copy Connection');
   if (action === 'Copy Connection') await copyReplayRemoteConnection();
+  replayManagerProvider?.refresh();
 }
 
 function stopReplayRemoteReceiver() {
@@ -1954,6 +1988,7 @@ function stopReplayRemoteReceiver() {
   try { replayRemoteStatusItem?.dispose(); } catch (_) {}
   replayRemoteStatusItem = undefined;
   output?.appendLine('[CGTL REMOTE] Receiver stopped.');
+  replayManagerProvider?.refresh();
 }
 
 function quotePowerShellLiteral(value) {
@@ -2358,6 +2393,10 @@ async function importReplayCaptureFile(capturePath, options = {}) {
 
 function configuredReplayCaptureDirectories() {
   const directories = new Set();
+  for (const profile of replayManagerConfigurations()) {
+    if (profile.type === 'watcher' && profile.enabled !== false && profile.captureDirectory) directories.add(path.resolve(profile.captureDirectory));
+    if (profile.type === 'jar' && profile.captureDirectory) directories.add(path.resolve(profile.captureDirectory));
+  }
   const persisted = extensionContext?.globalState?.get(REPLAY_CAPTURE_DIRS_STATE_KEY, []) || [];
   for (const directory of persisted) {
     if (directory) directories.add(path.resolve(String(directory)));
@@ -2433,6 +2472,478 @@ function scheduleReplayAutoImport(capturePath) {
     }
   }, 350);
   replayAutoImportTimers.set(absolute, timer);
+}
+
+
+function replayManagerConfigurations() {
+  return extensionContext?.workspaceState?.get(REPLAY_MANAGER_CONFIGS_KEY, []) || [];
+}
+
+function replayManagerLaunches() {
+  return replayManagerConfigurations().filter(profile => profile.type === 'jar' || profile.type === 'container');
+}
+
+function replayManagerWatchers() {
+  return replayManagerConfigurations().filter(profile => profile.type === 'watcher');
+}
+
+function replayManagerReceiverSettings() {
+  const saved = extensionContext?.workspaceState?.get(REPLAY_MANAGER_RECEIVER_KEY, {}) || {};
+  const legacy = replayManagerConfigurations().find(profile => profile.type === 'receiver') || {};
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  return {
+    bindHost: String(saved.bindHost || legacy.bindHost || config.get('replayRemoteBindHost', '0.0.0.0') || '0.0.0.0'),
+    port: Number(saved.port || legacy.port || config.get('replayRemotePort', 57321) || 57321)
+  };
+}
+
+async function saveReplayManagerConfigurations(configurations) {
+  await extensionContext.workspaceState.update(REPLAY_MANAGER_CONFIGS_KEY, configurations);
+  replayManagerProvider?.refresh();
+  await refreshReplayCaptureWatchers();
+}
+
+function replayManagerConfigurationFromArg(arg) {
+  if (!arg) return undefined;
+  const id = typeof arg === 'string' ? arg : (arg.profileId || arg.id || arg.profile?.id);
+  return replayManagerConfigurations().find(profile => profile.id === id);
+}
+
+function replayManagerWorkspaceRoot() {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+}
+
+function replayManagerId(name) {
+  const slug = String(name || 'replay').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 36) || 'replay';
+  return `${slug}-${Date.now().toString(36)}`;
+}
+
+function replayManagerSlug(name) {
+  return String(name || 'replay').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'replay';
+}
+
+async function replayManagerInputName(value, fallback) {
+  return String(await vscode.window.showInputBox({ title: 'Replay launch name', value: value || fallback || '', prompt: 'Name shown in Replay Manager.' }) || '').trim();
+}
+
+async function configureReplayManagerReceiver() {
+  const current = replayManagerReceiverSettings();
+  const bindHost = String(await vscode.window.showInputBox({
+    title: 'Replay Receiver — Bind address',
+    value: current.bindHost,
+    prompt: '0.0.0.0 accepts local and network connections. 127.0.0.1 accepts this machine only.'
+  }) || '').trim();
+  if (!bindHost) return;
+  const portText = await vscode.window.showInputBox({
+    title: 'Replay Receiver — Port',
+    value: String(current.port),
+    validateInput: value => { const n = Number(value); return Number.isInteger(n) && n > 0 && n <= 65535 ? undefined : 'Enter a port from 1 to 65535.'; }
+  });
+  if (portText === undefined) return;
+  const next = { bindHost, port: Number(portText) };
+  const wasRunning = !!replayRemoteServer;
+  if (wasRunning) stopReplayRemoteReceiver();
+  await extensionContext.workspaceState.update(REPLAY_MANAGER_RECEIVER_KEY, next);
+  replayManagerProvider?.refresh();
+  if (wasRunning) await startReplayRemoteReceiver(next);
+}
+
+async function editReplayManagerProfile(profile, forcedType) {
+  const current = profile || {};
+  let type = forcedType || current.type;
+  if (!type) {
+    const pick = await vscode.window.showQuickPick([
+      { label: 'JAR Launch', value: 'jar', description: 'Instrument an executable JAR. Run here or generate a script to run elsewhere.' },
+      { label: 'Container Launch', value: 'container', description: 'Instrument an existing Docker/Podman image with JAVA_TOOL_OPTIONS.' },
+      { label: 'Watched Folder', value: 'watcher', description: 'Automatically import completed Replay capture files dropped into a folder.' }
+    ], { title: 'Add to Replay Manager' });
+    type = pick?.value;
+  }
+  if (!type) return undefined;
+
+  if (type === 'jar') {
+    let jarPath = current.jarPath;
+    if (!jarPath) {
+      const pick = await vscode.window.showOpenDialog({ title: 'Select executable JAR', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'Java archives': ['jar'] } });
+      jarPath = pick?.[0]?.fsPath;
+    } else {
+      const editedJar = await vscode.window.showInputBox({ title: 'Executable JAR', value: jarPath, prompt: 'Path to the executable JAR.' });
+      if (editedJar === undefined) return undefined;
+      jarPath = String(editedJar).trim();
+    }
+    if (!jarPath) return undefined;
+    const name = await replayManagerInputName(current.name, path.basename(jarPath, '.jar'));
+    if (!name) return undefined;
+    const packages = String(await vscode.window.showInputBox({ title: 'Instrument packages/classes', value: current.packages || defaultReplayPackageText(), prompt: 'Comma-separated packages/classes.' }) || '').trim();
+    if (!packages) return undefined;
+    const excludes = String(await vscode.window.showInputBox({ title: 'Exclude from instrumentation', value: current.excludes ?? flowEncodedExclusions().join(','), prompt: 'Optional comma-separated package:/class: exclusions.' }) ?? current.excludes ?? '').trim();
+    const argsText = await vscode.window.showInputBox({ title: 'Application arguments', value: (current.arguments || []).join(' '), prompt: 'Arguments passed after -jar.' });
+    if (argsText === undefined) return undefined;
+    return { ...current, id: current.id || replayManagerId(name), type, name, jarPath, packages, excludes, arguments: splitReplayArguments(argsText) };
+  }
+
+  if (type === 'container') {
+    const name = await replayManagerInputName(current.name, 'Container Replay');
+    if (!name) return undefined;
+    const enginePick = await vscode.window.showQuickPick([
+      { label: 'Docker', value: 'docker' }, { label: 'Podman', value: 'podman' }
+    ], { title: 'Container engine', placeHolder: current.engine || 'docker' });
+    const engine = enginePick?.value || current.engine;
+    if (!engine) return undefined;
+    const image = String(await vscode.window.showInputBox({ title: 'Container image', value: current.image || '', placeHolder: 'my-company/order-service:latest' }) || '').trim();
+    if (!image) return undefined;
+    const packages = String(await vscode.window.showInputBox({ title: 'Instrument packages/classes', value: current.packages || defaultReplayPackageText(), prompt: 'Comma-separated packages/classes.' }) || '').trim();
+    if (!packages) return undefined;
+    const excludes = String(await vscode.window.showInputBox({ title: 'Exclude from instrumentation', value: current.excludes ?? flowEncodedExclusions().join(','), prompt: 'Optional comma-separated package:/class: exclusions.' }) ?? current.excludes ?? '').trim();
+    const extraText = await vscode.window.showInputBox({ title: 'Additional container arguments', value: (current.arguments || []).join(' '), prompt: 'Optional arguments inserted after docker/podman run.' });
+    if (extraText === undefined) return undefined;
+    return { ...current, id: current.id || replayManagerId(name), type, name, engine, image, packages, excludes, arguments: splitReplayArguments(extraText) };
+  }
+
+  if (type === 'watcher') {
+    let captureDirectory = current.captureDirectory;
+    if (!captureDirectory) {
+      const pick = await vscode.window.showOpenDialog({ title: 'Select Replay watched folder', canSelectFiles: false, canSelectFolders: true, canSelectMany: false });
+      captureDirectory = pick?.[0]?.fsPath;
+    } else {
+      const editedDirectory = await vscode.window.showInputBox({ title: 'Watched folder', value: captureDirectory, prompt: 'Completed .jsonl Replay files placed here are imported automatically.' });
+      if (editedDirectory === undefined) return undefined;
+      captureDirectory = String(editedDirectory).trim();
+    }
+    if (!captureDirectory) return undefined;
+    const name = await replayManagerInputName(current.name, path.basename(captureDirectory) || 'Replay Captures');
+    if (!name) return undefined;
+    return { ...current, id: current.id || replayManagerId(name), type, name, captureDirectory: path.resolve(captureDirectory), enabled: current.enabled !== false };
+  }
+  return undefined;
+}
+
+function splitReplayArguments(text) {
+  const source = String(text || '').trim();
+  if (!source) return [];
+  const result = [];
+  const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|([^\s]+)/g;
+  let match;
+  while ((match = re.exec(source))) result.push((match[1] ?? match[2] ?? match[3] ?? '').replace(/\\"/g, '"'));
+  return result;
+}
+
+async function addReplayManagerConfiguration() {
+  const profile = await editReplayManagerProfile(undefined);
+  if (!profile) return;
+  await saveReplayManagerConfigurations([...replayManagerConfigurations().filter(p => p.type !== 'receiver'), profile]);
+}
+
+async function editReplayManagerConfiguration(arg) {
+  const current = replayManagerConfigurationFromArg(arg);
+  if (!current) return;
+  const updated = await editReplayManagerProfile(current);
+  if (!updated) return;
+  await saveReplayManagerConfigurations(replayManagerConfigurations().map(profile => profile.id === current.id ? updated : profile));
+}
+
+async function deleteReplayManagerConfiguration(arg) {
+  const current = replayManagerConfigurationFromArg(arg);
+  if (!current) return;
+  const label = current.type === 'watcher' ? 'watched folder' : 'Replay launch';
+  const answer = await vscode.window.showWarningMessage(`Delete ${label} “${current.name}”?`, { modal: true }, 'Delete');
+  if (answer !== 'Delete') return;
+  await stopReplayManagerConfiguration(current, true);
+  await saveReplayManagerConfigurations(replayManagerConfigurations().filter(profile => profile.id !== current.id));
+}
+
+function replayManagerTerminalName(profile) { return `Replay: ${profile.name}`; }
+
+function replayLaunchPropertiesForProfile(profile) {
+  const props = replayLaunchProperties(profile.packages || defaultReplayPackageText());
+  if (profile.excludes !== undefined) props.excludes = String(profile.excludes || '').trim();
+  return props;
+}
+
+async function ensureReplayReceiver() {
+  if (!replayRemoteConnectionInfo()) await startReplayRemoteReceiver(replayManagerReceiverSettings());
+  return replayRemoteConnectionInfo();
+}
+
+function replayReceiverHostForExecution(connection, target, location) {
+  if (location === 'remote') return connection.host;
+  if (target === 'docker') return 'host.docker.internal';
+  if (target === 'podman') return 'host.containers.internal';
+  return '127.0.0.1';
+}
+
+function replayJavaOptions(profile, runtime, capturePath) {
+  const props = replayLaunchPropertiesForProfile(profile);
+  const options = [
+    `-javaagent:${runtime.agentTarget}`,
+    `-Xbootclasspath/a:${runtime.byteBuddyTarget}`,
+    capturePath ? `-Dcgtl.flow.output=${capturePath}` : '',
+    `-Dcgtl.flow.byteBuddyJar=${runtime.byteBuddyTarget}`,
+    `-Dcgtl.flow.packages=${props.packages}`,
+    `-Dcgtl.flow.excludes=${props.excludes}`,
+    `-Dcgtl.flow.stateAdapters=${props.adapters}`,
+    `-Dcgtl.flow.capturePoints=${props.capturePoints}`,
+    `-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`,
+    `-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`,
+    `-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`,
+    `-Dcgtl.flow.lineState=${props.lineState}`,
+    `-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`,
+    `-Dcgtl.flow.lineState.maxFields=${props.lineFields}`,
+    `-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`
+  ];
+  return options.filter(Boolean);
+}
+
+async function buildReplayManagerCommand(profile, options = {}) {
+  const connection = await ensureReplayReceiver();
+  if (!connection) throw new Error('Replay receiver is not running.');
+  const location = options.location || 'local';
+  const quote = process.platform === 'win32' ? quotePowerShellLiteral : quoteShellLiteral;
+
+  if (profile.type === 'jar') {
+    const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'runtime');
+    const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+    const receiverHost = replayReceiverHostForExecution(connection, 'jar', location);
+    const javaOptions = replayJavaOptions(profile, runtime);
+    const java = `java ${javaOptions.map(quote).join(' ')} -jar ${quote(profile.jarPath)} ${(profile.arguments || []).map(quote).join(' ')}`.trim();
+    if (process.platform === 'win32') {
+      return { command: `$env:CGTL_REPLAY_HOST=${quote(receiverHost)}; $env:CGTL_REPLAY_PORT=${quote(String(connection.port))}; $env:CGTL_REPLAY_TOKEN=${quote(connection.token)}; ${java}`, receiverHost };
+    }
+    return { command: `CGTL_REPLAY_HOST=${quote(receiverHost)} CGTL_REPLAY_PORT=${quote(String(connection.port))} CGTL_REPLAY_TOKEN=${quote(connection.token)} ${java}`, receiverHost };
+  }
+
+  if (profile.type === 'container') {
+    const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'container-runtime');
+    const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+    const props = replayLaunchPropertiesForProfile(profile);
+    const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+    const receiverHost = replayReceiverHostForExecution(connection, profile.engine || 'docker', location);
+    const name = `cgtl-replay-${profile.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 40)}`;
+    const args = [
+      profile.engine || 'docker', 'run', '--rm', '--name', name,
+      ...(location === 'local' && profile.engine === 'docker' ? ['--add-host=host.docker.internal:host-gateway'] : []),
+      ...(profile.arguments || []),
+      '-v', `${runtimeDir}:/cgtl-replay:ro`,
+      '-e', `CGTL_REPLAY_HOST=${receiverHost}`,
+      '-e', `CGTL_REPLAY_PORT=${connection.port}`,
+      '-e', `CGTL_REPLAY_TOKEN=${connection.token}`,
+      '-e', `JAVA_TOOL_OPTIONS=${javaOptions}`,
+      profile.image
+    ];
+    return { command: `${args[0]} ${args.slice(1).map(quote).join(' ')}`, containerName: name, receiverHost };
+  }
+  return undefined;
+}
+
+async function startReplayManagerConfiguration(arg) {
+  const profile = replayManagerConfigurationFromArg(arg) || arg;
+  if (!profile) return;
+  if (profile.type === 'watcher') {
+    const next = replayManagerConfigurations().map(item => item.id === profile.id ? { ...item, enabled: true } : item);
+    await saveReplayManagerConfigurations(next);
+    vscode.window.setStatusBarMessage(`Replay watched folder enabled: ${profile.name}`, 3000);
+    return;
+  }
+  if (profile.type !== 'jar' && profile.type !== 'container') return;
+  const built = await buildReplayManagerCommand(profile, { location: 'local' });
+  if (!built?.command) return;
+  replayManagerTerminals.get(profile.id)?.dispose();
+  const terminal = vscode.window.createTerminal({ name: replayManagerTerminalName(profile), cwd: replayManagerWorkspaceRoot() });
+  replayManagerTerminals.set(profile.id, terminal);
+  const terminalCommand = process.platform === 'win32' ? `${built.command}; exit $LASTEXITCODE` : `${built.command}; exit $?`;
+  terminal.sendText(terminalCommand, true);
+  terminal.show(true);
+  replayManagerProvider?.refresh();
+}
+
+async function stopReplayManagerConfiguration(arg, silent = false) {
+  const profile = replayManagerConfigurationFromArg(arg) || arg;
+  if (!profile) return;
+  if (profile.type === 'watcher') {
+    const next = replayManagerConfigurations().map(item => item.id === profile.id ? { ...item, enabled: false } : item);
+    await saveReplayManagerConfigurations(next);
+    if (!silent) vscode.window.setStatusBarMessage(`Replay watched folder disabled: ${profile.name}`, 3000);
+    return;
+  }
+  const terminal = replayManagerTerminals.get(profile.id);
+  if (terminal) {
+    try { terminal.dispose(); } catch (_) {}
+    replayManagerTerminals.delete(profile.id);
+  }
+  if (profile.type === 'container') {
+    const name = `cgtl-replay-${profile.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 40)}`;
+    cp.execFile(profile.engine || 'docker', ['stop', name], { windowsHide: true }, () => {});
+  }
+  replayManagerProvider?.refresh();
+}
+
+async function copyReplayManagerCommand(arg) {
+  const profile = replayManagerConfigurationFromArg(arg);
+  if (!profile || (profile.type !== 'jar' && profile.type !== 'container')) return;
+  const built = await buildReplayManagerCommand(profile, { location: 'local' });
+  if (!built?.command) return;
+  await vscode.env.clipboard.writeText(built.command);
+  vscode.window.setStatusBarMessage('Replay launch command copied.', 2500);
+}
+
+function replayGeneratedScriptName(profile) {
+  const ext = process.platform === 'win32' ? '.ps1' : '.sh';
+  return `run-${replayManagerSlug(profile.name)}-replay${ext}`;
+}
+
+function powerShellRelativeRuntimePath(scriptRootExpr, relative) {
+  return `Join-Path ${scriptRootExpr} ${quotePowerShellLiteral(relative.replace(/\\/g, '/'))}`;
+}
+
+async function generateReplayManagerScript(arg) {
+  const profile = replayManagerConfigurationFromArg(arg);
+  if (!profile || (profile.type !== 'jar' && profile.type !== 'container')) return;
+  const connection = await ensureReplayReceiver();
+  if (!connection) return;
+  const where = await vscode.window.showQuickPick([
+    { label: 'Run on this computer', value: 'local', description: 'Generate a launcher for this machine.' },
+    { label: 'Run on another computer', value: 'remote', description: `Generate a portable launcher that sends Replay to ${connection.host}:${connection.port}.` }
+  ], { title: `Generate Replay script — ${profile.name}` });
+  if (!where) return;
+
+  let defaultDirectory;
+  if (profile.type === 'jar' && profile.jarPath) defaultDirectory = path.dirname(profile.jarPath);
+  else defaultDirectory = path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'launchers', replayManagerSlug(profile.name));
+  fs.mkdirSync(defaultDirectory, { recursive: true });
+  const picked = await vscode.window.showSaveDialog({
+    title: 'Save Replay launch script',
+    defaultUri: vscode.Uri.file(path.join(defaultDirectory, replayGeneratedScriptName(profile))),
+    filters: process.platform === 'win32' ? { 'PowerShell': ['ps1'] } : { 'Shell script': ['sh'] }
+  });
+  if (!picked) return;
+
+  const scriptPath = picked.fsPath;
+  const scriptDir = path.dirname(scriptPath);
+  const runtimeDir = path.join(scriptDir, 'replay-runtime');
+  const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+  const props = replayLaunchPropertiesForProfile(profile);
+  const receiverHost = replayReceiverHostForExecution(connection, profile.type === 'container' ? (profile.engine || 'docker') : 'jar', where.value);
+  let contents;
+
+  if (process.platform === 'win32') {
+    const envLines = `$env:CGTL_REPLAY_HOST=${quotePowerShellLiteral(receiverHost)}\n$env:CGTL_REPLAY_PORT=${quotePowerShellLiteral(String(connection.port))}\n$env:CGTL_REPLAY_TOKEN=${quotePowerShellLiteral(connection.token)}\n`;
+    if (profile.type === 'jar') {
+      const jarName = path.basename(profile.jarPath);
+      const jarExpression = where.value === 'remote' ? `Join-Path $Root ${quotePowerShellLiteral(jarName)}` : quotePowerShellLiteral(profile.jarPath);
+      const options = replayJavaOptions(profile, { agentTarget: '$Agent', byteBuddyTarget: '$ByteBuddy' });
+      const optionText = options.map(opt => {
+        if (opt.startsWith('-javaagent:$Agent')) return '"-javaagent:$Agent"';
+        if (opt.startsWith('-Xbootclasspath/a:$ByteBuddy')) return '"-Xbootclasspath/a:$ByteBuddy"';
+        if (opt.startsWith('-Dcgtl.flow.byteBuddyJar=$ByteBuddy')) return '"-Dcgtl.flow.byteBuddyJar=$ByteBuddy"';
+        return quotePowerShellLiteral(opt);
+      }).join(' ');
+      contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Agent = Join-Path $Root 'replay-runtime/cgtl-flow-agent.jar'\n$ByteBuddy = Join-Path $Root ${quotePowerShellLiteral(`replay-runtime/${path.basename(runtime.byteBuddyTarget)}`)}\n$Jar = ${jarExpression}\nif (-not (Test-Path $Jar)) { throw "Place ${jarName} next to this script or update \`$Jar." }\n${envLines}\njava ${optionText} -jar $Jar ${(profile.arguments || []).map(quotePowerShellLiteral).join(' ')}\nexit $LASTEXITCODE\n`;
+    } else {
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+      const addHost = where.value === 'local' && profile.engine === 'docker' ? "  '--add-host=host.docker.internal:host-gateway'\n" : '';
+      const extra = (profile.arguments || []).map(v => `  ${quotePowerShellLiteral(v)}\n`).join('');
+      contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Runtime = Join-Path $Root 'replay-runtime'\n${envLines}\n$RunArgs = @(\n  'run'\n  '--rm'\n${addHost}${extra}  '-v'\n  "${'$'}{Runtime}:/cgtl-replay:ro"\n  '-e'\n  "CGTL_REPLAY_HOST=${receiverHost}"\n  '-e'\n  "CGTL_REPLAY_PORT=${connection.port}"\n  '-e'\n  "CGTL_REPLAY_TOKEN=${connection.token}"\n  '-e'\n  ${quotePowerShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)}\n  ${quotePowerShellLiteral(profile.image)}\n)\n& ${profile.engine || 'docker'} @RunArgs\nexit $LASTEXITCODE\n`;
+    }
+  } else {
+    const envLines = `export CGTL_REPLAY_HOST=${quoteShellLiteral(receiverHost)}\nexport CGTL_REPLAY_PORT=${quoteShellLiteral(String(connection.port))}\nexport CGTL_REPLAY_TOKEN=${quoteShellLiteral(connection.token)}\n`;
+    if (profile.type === 'jar') {
+      const jarName = path.basename(profile.jarPath);
+      const jarShell = where.value === 'remote' ? `\"$ROOT/${jarName}\"` : quoteShellLiteral(profile.jarPath);
+      const runtimeShell = { agentTarget: '$ROOT/replay-runtime/cgtl-flow-agent.jar', byteBuddyTarget: `$ROOT/replay-runtime/${path.basename(runtime.byteBuddyTarget)}` };
+      const options = replayJavaOptions(profile, runtimeShell).map(opt => opt.replace(/\$ROOT/g, '"$ROOT"'));
+      contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nJAR=${jarShell}\nif [[ ! -f "$JAR" ]]; then echo "Place ${jarName} next to this script or update JAR." >&2; exit 2; fi\n${envLines}\njava ${options.join(' ')} -jar "$JAR" ${(profile.arguments || []).map(quoteShellLiteral).join(' ')}\n`;
+    } else {
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+      const addHost = where.value === 'local' && profile.engine === 'docker' ? ' --add-host=host.docker.internal:host-gateway' : '';
+      contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nRUNTIME="$ROOT/replay-runtime"\n${envLines}\n${profile.engine || 'docker'} run --rm${addHost} ${(profile.arguments || []).map(quoteShellLiteral).join(' ')} \\\n  -v "$RUNTIME:/cgtl-replay:ro" \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_HOST=${receiverHost}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_PORT=${connection.port}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_TOKEN=${connection.token}`)} \\\n  -e ${quoteShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)} \\\n  ${quoteShellLiteral(profile.image)}\n`;
+    }
+  }
+
+  fs.writeFileSync(scriptPath, contents, 'utf8');
+  if (process.platform !== 'win32') { try { fs.chmodSync(scriptPath, 0o755); } catch (_) {} }
+  if (profile.type === 'jar' && where.value === 'remote') {
+    const targetJar = path.join(scriptDir, path.basename(profile.jarPath));
+    if (path.resolve(targetJar) !== path.resolve(profile.jarPath) && !fs.existsSync(targetJar)) {
+      const copy = await vscode.window.showInformationMessage('Copy the JAR into the generated launcher folder too?', 'Copy JAR', 'Leave it');
+      if (copy === 'Copy JAR') fs.copyFileSync(profile.jarPath, targetJar);
+    }
+  }
+  output?.appendLine(`[CGTL REPLAY] Generated ${profile.type} launcher: ${scriptPath}`);
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(scriptPath), { preview: false });
+  vscode.window.showInformationMessage(`Replay launcher generated. ${where.value === 'remote' ? 'Copy this folder to the target machine and run the script.' : 'Run the script whenever you want to capture this launch.'}`);
+}
+
+async function openReplayManagerCaptureFolder(arg) {
+  const profile = replayManagerConfigurationFromArg(arg);
+  const directory = profile?.captureDirectory || replayRemoteCaptureDirectory();
+  if (!directory) return;
+  fs.mkdirSync(directory, { recursive: true });
+  await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(directory));
+}
+
+class ReplayManagerProvider {
+  constructor() { this.emitter = new vscode.EventEmitter(); this.onDidChangeTreeData = this.emitter.event; }
+  refresh() { this.emitter.fire(undefined); }
+  getTreeItem(element) { return element; }
+  getChildren(element) {
+    if (!element) {
+      const receiver = new vscode.TreeItem('Receiver', vscode.TreeItemCollapsibleState.Expanded);
+      receiver.kind = 'receiverRoot'; receiver.contextValue = 'replayManagerReceiverRoot'; receiver.iconPath = new vscode.ThemeIcon(replayRemoteServer ? 'radio-tower' : 'circle-outline');
+      const launches = new vscode.TreeItem('Launches', vscode.TreeItemCollapsibleState.Expanded);
+      launches.kind = 'launchesRoot'; launches.contextValue = 'replayManagerLaunchesRoot'; launches.iconPath = new vscode.ThemeIcon('rocket');
+      const imports = new vscode.TreeItem('Imports', vscode.TreeItemCollapsibleState.Expanded);
+      imports.kind = 'importsRoot'; imports.contextValue = 'replayManagerImportsRoot'; imports.iconPath = new vscode.ThemeIcon('cloud-download');
+      return [receiver, launches, imports];
+    }
+    if (element.kind === 'receiverRoot') {
+      const info = replayRemoteConnectionInfo();
+      const settings = replayManagerReceiverSettings();
+      const status = new vscode.TreeItem(info ? `Running — ${info.host}:${info.port}` : `Stopped — ${settings.bindHost}:${settings.port}`, vscode.TreeItemCollapsibleState.None);
+      status.description = info ? 'ready for Replay uploads' : 'start once, then run or generate launchers';
+      status.contextValue = info ? 'replayManagerReceiverRunning' : 'replayManagerReceiverStopped';
+      status.iconPath = new vscode.ThemeIcon(info ? 'check' : 'debug-stop');
+      status.tooltip = info ? `Listening on ${info.bindHost}:${info.port}\nAdvertised as ${info.host}:${info.port}` : `Configured to listen on ${settings.bindHost}:${settings.port}`;
+      return [status];
+    }
+    if (element.kind === 'launchesRoot') return replayManagerLaunches().map(profile => this.profileItem(profile));
+    if (element.kind === 'importsRoot') {
+      const manual = new vscode.TreeItem('Import Capture…', vscode.TreeItemCollapsibleState.None);
+      manual.kind = 'manualImport'; manual.contextValue = 'replayManagerManualImport'; manual.iconPath = new vscode.ThemeIcon('file-symlink-file');
+      manual.command = { command: 'compositeGradleTests.replay.manager.importCapture', title: 'Import Replay Capture' };
+      return [manual, ...replayManagerWatchers().map(profile => this.profileItem(profile))];
+    }
+    return [];
+  }
+  profileItem(profile) {
+    const item = new vscode.TreeItem(profile.name, vscode.TreeItemCollapsibleState.None);
+    item.profileId = profile.id;
+    item.profile = profile;
+    const running = profile.type === 'watcher' ? profile.enabled !== false : replayManagerTerminals.has(profile.id);
+    item.contextValue = profile.type === 'watcher'
+      ? `replayManagerWatcher_${running ? 'running' : 'stopped'}`
+      : `replayManagerLaunch_${profile.type}_${running ? 'running' : 'stopped'}`;
+    item.description = this.description(profile, running);
+    item.tooltip = this.tooltip(profile);
+    item.iconPath = new vscode.ThemeIcon(profile.type === 'jar' ? 'coffee' : profile.type === 'container' ? 'package' : 'eye');
+    item.command = { command: 'compositeGradleTests.replay.manager.edit', title: profile.type === 'watcher' ? 'Edit Watched Folder' : 'Edit Replay Launch', arguments: [item] };
+    return item;
+  }
+  description(profile, running) {
+    if (profile.type === 'jar') return `${running ? 'running' : 'ready'} • JAR • ${path.basename(profile.jarPath || '')}`;
+    if (profile.type === 'container') return `${running ? 'running' : 'ready'} • ${profile.engine || 'docker'} • ${profile.image || ''}`;
+    if (profile.type === 'watcher') return `${profile.enabled !== false ? 'watching' : 'disabled'} • ${profile.captureDirectory || ''}`;
+    return '';
+  }
+  tooltip(profile) {
+    const lines = [profile.name];
+    if (profile.type === 'jar') lines.push('Run: launches locally from VS Code', 'Generate Script: run locally or on another machine');
+    if (profile.type === 'container') lines.push('Run: launches the local container engine', 'Generate Script: run this container locally or on another machine');
+    if (profile.packages) lines.push(`Packages: ${profile.packages}`);
+    if (profile.jarPath) lines.push(`JAR: ${profile.jarPath}`);
+    if (profile.image) lines.push(`Image: ${profile.image}`);
+    if (profile.captureDirectory) lines.push(`Watched folder: ${profile.captureDirectory}`);
+    return lines.join('\n');
+  }
 }
 
 function collectFlowEvents(flowFile) {

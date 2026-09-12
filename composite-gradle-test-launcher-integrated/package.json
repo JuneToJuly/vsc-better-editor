@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.57",
+  "version": "0.4.60",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -417,6 +417,66 @@
         "command": "compositeGradleTests.replay.remote.copyConnection",
         "title": "Replay: Copy Remote Receiver Connection",
         "icon": "$(copy)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.add",
+        "title": "Replay Manager: Add Launch or Watched Folder",
+        "icon": "$(add)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.edit",
+        "title": "Replay Manager: Edit Configuration",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.delete",
+        "title": "Replay Manager: Delete Configuration",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.start",
+        "title": "Replay Manager: Run / Enable",
+        "icon": "$(play)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.stop",
+        "title": "Replay Manager: Stop / Disable",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.copyCommand",
+        "title": "Replay Manager: Copy Local Launch Command",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.refresh",
+        "title": "Replay Manager: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.openCaptureFolder",
+        "title": "Replay Manager: Open Capture Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.copyReceiver",
+        "title": "Replay Manager: Copy Receiver Connection",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.generateScript",
+        "title": "Replay Manager: Generate Script",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.configureReceiver",
+        "title": "Replay Manager: Configure Receiver",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "compositeGradleTests.replay.manager.importCapture",
+        "title": "Replay Manager: Import Capture",
+        "icon": "$(cloud-download)"
       }
     ],
     "menus": {
@@ -587,6 +647,16 @@
           "command": "compositeGradleTests.replay.stateSearchClear",
           "when": "view == compositeGradleTests.replayState && compositeGradleTests.replayStateSearchActive",
           "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.add",
+          "when": "view == compositeGradleTests.replayManager",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.refresh",
+          "when": "view == compositeGradleTests.replayManager",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -683,6 +753,81 @@
         {
           "command": "compositeGradleTests.replay.adapters.create",
           "when": "view == compositeGradleTests.replayState && viewItem == replayStateValue.unsupported",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.start",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_.*_stopped/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.stop",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_.*_running/",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.generateScript",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_/",
+          "group": "inline@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.edit",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.copyCommand",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.delete",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerLaunch_/",
+          "group": "navigation@9"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.stop",
+          "when": "view == compositeGradleTests.replayManager && viewItem == replayManagerWatcher_running",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.start",
+          "when": "view == compositeGradleTests.replayManager && viewItem == replayManagerWatcher_stopped",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.edit",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerWatcher_/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.openCaptureFolder",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerWatcher_/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.delete",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerWatcher_/",
+          "group": "navigation@9"
+        },
+        {
+          "command": "compositeGradleTests.replay.remote.start",
+          "when": "view == compositeGradleTests.replayManager && viewItem == replayManagerReceiverStopped",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.remote.stop",
+          "when": "view == compositeGradleTests.replayManager && viewItem == replayManagerReceiverRunning",
+          "group": "inline@1"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.copyReceiver",
+          "when": "view == compositeGradleTests.replayManager && viewItem == replayManagerReceiverRunning",
+          "group": "inline@2"
+        },
+        {
+          "command": "compositeGradleTests.replay.manager.configureReceiver",
+          "when": "view == compositeGradleTests.replayManager && viewItem =~ /replayManagerReceiver/",
           "group": "navigation@1"
         }
       ],
@@ -1109,6 +1254,10 @@
         }
       ],
       "compositeGradleTests.replay": [
+        {
+          "id": "compositeGradleTests.replayManager",
+          "name": "Replay Manager"
+        },
         {
           "id": "compositeGradleTests.replayFiles",
           "name": "Where Did Execution Go?"
