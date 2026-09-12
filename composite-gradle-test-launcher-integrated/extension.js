@@ -777,6 +777,20 @@ function refreshRuntimeInitScripts(invocation) {
   return { ...invocation, args: refreshed };
 }
 
+function monotonicMilliseconds() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+function performanceMode(invocation) {
+  if (invocation.captureFlow) return 'replay';
+  if (invocation.captureCoverage || invocation.coverageDir) return 'report';
+  return 'normal';
+}
+
+function formatPerformanceMilliseconds(value) {
+  return `${Number(value || 0).toFixed(1)}ms`;
+}
+
 async function executeInvocation(invocation) {
   // Replay line numbers come from the bytecode Gradle compiles on disk. If the editor
   // contains unsaved Java changes, the captured line table can point at a different
@@ -817,6 +831,15 @@ async function executeInvocation(invocation) {
     await delay(250);
   }
 
+  // Performance measurements deliberately begin after any previous run has been stopped.
+  // This keeps the benchmark focused on the work required for this invocation rather
+  // than including time spent waiting for user interaction or process shutdown.
+  const performanceStartedAt = monotonicMilliseconds();
+  const setupProfile = {};
+  const setupMeasure = (name, fn) => {
+    const started = monotonicMilliseconds();
+    try { return fn(); } finally { setupProfile[name] = (setupProfile[name] || 0) + (monotonicMilliseconds() - started); }
+  };
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   // Code Report and Code Flow are deliberately isolated. JaCoCo and the flow
   // agent both transform application classes and must never run together.
@@ -844,11 +867,11 @@ async function executeInvocation(invocation) {
   }
   if (invocation.captureFlow) {
     const flowDir = path.join(extensionContext.globalStorageUri.fsPath, 'flow', runId);
-    fs.mkdirSync(flowDir, { recursive: true });
+    setupMeasure('flowDirectory', () => fs.mkdirSync(flowDir, { recursive: true }));
     const flowFile = path.join(flowDir, 'flow.jsonl');
     const agentJar = path.join(extensionContext.extensionPath, 'resources', 'cgtl-flow-agent.jar');
     if (!fs.existsSync(agentJar)) throw new Error('The packaged flow agent could not be found.');
-    ensureFlowInitScript();
+    setupMeasure('ensureFlowInitScript', () => ensureFlowInitScript());
     const flowArgs = invocation.args.filter(arg => !String(arg).startsWith('-Dcgtl.flow.'));
     const taskIndex = flowArgs.indexOf(invocation.task);
     const testPackage = String(invocation.classFilter || invocation.filter || '').split('.').slice(0, -1).join('.');
@@ -857,8 +880,14 @@ async function executeInvocation(invocation) {
     // Replay instrumentation UI. Reusing invocation.flowConfiguredPrefixes here made
     // newly included packages/classes appear in Settings and diagnostics but not in
     // -Dcgtl.flow.packages for the actual JVM.
+    const configStartedAt = monotonicMilliseconds();
     const configuredPrefixes = flowConfiguredInstrumentationPrefixes();
+    const encodedExclusions = flowEncodedExclusions();
+    const stateAdapters = flowStateAdapterClasses();
+    const capturePoints = replayCapturePoints();
+    const replayConfig = vscode.workspace.getConfiguration('compositeGradleTests');
     const tracedPrefixes = [...new Set([testPackage, ...configuredPrefixes].map(normalizeFlowPrefix).filter(Boolean))];
+    setupProfile.resolveReplayConfiguration = monotonicMilliseconds() - configStartedAt;
     if (!tracedPrefixes.length) {
       throw new Error('Code Flow could not determine a package to trace. Configure compositeGradleTests.flowPackagePrefixes.');
     }
@@ -868,16 +897,16 @@ async function executeInvocation(invocation) {
       `-Dcgtl.flow.output=${flowFile}`,
       `-Dcgtl.flow.agent=${agentJar}`,
       `-Dcgtl.flow.packages=${tracedPrefixes.join(',')}`,
-      `-Dcgtl.flow.excludes=${flowEncodedExclusions().join(',')}`,
-      `-Dcgtl.flow.stateAdapters=${flowStateAdapterClasses().join(',')}`,
-      `-Dcgtl.flow.capturePoints=${replayCapturePoints().join(',')}`,
-      `-Dcgtl.flow.capturePoint.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxDepth', 8) || 8)}`,
-      `-Dcgtl.flow.capturePoint.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxFields', 200) || 200)}`,
-      `-Dcgtl.flow.capturePoint.maxCollectionItems=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayCapturePointMaxCollectionItems', 200) || 200)}`,
-      `-Dcgtl.flow.lineState=${String(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineState', 'receiver') || 'receiver')}`,
-      `-Dcgtl.flow.lineState.maxDepth=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxDepth', 2) || 2)}`,
-      `-Dcgtl.flow.lineState.maxFields=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxFields', 30) || 30)}`,
-      `-Dcgtl.flow.lineState.maxCollectionItems=${Number(vscode.workspace.getConfiguration('compositeGradleTests').get('flowLineStateMaxCollectionItems', 20) || 20)}`
+      `-Dcgtl.flow.excludes=${encodedExclusions.join(',')}`,
+      `-Dcgtl.flow.stateAdapters=${stateAdapters.join(',')}`,
+      `-Dcgtl.flow.capturePoints=${capturePoints.join(',')}`,
+      `-Dcgtl.flow.capturePoint.maxDepth=${Number(replayConfig.get('replayCapturePointMaxDepth', 8) || 8)}`,
+      `-Dcgtl.flow.capturePoint.maxFields=${Number(replayConfig.get('replayCapturePointMaxFields', 200) || 200)}`,
+      `-Dcgtl.flow.capturePoint.maxCollectionItems=${Number(replayConfig.get('replayCapturePointMaxCollectionItems', 200) || 200)}`,
+      `-Dcgtl.flow.lineState=${String(replayConfig.get('flowLineState', 'receiver') || 'receiver')}`,
+      `-Dcgtl.flow.lineState.maxDepth=${Number(replayConfig.get('flowLineStateMaxDepth', 2) || 2)}`,
+      `-Dcgtl.flow.lineState.maxFields=${Number(replayConfig.get('flowLineStateMaxFields', 30) || 30)}`,
+      `-Dcgtl.flow.lineState.maxCollectionItems=${Number(replayConfig.get('flowLineStateMaxCollectionItems', 20) || 20)}`
     );
     invocation = {
       ...invocation,
@@ -895,6 +924,7 @@ async function executeInvocation(invocation) {
   output.appendLine(`> ${formatCommand(invocation.executable, invocation.args)}`);
   output.appendLine(`cwd: ${invocation.cwd}`);
   if (invocation.captureFlow) {
+    const diagnosticsStartedAt = monotonicMilliseconds();
     output.appendLine(`[CGTL FLOW] Automatic package: ${invocation.flowAutomaticPackage || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Instrumentation packages: ${flowPackagePrefixes().join(', ') || '<none>'}`);
     output.appendLine(`[CGTL FLOW] Instrumentation files/classes: ${flowClassNames().join(', ') || '<none>'}`);
@@ -909,6 +939,7 @@ async function executeInvocation(invocation) {
       output.appendLine(`[CGTL FLOW] File/class config ${entry.label}/${entry.scope}: ${entry.values.join(', ')}`);
     }
     output.appendLine(`[CGTL FLOW] Effective instrumentation: ${(invocation.flowTracedPrefixes || []).join(', ') || '<none>'}`);
+    setupProfile.flowDiagnostics = monotonicMilliseconds() - diagnosticsStartedAt;
   }
   output.appendLine('');
   if (invocation.showOutput) output.show(true);
@@ -929,13 +960,17 @@ async function executeInvocation(invocation) {
     documentUri: invocation.documentUri,
     invocation: sanitizeInvocation(invocation)
   };
+  const initialResultsViewStartedAt = monotonicMilliseconds();
   showResultsView(runningResult);
+  setupProfile.initialResultsView = monotonicMilliseconds() - initialResultsViewStartedAt;
 
   statusItem.text = `$(sync~spin) Gradle: ${invocation.displayName}`;
   statusItem.tooltip = 'Click to stop the current Composite Gradle test';
   statusItem.show();
 
-  const startedAt = Date.now();
+  const processStartedAt = monotonicMilliseconds();
+  const setupDurationMs = processStartedAt - performanceStartedAt;
+  setupProfile.unattributed = Math.max(0, setupDurationMs - Object.values(setupProfile).reduce((sum, value) => sum + Number(value || 0), 0));
   let debuggerStarted = false;
   let combinedDebugBuffer = '';
   let rawOutput = '';
@@ -973,22 +1008,58 @@ async function executeInvocation(invocation) {
   });
 
   child.on('close', async code => {
-    const durationMs = Date.now() - startedAt;
+    const processFinishedAt = monotonicMilliseconds();
+    const durationMs = Math.round(processFinishedAt - processStartedAt);
     const seconds = (durationMs / 1000).toFixed(1);
     output.appendLine(`\n[finished] Exit code ${code} after ${seconds}s`);
     if (runningProcess === child) runningProcess = undefined;
     statusItem.hide();
 
+    const processingStartedAt = monotonicMilliseconds();
+    const processingProfile = {};
+    let phaseStartedAt = monotonicMilliseconds();
     const parsed = parseGradleTestOutput(rawOutput, invocation, code);
+    processingProfile.parseGradleOutput = monotonicMilliseconds() - phaseStartedAt;
+    phaseStartedAt = monotonicMilliseconds();
     const rawFlowEvents = invocation.flowFile ? collectFlowEvents(invocation.flowFile) : [];
+    processingProfile.readAndParseFlowJson = monotonicMilliseconds() - phaseStartedAt;
     if (invocation.flowFile) {
       const flowCounts = rawFlowEvents.reduce((counts, event) => { const kind = event.event || 'unknown'; counts[kind] = (counts[kind] || 0) + 1; return counts; }, {});
       output.appendLine(`[CGTL FLOW] Captured events: enter=${flowCounts.enter || 0}, line=${flowCounts.line || 0}, exit=${flowCounts.exit || 0}`);
     }
-    const flowEvents = rawFlowEvents.length ? await enrichFlowEvents(rawFlowEvents, invocation.sourcePath || runningResult?.sourcePath) : [];
+    const enrichmentProfile = {};
+    phaseStartedAt = monotonicMilliseconds();
+    const flowEvents = rawFlowEvents.length ? await enrichFlowEvents(rawFlowEvents, invocation.sourcePath || runningResult?.sourcePath, enrichmentProfile) : [];
+    processingProfile.enrichFlowEvents = monotonicMilliseconds() - phaseStartedAt;
+    phaseStartedAt = monotonicMilliseconds();
     const executedCode = invocation.coverageDir
       ? await collectExecutedCode(invocation.coverageDir)
       : await executedCodeFromFlow(flowEvents, invocation.sourcePath || runningResult?.sourcePath);
+    processingProfile.executedCode = monotonicMilliseconds() - phaseStartedAt;
+    const processingFinishedAt = monotonicMilliseconds();
+    const performance = {
+      mode: performanceMode(invocation),
+      setupMs: setupDurationMs,
+      gradleMs: processFinishedAt - processStartedAt,
+      resultProcessingMs: processingFinishedAt - processingStartedAt,
+      totalMs: processingFinishedAt - performanceStartedAt,
+      flowEventCount: rawFlowEvents.length,
+      setupProfile,
+      processingProfile: { ...processingProfile, enrichment: enrichmentProfile }
+    };
+    output.appendLine(
+      `[CGTL PERF] mode=${performance.mode} `
+      + `setup=${formatPerformanceMilliseconds(performance.setupMs)} `
+      + `gradle=${formatPerformanceMilliseconds(performance.gradleMs)} `
+      + `processing=${formatPerformanceMilliseconds(performance.resultProcessingMs)} `
+      + `total=${formatPerformanceMilliseconds(performance.totalMs)} `
+      + `events=${performance.flowEventCount}`
+    );
+    if (invocation.captureFlow) {
+      output.appendLine(`[CGTL PERF SETUP] ${Object.entries(setupProfile).map(([name, value]) => `${name}=${formatPerformanceMilliseconds(value)}`).join(' ')}`);
+      output.appendLine(`[CGTL PERF PROCESS] ${Object.entries(processingProfile).map(([name, value]) => `${name}=${formatPerformanceMilliseconds(value)}`).join(' ')}`);
+      output.appendLine(`[CGTL PERF ENRICH] ${Object.entries(enrichmentProfile).map(([name, value]) => `${name}=${formatPerformanceMilliseconds(value)}`).join(' ') || '<none>'}`);
+    }
     const result = {
       ...runningResult,
       status: parsed.status,
@@ -1004,6 +1075,7 @@ async function executeInvocation(invocation) {
       flowCaptured: !!invocation.flowFile,
       coverageCaptured: !!invocation.coverageDir,
       analysisMode: invocation.captureFlow ? 'flow' : (invocation.coverageDir ? 'report' : 'normal'),
+      performance,
       output: rawOutput,
       exitCode: code
     };
@@ -1663,22 +1735,151 @@ function collectFlowEvents(flowFile) {
 }
 
 
-async function resolveFlowSource(className, preferredSourcePath) {
-  const topLevelClass = String(className || '').split('$')[0];
+function createFlowEnrichmentContext(preferredSourcePath, profiler = {}) {
+  const preferredProject = preferredSourcePath ? findProjectDirectoryFromSourcePath(preferredSourcePath) : undefined;
+  const preferredWorkspace = preferredSourcePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(preferredSourcePath))?.uri.fsPath : undefined;
+  const context = {
+    preferredSourcePath,
+    preferredProject,
+    preferredWorkspace,
+    profiler,
+    sourceByClass: new Map(),
+    documentByUri: new Map(),
+    parsedByUri: new Map(),
+    methodByKey: new Map(),
+    sourceRoots: []
+  };
+  const startedAt = monotonicMilliseconds();
+  context.sourceRoots = discoverFlowSourceRoots(context);
+  addFlowProfileTime(profiler, 'sourceRootDiscovery', startedAt);
+  return context;
+}
+
+function discoverFlowSourceRoots(context) {
+  const roots = [];
+  const seen = new Set();
+  const addRoot = root => {
+    if (!root) return;
+    const key = normalizePath(root);
+    if (seen.has(key) || !fs.existsSync(root)) return;
+    seen.add(key);
+    roots.push(root);
+  };
+
+  // Put the selected Gradle project's conventional roots first. In the common
+  // case this makes source resolution a handful of existsSync calls.
+  for (const base of [context?.preferredProject, context?.preferredWorkspace]) {
+    if (!base) continue;
+    addRoot(path.join(base, 'src', 'main', 'java'));
+    addRoot(path.join(base, 'src', 'main', 'kotlin'));
+    addRoot(path.join(base, 'src', 'test', 'java'));
+    addRoot(path.join(base, 'src', 'test', 'kotlin'));
+  }
+
+  const ignored = new Set(['.git', '.gradle', '.idea', '.vscode', 'build', 'bin', 'node_modules', 'out', 'target']);
+  const scan = directory => {
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch (_) { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || ignored.has(entry.name)) continue;
+      const child = path.join(directory, entry.name);
+      if (entry.name === 'src') {
+        // A source tree may contain tens of thousands of package directories.
+        // Inspect only the conventional source-set roots and never descend into
+        // package contents. Continue scanning siblings for nested Gradle projects.
+        addRoot(path.join(child, 'main', 'java'));
+        addRoot(path.join(child, 'main', 'kotlin'));
+        addRoot(path.join(child, 'test', 'java'));
+        addRoot(path.join(child, 'test', 'kotlin'));
+        continue;
+      }
+      scan(child);
+    }
+  };
+
+  for (const folder of vscode.workspace.workspaceFolders || []) scan(folder.uri.fsPath);
+  return roots;
+}
+
+function addFlowProfileTime(profiler, name, startedAt) {
+  profiler[name] = (profiler[name] || 0) + (monotonicMilliseconds() - startedAt);
+}
+
+function normalizeFlowClassName(className) {
+  let value = String(className || '').trim();
+  if (!value) return '';
+  // JVM stack frames can surface hidden/lambda classes as e.g.
+  // pkg.Type$$Lambda$123/0x000000... and descriptors as Lpkg/Type;.
+  if (value.startsWith('L') && value.endsWith(';')) value = value.slice(1, -1);
+  value = value.replace(/\\/g, '/');
+  const hiddenSuffix = value.indexOf('/0x');
+  if (hiddenSuffix >= 0) value = value.slice(0, hiddenSuffix);
+  value = value.replace(/\$\$Lambda\$.*$/, '');
+  value = value.replace(/\$lambda\$.*$/i, '');
+  value = value.split('$')[0];
+  value = value.replace(/\//g, '.');
+  return value.replace(/^\.+|\.+$/g, '');
+}
+
+function sourceRootFlowCandidates(topLevelClass, context) {
+  const relativeJava = `${topLevelClass.replace(/\./g, path.sep)}.java`;
+  const relativeKotlin = `${topLevelClass.replace(/\./g, path.sep)}.kt`;
+  const candidates = [];
+  for (const root of context?.sourceRoots || []) {
+    const normalized = normalizePath(root);
+    candidates.push(path.join(root, normalized.endsWith('/kotlin') ? relativeKotlin : relativeJava));
+  }
+  return candidates;
+}
+
+async function resolveFlowSource(className, preferredSourcePath, context, options = {}) {
+  const topLevelClass = normalizeFlowClassName(className);
   if (!topLevelClass) return undefined;
+  const cache = context?.sourceByClass;
+  if (cache?.has(topLevelClass)) return cache.get(topLevelClass) || undefined;
+
+  // Most replay events stay in the selected Gradle project. Try deterministic
+  // source-root paths first; fs.existsSync is dramatically cheaper than four
+  // workspace-wide findFiles scans.
+  const directStartedAt = monotonicMilliseconds();
+  for (const candidate of sourceRootFlowCandidates(topLevelClass, context || createFlowEnrichmentContext(preferredSourcePath))) {
+    if (fs.existsSync(candidate)) {
+      const uri = vscode.Uri.file(candidate);
+      if (context?.profiler) addFlowProfileTime(context.profiler, 'sourceRootLookup', directStartedAt);
+      cache?.set(topLevelClass, uri);
+      return uri;
+    }
+  }
+  if (context?.profiler) addFlowProfileTime(context.profiler, 'sourceRootLookup', directStartedAt);
+
+  // Caller metadata frequently points at framework, reflection, hidden, or other
+  // classes that are not part of the workspace. A global VS Code glob for each
+  // such miss is much more expensive than leaving that optional caller source
+  // unresolved. Callee resolution retains the compatibility fallback.
+  if (options.allowWorkspaceFallback === false) {
+    cache?.set(topLevelClass, null);
+    if (context?.profiler) context.profiler.workspaceFallbackSkipped = (context.profiler.workspaceFallbackSkipped || 0) + 1;
+    return undefined;
+  }
+
   const relativeJava = `${topLevelClass.replace(/\./g, '/')}.java`;
   const relativeKotlin = `${topLevelClass.replace(/\./g, '/')}.kt`;
   const exclude = '**/{build,bin,.gradle,node_modules,out,target}/**';
+  const searchStartedAt = monotonicMilliseconds();
   const candidates = [
     ...await vscode.workspace.findFiles(`**/src/main/java/${relativeJava}`, exclude, 100),
     ...await vscode.workspace.findFiles(`**/src/main/kotlin/${relativeKotlin}`, exclude, 100),
     ...await vscode.workspace.findFiles(`**/src/test/java/${relativeJava}`, exclude, 100),
     ...await vscode.workspace.findFiles(`**/src/test/kotlin/${relativeKotlin}`, exclude, 100)
   ];
-  if (!candidates.length) return undefined;
+  if (context?.profiler) addFlowProfileTime(context.profiler, 'workspaceSourceSearch', searchStartedAt);
+  if (!candidates.length) {
+    cache?.set(topLevelClass, null);
+    return undefined;
+  }
 
-  const preferredProject = preferredSourcePath ? findProjectDirectoryFromSourcePath(preferredSourcePath) : undefined;
-  const preferredWorkspace = preferredSourcePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(preferredSourcePath))?.uri.fsPath : undefined;
+  const preferredProject = context?.preferredProject || (preferredSourcePath ? findProjectDirectoryFromSourcePath(preferredSourcePath) : undefined);
+  const preferredWorkspace = context?.preferredWorkspace || (preferredSourcePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(preferredSourcePath))?.uri.fsPath : undefined);
   const normalizedProject = preferredProject ? normalizePath(preferredProject) : '';
   const normalizedWorkspace = preferredWorkspace ? normalizePath(preferredWorkspace) : '';
 
@@ -1694,36 +1895,62 @@ async function resolveFlowSource(className, preferredSourcePath) {
     };
     return score(b) - score(a) || a.fsPath.localeCompare(b.fsPath);
   });
+  cache?.set(topLevelClass, candidates[0]);
   return candidates[0];
 }
 
-async function enrichFlowEvents(events, preferredSourcePath) {
-  const classCache = new Map();
-  const methodCache = new Map();
+async function flowParsedDocument(uri, context) {
+  const key = normalizePath(uri.fsPath);
+  let document = context.documentByUri.get(key);
+  if (!document) {
+    const startedAt = monotonicMilliseconds();
+    document = await vscode.workspace.openTextDocument(uri);
+    addFlowProfileTime(context.profiler, 'openTextDocument', startedAt);
+    context.documentByUri.set(key, document);
+  }
+  let parsed = context.parsedByUri.get(key);
+  if (!parsed) {
+    const startedAt = monotonicMilliseconds();
+    if (/\.java$/i.test(uri.fsPath)) {
+      // Replay already knows the class/method/line. It only needs a method body
+      // range for entry/exit navigation, so avoid waking JDT's document-symbol
+      // provider in the hot path and use the existing lightweight source parser.
+      const packageMatch = document.getText().match(/^\s*package\s+([\w.]+)\s*;/m);
+      const annotations = new Set(vscode.workspace.getConfiguration('compositeGradleTests', document.uri)
+        .get('testAnnotations', ['Test', 'ParameterizedTest', 'RepeatedTest', 'TestFactory', 'TestTemplate']));
+      const fallback = parseJavaSourceFallback(document, annotations);
+      parsed = { packageName: packageMatch ? packageMatch[1] : '', classes: fallback.classes, methods: fallback.methods };
+      addFlowProfileTime(context.profiler, 'lightweightSourceParse', startedAt);
+    } else {
+      // Keep language-server symbols as a compatibility fallback for Kotlin and
+      // any future source type not handled by the lightweight Java parser.
+      parsed = await parseJavaDocument(document);
+      addFlowProfileTime(context.profiler, 'parseDocumentSymbols', startedAt);
+    }
+    context.parsedByUri.set(key, parsed);
+  }
+  return parsed;
+}
+
+async function enrichFlowEvents(events, preferredSourcePath, profiler = {}) {
+  const context = createFlowEnrichmentContext(preferredSourcePath, profiler);
   const enriched = [];
   for (const event of events || []) {
     if (!event.className || !event.methodName) { enriched.push(event); continue; }
-    const topLevelClass = String(event.className).split('$')[0];
-    let uri = classCache.get(topLevelClass);
-    if (uri === undefined) {
-      uri = await resolveFlowSource(topLevelClass, preferredSourcePath) || null;
-      classCache.set(topLevelClass, uri);
-    }
+    const topLevelClass = normalizeFlowClassName(event.className);
+    const sourceStartedAt = monotonicMilliseconds();
+    const uri = await resolveFlowSource(topLevelClass, preferredSourcePath, context) || null;
+    addFlowProfileTime(profiler, 'calleeSourceResolution', sourceStartedAt);
     if (!uri) { enriched.push(event); continue; }
 
-    const methodKey = `${topLevelClass}#${event.methodName}`;
-    let info = methodCache.get(methodKey);
+    const methodKey = `${normalizePath(uri.fsPath)}#${event.methodName}`;
+    let info = context.methodByKey.get(methodKey);
     if (info === undefined) {
       info = null;
       try {
-        const document = await vscode.workspace.openTextDocument(uri);
-        const parsed = await parseJavaDocument(document);
+        const parsed = await flowParsedDocument(uri, context);
         const method = parsed.methods.find(item => item.name === event.methodName);
         if (method) {
-          // Document-symbol ranges can begin before the declaration (for
-          // annotations, comments, or a fallback parser's wider method range).
-          // selectionRange points at the actual method name and is therefore
-          // the correct source-first location for an entry boundary.
           info = {
             sourcePath: uri.fsPath,
             sourceFile: path.basename(uri.fsPath),
@@ -1734,7 +1961,7 @@ async function enrichFlowEvents(events, preferredSourcePath) {
           info = { sourcePath: uri.fsPath, sourceFile: path.basename(uri.fsPath) };
         }
       } catch (_) {}
-      methodCache.set(methodKey, info);
+      context.methodByKey.set(methodKey, info);
     }
     if (!info) { enriched.push(event); continue; }
     if (event.event === 'line') {
@@ -1758,19 +1985,14 @@ async function enrichFlowEvents(events, preferredSourcePath) {
       });
     }
   }
-  // Resolve the exact caller source independently from the callee source. The
-  // agent captures the JVM caller frame at method entry, including its line.
-  // Keeping both paths on the event lets replay show call-site and resume steps
-  // even when projects contain duplicate source filenames.
-  const callerClassCache = new Map();
+
+  // Caller and callee resolution intentionally share the same source cache.
+  // A class that appears in both roles now incurs at most one workspace search.
   for (const event of enriched) {
     if (!event.callerClassName || Number(event.callerLine || 0) <= 0) continue;
-    const callerTopLevel = String(event.callerClassName).split('$')[0];
-    let callerUri = callerClassCache.get(callerTopLevel);
-    if (callerUri === undefined) {
-      callerUri = await resolveFlowSource(callerTopLevel, preferredSourcePath) || null;
-      callerClassCache.set(callerTopLevel, callerUri);
-    }
+    const callerStartedAt = monotonicMilliseconds();
+    const callerUri = await resolveFlowSource(event.callerClassName, preferredSourcePath, context, { allowWorkspaceFallback: false }) || null;
+    addFlowProfileTime(profiler, 'callerSourceResolution', callerStartedAt);
     if (callerUri) {
       event.callerSourcePath = callerUri.fsPath;
       event.callerSourceFile = event.callerSourceFile || path.basename(callerUri.fsPath);
@@ -1784,7 +2006,7 @@ async function executedCodeFromFlow(events, preferredSourcePath) {
   const sourceCache = new Map();
   for (const event of events || []) {
     if (event.event !== 'line' || !event.line || !event.className) continue;
-    const topLevelClass = String(event.className).split('$')[0];
+    const topLevelClass = normalizeFlowClassName(event.className);
     let uri = sourceCache.get(topLevelClass);
     if (uri === undefined) {
       uri = event.sourcePath ? vscode.Uri.file(event.sourcePath) : (await resolveFlowSource(topLevelClass, preferredSourcePath) || null);
@@ -2883,6 +3105,9 @@ function renderResultDetail(result) {
   const className = result.invocation?.classDisplayName || result.filter?.split('.').slice(-2, -1)[0] || '';
   const simpleName = isClass ? result.displayName : String(result.displayName || '').split('.').pop();
   const subtitle = [className && className !== simpleName ? className : '', result.task, formatDuration(result.durationMs)].filter(Boolean).join(' · ');
+  const performanceSection = result.performance
+    ? `<div class="section"><div class="section-title"><h3>Performance · ${escapeHtml(result.performance.mode || 'run')}</h3></div><div class="empty-output">Setup ${formatPerformanceMilliseconds(result.performance.setupMs)} · Gradle ${formatPerformanceMilliseconds(result.performance.gradleMs)} · Processing ${formatPerformanceMilliseconds(result.performance.resultProcessingMs)} · Total ${formatPerformanceMilliseconds(result.performance.totalMs)}${Number(result.performance.flowEventCount || 0) ? ` · ${Number(result.performance.flowEventCount)} replay events` : ''}</div></div>`
+    : '';
   const failureItems = Array.isArray(result.failures) && result.failures.length
     ? result.failures
     : (result.failure ? [{ displayName: result.displayName, failure: result.failure }] : []);
@@ -2929,7 +3154,7 @@ function renderResultDetail(result) {
 
   return `<div class="hero"><span class="big status ${escapeHtml(result.status)}">${statusGlyph(result.status)}</span><div><h1>${escapeHtml(simpleName)}</h1><div class="subtitle" title="${escapeHtml(result.filter)}">${escapeHtml([className && className !== simpleName ? className : '', result.task].filter(Boolean).join(' · '))}</div></div><span class="hero-duration">${formatDuration(result.durationMs)}</span></div>
     <div class="actions"><button class="primary" data-command="rerun" data-id="${escapeHtml(result.id)}">↻ ${rerunLabel}</button><button data-command="debug" data-id="${escapeHtml(result.id)}">◇ ${debugLabel}</button><span class="separator"></span><button data-command="openSource" data-id="${escapeHtml(result.id)}">Open test</button><button data-command="copy" data-id="${escapeHtml(result.id)}">Copy</button><button data-command="rerunReport" data-id="${escapeHtml(result.id)}">Code report</button><button data-command="rerunFlow" data-id="${escapeHtml(result.id)}">Code flow</button><button class="primary" data-command="analyze" data-id="${escapeHtml(result.id)}">Analyze</button><button class="raw" data-command="raw" data-id="${escapeHtml(result.id)}">Raw</button></div>
-    ${failureSection}${consoleSection}${flowSection}${executedSection}${resultSection}`;
+    ${performanceSection}${failureSection}${consoleSection}${flowSection}${executedSection}${resultSection}`;
 }
 
 

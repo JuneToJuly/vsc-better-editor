@@ -40,6 +40,10 @@ public final class BootstrapAgent {
   private static volatile Field callIdField;
   private static volatile boolean consoleLines;
   private static final AtomicLong lineStateFailures = new AtomicLong();
+  private static final AtomicLong lineEventCount = new AtomicLong();
+  private static final AtomicLong lineStateTotalNanos = new AtomicLong();
+  private static final AtomicLong lineSnapshotNanos = new AtomicLong();
+  private static final AtomicLong lineWriteNanos = new AtomicLong();
   public static final Object UNSET_LOCAL = new Object();
   private static final IdentityHashMap<Object, SnapshotCacheEntry> snapshotCache = new IdentityHashMap<>();
   private static final AtomicLong snapshotIds = new AtomicLong();
@@ -69,12 +73,17 @@ public final class BootstrapAgent {
   private BootstrapAgent() {}
 
   public static void premain(String args, Instrumentation instrumentation) {
+    final long premainStarted = System.nanoTime();
     try {
       Class<?> flowAgent = Class.forName("local.cgtl.flow.FlowAgent", true, ClassLoader.getSystemClassLoader());
       Method premain = flowAgent.getMethod("premain", String.class, Instrumentation.class);
+      long phaseStarted = System.nanoTime();
       premain.invoke(null, args, instrumentation);
+      System.err.println("[CGTL PERF AGENT] methodAgent=" + millisSince(phaseStarted));
+      phaseStarted = System.nanoTime();
       bindRecorder(flowAgent);
-      consoleLines = Boolean.parseBoolean(System.getProperty("cgtl.flow.consoleLines", "true"));
+      System.err.println("[CGTL PERF AGENT] bindRecorder=" + millisSince(phaseStarted));
+      consoleLines = Boolean.parseBoolean(System.getProperty("cgtl.flow.consoleLines", "false"));
       System.err.println("[CGTL FLOW] Line state validation mode=" + System.getProperty("cgtl.flow.lineState", "receiver")
           + " maxDepth=" + snapshotMaxDepth
           + " maxFields=" + snapshotMaxFields
@@ -83,7 +92,17 @@ public final class BootstrapAgent {
           + " maxDepth=" + capturePointMaxDepth
           + " maxFields=" + capturePointMaxFields
           + " maxItems=" + capturePointMaxItems);
+      phaseStarted = System.nanoTime();
       installLineTransformer(instrumentation);
+      System.err.println("[CGTL PERF AGENT] lineTransformer=" + millisSince(phaseStarted));
+      System.err.println("[CGTL PERF AGENT] premainTotal=" + millisSince(premainStarted));
+      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        long count = lineEventCount.get();
+        System.err.println("[CGTL PERF CAPTURE] lineEvents=" + count
+            + " total=" + nanosToMillis(lineStateTotalNanos.get())
+            + " snapshot=" + nanosToMillis(lineSnapshotNanos.get())
+            + " write=" + nanosToMillis(lineWriteNanos.get()));
+      }, "cgtl-perf-summary"));
     } catch (Throwable error) {
       System.err.println("[CGTL FLOW] Ordered line replay disabled: " + error);
       error.printStackTrace(System.err);
@@ -108,6 +127,7 @@ public final class BootstrapAgent {
   /** Called from injected bytecode at each source line-number boundary. */
   public static void lineState(String className, String methodName, String descriptor, int line,
       Object receiver, String[] localNames, Object[] localValues) {
+    final long lineStarted = System.nanoTime();
     try {
       AtomicLong sequence = sharedSequence;
       Writer output = sharedOutput;
@@ -119,10 +139,12 @@ public final class BootstrapAgent {
       int depth = currentDepth();
       String sourceFile = sourceFile(className);
       boolean capturePoint = isCapturePoint(className, line);
+      long snapshotStarted = System.nanoTime();
       String receiverJson = capturePoint ? deepSnapshotForCapturePoint(receiver) : snapshotForLine(receiver);
       String localsJson = capturePoint
           ? deepLocalsJson(className, methodName, descriptor, line, localNames, localValues)
           : localsJson(className, methodName, descriptor, line, localNames, localValues);
+      lineSnapshotNanos.addAndGet(System.nanoTime() - snapshotStarted);
       String json = "{\"sequence\":" + eventSequence +
           ",\"event\":\"line\"" +
           ",\"capturePoint\":" + capturePoint +
@@ -139,11 +161,13 @@ public final class BootstrapAgent {
           ",\"threadName\":" + quote(Thread.currentThread().getName()) +
           ",\"frameReceiver\":" + receiverJson +
           ",\"frameLocals\":" + localsJson + "}";
+      long writeStarted = System.nanoTime();
       synchronized (Class.forName("local.cgtl.flow.FlowAgent$Recorder")) {
         output.write(json);
         output.write("\n");
-        output.flush();
       }
+      lineWriteNanos.addAndGet(System.nanoTime() - writeStarted);
+      lineEventCount.incrementAndGet();
       if (consoleLines) {
         System.err.println("[CGTL FLOW] #" + eventSequence
             + " [thread=" + Thread.currentThread().getName()
@@ -159,6 +183,8 @@ public final class BootstrapAgent {
         System.err.println("[CGTL FLOW] Line state callback failed for " + className + "." + methodName + "():" + line + " - " + error);
         error.printStackTrace(System.err);
       }
+    } finally {
+      lineStateTotalNanos.addAndGet(System.nanoTime() - lineStarted);
     }
   }
 
@@ -665,27 +691,66 @@ public final class BootstrapAgent {
   private static void installLineTransformer(Instrumentation instrumentation) throws Exception {
     String byteBuddyJar = System.getProperty("cgtl.flow.byteBuddyJar", "").trim();
     if (byteBuddyJar.isEmpty()) throw new IllegalStateException("cgtl.flow.byteBuddyJar was not provided");
-    JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-    if (compiler == null) throw new IllegalStateException("A JDK compiler is required for ordered line replay");
 
-    Path directory = Files.createTempDirectory("cgtl-line-agent-");
-    Path source = directory.resolve("local/cgtl/flow/generated/OrderedLineAgent.java");
-    Files.createDirectories(source.getParent());
-    Files.writeString(source, generatedSource(), StandardCharsets.UTF_8);
+    long phaseStarted = System.nanoTime();
+    Path byteBuddyPath = Path.of(byteBuddyJar).toAbsolutePath().normalize();
+    String sourceText = generatedSource();
+    String cacheKey = transformerCacheKey(sourceText, byteBuddyPath);
+    Path directory = Path.of(System.getProperty("java.io.tmpdir"), "cgtl-line-agent-cache", cacheKey);
+    Path classFile = directory.resolve("local/cgtl/flow/generated/OrderedLineAgent.class");
+    boolean cacheHit = Files.isRegularFile(classFile) && Files.size(classFile) > 0;
+    System.err.println("[CGTL PERF AGENT] lineCacheLookup=" + millisSince(phaseStarted) + " hit=" + cacheHit);
 
-    File self = new File(BootstrapAgent.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-    String classpath = byteBuddyJar + File.pathSeparator + self.getAbsolutePath();
-    int result = compiler.run(null, System.err, System.err,
-        "-classpath", classpath,
-        "-d", directory.toString(),
-        source.toString());
-    if (result != 0) throw new IllegalStateException("Ordered line transformer compilation failed with exit code " + result);
+    if (!cacheHit) {
+      JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+      if (compiler == null) throw new IllegalStateException("A JDK compiler is required for the first ordered line replay on this Byte Buddy version");
+      phaseStarted = System.nanoTime();
+      Path source = directory.resolve("local/cgtl/flow/generated/OrderedLineAgent.java");
+      Files.createDirectories(source.getParent());
+      Files.writeString(source, sourceText, StandardCharsets.UTF_8);
+      System.err.println("[CGTL PERF AGENT] lineSourcePreparation=" + millisSince(phaseStarted));
 
+      File self = new File(BootstrapAgent.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+      String classpath = byteBuddyJar + File.pathSeparator + self.getAbsolutePath();
+      phaseStarted = System.nanoTime();
+      int result = compiler.run(null, System.err, System.err,
+          "-classpath", classpath,
+          "-d", directory.toString(),
+          source.toString());
+      if (result != 0) throw new IllegalStateException("Ordered line transformer compilation failed with exit code " + result);
+      System.err.println("[CGTL PERF AGENT] lineJavac=" + millisSince(phaseStarted));
+    }
+
+    phaseStarted = System.nanoTime();
     URLClassLoader loader = new URLClassLoader(new URL[]{directory.toUri().toURL()}, ClassLoader.getSystemClassLoader());
     Class<?> generated = Class.forName("local.cgtl.flow.generated.OrderedLineAgent", true, loader);
     generated.getMethod("install", Instrumentation.class).invoke(null, instrumentation);
+    System.err.println("[CGTL PERF AGENT] lineLoadAndInstall=" + millisSince(phaseStarted));
     System.err.println("[CGTL FLOW] Ordered line replay installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
     System.err.println("[CGTL FLOW] Ordered line replay exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
+  }
+
+  private static String transformerCacheKey(String sourceText, Path byteBuddyPath) throws Exception {
+    java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+    digest.update(sourceText.getBytes(StandardCharsets.UTF_8));
+    digest.update((byte) 0);
+    digest.update(byteBuddyPath.toString().getBytes(StandardCharsets.UTF_8));
+    if (Files.exists(byteBuddyPath)) {
+      digest.update(Long.toString(Files.size(byteBuddyPath)).getBytes(StandardCharsets.UTF_8));
+      digest.update(Long.toString(Files.getLastModifiedTime(byteBuddyPath).toMillis()).getBytes(StandardCharsets.UTF_8));
+    }
+    byte[] hash = digest.digest();
+    StringBuilder out = new StringBuilder(24);
+    for (int i = 0; i < 12; i++) out.append(String.format(java.util.Locale.ROOT, "%02x", hash[i]));
+    return out.toString();
+  }
+
+  private static String millisSince(long started) {
+    return String.format(java.util.Locale.ROOT, "%.3fms", (System.nanoTime() - started) / 1_000_000.0);
+  }
+
+  private static String nanosToMillis(long nanos) {
+    return String.format(java.util.Locale.ROOT, "%.3fms", nanos / 1_000_000.0);
   }
 
   private static String generatedSource() {

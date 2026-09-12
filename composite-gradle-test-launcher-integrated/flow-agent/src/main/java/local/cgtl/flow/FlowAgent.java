@@ -230,7 +230,7 @@ public final class FlowAgent {
     }
 
     private static synchronized void write(String json) {
-      try { if (output != null && sequence.get() <= maxEvents) { output.write(json); output.write("\n"); output.flush(); } } catch (Exception ignored) {}
+      try { if (output != null && sequence.get() <= maxEvents) { output.write(json); output.write("\n"); } } catch (Exception ignored) {}
     }
 
     public static String snapshotForLine(Object value) {
