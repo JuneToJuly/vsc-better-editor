@@ -779,22 +779,70 @@ public final class BootstrapAgent {
 import java.util.Set;
 import java.util.HashSet;
       import java.util.Map;
+      import java.util.concurrent.ConcurrentHashMap;
+      import java.util.concurrent.atomic.AtomicLong;
       import net.bytebuddy.matcher.ElementMatcher;
       import net.bytebuddy.matcher.ElementMatchers;
       import net.bytebuddy.pool.TypePool;
 
       public final class OrderedLineAgent {
+        private static final ConcurrentHashMap<String, Long> TRANSFORM_STARTED = new ConcurrentHashMap<>();
+        private static final AtomicLong MATCHED = new AtomicLong();
+        private static final AtomicLong TRANSFORMED = new AtomicLong();
+        private static final AtomicLong TOTAL_NANOS = new AtomicLong();
+        private static final AtomicLong MAX_NANOS = new AtomicLong();
+        private static volatile String MAX_TYPE = "<none>";
+        private static final long SLOW_NANOS = Long.getLong("cgtl.flow.perf.slowTransformMs", 5L) * 1_000_000L;
+
         public static void install(Instrumentation instrumentation) {
+          Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.err.println("[CGTL PERF LINE TRANSFORM] matched=" + MATCHED.get()
+                + " transformed=" + TRANSFORMED.get()
+                + " total=" + ms(TOTAL_NANOS.get())
+                + " max=" + ms(MAX_NANOS.get())
+                + " maxType=" + MAX_TYPE);
+          }, "cgtl-line-transform-perf"));
           new AgentBuilder.Default()
               .type(typeMatcher())
-              .transform((builder, type, loader, module, domain) -> builder.visit(new Lines()))
+              .transform((builder, type, loader, module, domain) -> {
+                String typeName = type.getName();
+                MATCHED.incrementAndGet();
+                TRANSFORM_STARTED.put(typeName, System.nanoTime());
+                return builder.visit(new Lines());
+              })
               .with(new AgentBuilder.Listener.Adapter() {
+                @Override public void onTransformation(TypeDescription typeDescription, ClassLoader loader,
+                    net.bytebuddy.utility.JavaModule module, boolean loaded, DynamicType dynamicType) {
+                  complete(typeDescription.getName());
+                }
                 @Override public void onError(String typeName, ClassLoader loader, net.bytebuddy.utility.JavaModule module,
                     boolean loaded, Throwable throwable) {
+                  TRANSFORM_STARTED.remove(typeName);
                   System.err.println("[CGTL FLOW] Line tracing skipped " + typeName + ": " + throwable);
                 }
               })
               .installOn(instrumentation);
+        }
+
+        private static void complete(String typeName) {
+          Long started = TRANSFORM_STARTED.remove(typeName);
+          if (started == null) return;
+          long elapsed = System.nanoTime() - started;
+          TRANSFORMED.incrementAndGet();
+          TOTAL_NANOS.addAndGet(elapsed);
+          long current;
+          do {
+            current = MAX_NANOS.get();
+            if (elapsed <= current) break;
+          } while (!MAX_NANOS.compareAndSet(current, elapsed));
+          if (elapsed > current) MAX_TYPE = typeName;
+          if (elapsed >= SLOW_NANOS) {
+            System.err.println("[CGTL PERF LINE TRANSFORM CLASS] " + typeName + "=" + ms(elapsed));
+          }
+        }
+
+        private static String ms(long nanos) {
+          return String.format(java.util.Locale.ROOT, "%.3fms", nanos / 1_000_000.0);
         }
 
         private static ElementMatcher.Junction<TypeDescription> typeMatcher() {

@@ -1899,31 +1899,55 @@ async function resolveFlowSource(className, preferredSourcePath, context, option
   return candidates[0];
 }
 
+function createReplaySourceDocument(uri, text) {
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) lineStarts.push(i + 1);
+  return {
+    uri,
+    getText: () => text,
+    positionAt(offset) {
+      const target = Math.max(0, Math.min(Number(offset) || 0, text.length));
+      let low = 0, high = lineStarts.length - 1;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (lineStarts[mid] <= target) low = mid + 1;
+        else high = mid - 1;
+      }
+      const line = Math.max(0, high);
+      return new vscode.Position(line, target - lineStarts[line]);
+    }
+  };
+}
+
 async function flowParsedDocument(uri, context) {
   const key = normalizePath(uri.fsPath);
   let document = context.documentByUri.get(key);
   if (!document) {
-    const startedAt = monotonicMilliseconds();
-    document = await vscode.workspace.openTextDocument(uri);
-    addFlowProfileTime(context.profiler, 'openTextDocument', startedAt);
+    if (/\.java$/i.test(uri.fsPath)) {
+      const startedAt = monotonicMilliseconds();
+      const text = await fs.promises.readFile(uri.fsPath, 'utf8');
+      addFlowProfileTime(context.profiler, 'directSourceRead', startedAt);
+      document = createReplaySourceDocument(uri, text);
+    } else {
+      const startedAt = monotonicMilliseconds();
+      document = await vscode.workspace.openTextDocument(uri);
+      addFlowProfileTime(context.profiler, 'openTextDocument', startedAt);
+    }
     context.documentByUri.set(key, document);
   }
   let parsed = context.parsedByUri.get(key);
   if (!parsed) {
     const startedAt = monotonicMilliseconds();
     if (/\.java$/i.test(uri.fsPath)) {
-      // Replay already knows the class/method/line. It only needs a method body
-      // range for entry/exit navigation, so avoid waking JDT's document-symbol
-      // provider in the hot path and use the existing lightweight source parser.
+      // Replay only needs source ranges here. Read Java directly from disk and
+      // use the lightweight parser; do not involve VS Code's document/JDT path.
       const packageMatch = document.getText().match(/^\s*package\s+([\w.]+)\s*;/m);
-      const annotations = new Set(vscode.workspace.getConfiguration('compositeGradleTests', document.uri)
+      const annotations = new Set(vscode.workspace.getConfiguration('compositeGradleTests', uri)
         .get('testAnnotations', ['Test', 'ParameterizedTest', 'RepeatedTest', 'TestFactory', 'TestTemplate']));
       const fallback = parseJavaSourceFallback(document, annotations);
       parsed = { packageName: packageMatch ? packageMatch[1] : '', classes: fallback.classes, methods: fallback.methods };
       addFlowProfileTime(context.profiler, 'lightweightSourceParse', startedAt);
     } else {
-      // Keep language-server symbols as a compatibility fallback for Kotlin and
-      // any future source type not handled by the lightweight Java parser.
       parsed = await parseJavaDocument(document);
       addFlowProfileTime(context.profiler, 'parseDocumentSymbols', startedAt);
     }

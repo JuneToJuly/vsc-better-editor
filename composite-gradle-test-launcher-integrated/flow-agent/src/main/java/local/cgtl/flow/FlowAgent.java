@@ -5,25 +5,45 @@ import java.lang.instrument.Instrumentation;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.implementation.bytecode.assign.Assigner;
 
 public final class FlowAgent {
+  private static final ConcurrentHashMap<String, Long> transformStartedNanos = new ConcurrentHashMap<>();
+  private static final AtomicLong transformMatchedCount = new AtomicLong();
+  private static final AtomicLong transformCompletedCount = new AtomicLong();
+  private static final AtomicLong transformTotalNanos = new AtomicLong();
+  private static final AtomicLong transformMaxNanos = new AtomicLong();
+  private static volatile String transformMaxType = "<none>";
+  private static final long SLOW_TRANSFORM_NANOS = Long.getLong("cgtl.flow.perf.slowTransformMs", 5L) * 1_000_000L;
+
   public static void premain(String args, Instrumentation inst) {
     try {
+      long phaseStarted = System.nanoTime();
       Recorder.initialize();
+      System.err.println("[CGTL PERF METHOD] recorderInitialize=" + millisSince(phaseStarted));
+      phaseStarted = System.nanoTime();
       ClassLoader loader = ClassLoader.getSystemClassLoader();
       Class<?> builderDefault = Class.forName("net.bytebuddy.agent.builder.AgentBuilder$Default", true, loader);
       Class<?> transformerType = Class.forName("net.bytebuddy.agent.builder.AgentBuilder$Transformer", true, loader);
       Class<?> matchers = Class.forName("net.bytebuddy.matcher.ElementMatchers", true, loader);
       Class<?> advice = Class.forName("net.bytebuddy.asm.Advice", true, loader);
+      System.err.println("[CGTL PERF METHOD] byteBuddyClassLoad=" + millisSince(phaseStarted));
+      phaseStarted = System.nanoTime();
       Object matcher = buildMatcher(matchers);
+      System.err.println("[CGTL PERF METHOD] matcherBuild=" + millisSince(phaseStarted));
+      phaseStarted = System.nanoTime();
       Object builder = builderDefault.getConstructor().newInstance();
       Class<?> listenerType = Class.forName("net.bytebuddy.agent.builder.AgentBuilder$Listener", true, loader);
       Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{listenerType}, (proxy, method, values) -> {
-        if ("onError".equals(method.getName())) {
-          String typeName = values != null && values.length > 0 ? String.valueOf(values[0]) : "<unknown>";
+        String callback = method.getName();
+        String typeName = values != null && values.length > 0 ? String.valueOf(values[0]) : "<unknown>";
+        if ("onTransformation".equals(callback)) {
+          recordTransformComplete(typeName);
+        } else if ("onError".equals(callback)) {
+          discardTransform(typeName);
           Throwable error = values != null && values.length > 4 && values[4] instanceof Throwable ? (Throwable) values[4] : null;
           System.err.println("[CGTL FLOW] Skipping " + typeName + " after transformation error: " + error);
           if (error != null) error.printStackTrace(System.err);
@@ -39,6 +59,8 @@ public final class FlowAgent {
         if ("transform".equals(method.getName())) {
           Object dynamicBuilder = values[0];
           String typeName = String.valueOf(values[1]);
+          transformMatchedCount.incrementAndGet();
+          transformStartedNanos.put(typeName, System.nanoTime());
           try {
             Object methodMatcher = staticCall(matchers, "isMethod");
             methodMatcher = call(methodMatcher, "and", staticCall(matchers, "not", staticCall(matchers, "isAbstract")));
@@ -51,6 +73,7 @@ public final class FlowAgent {
             System.err.println("[CGTL FLOW] Snapshot tracing " + typeName);
             return transformed;
           } catch (Throwable error) {
+            discardTransform(typeName);
             System.err.println("[CGTL FLOW] Skipping " + typeName + " after transformer setup error: " + error);
             error.printStackTrace(System.err);
             return dynamicBuilder;
@@ -62,13 +85,56 @@ public final class FlowAgent {
         return null;
       };
       Object transformer = Proxy.newProxyInstance(loader, new Class<?>[]{transformerType}, handler);
+      System.err.println("[CGTL PERF METHOD] builderSetup=" + millisSince(phaseStarted));
+      phaseStarted = System.nanoTime();
       call(call(builder, "transform", transformer), "installOn", inst);
+      System.err.println("[CGTL PERF METHOD] installOn=" + millisSince(phaseStarted));
       System.err.println("[CGTL FLOW] Snapshot agent installed for packages: " + System.getProperty("cgtl.flow.packages", "<all>"));
       System.err.println("[CGTL FLOW] Snapshot agent exclusions: " + System.getProperty("cgtl.flow.excludes", "<none>"));
+      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        System.err.println("[CGTL PERF METHOD TRANSFORM] matched=" + transformMatchedCount.get()
+            + " transformed=" + transformCompletedCount.get()
+            + " total=" + nanosToMillis(transformTotalNanos.get())
+            + " max=" + nanosToMillis(transformMaxNanos.get())
+            + " maxType=" + transformMaxType);
+      }, "cgtl-method-transform-perf"));
     } catch (Throwable t) {
       System.err.println("[CGTL FLOW] Agent disabled: " + t);
       t.printStackTrace();
     }
+  }
+
+  private static void recordTransformComplete(String typeName) {
+    Long started = transformStartedNanos.remove(typeName);
+    if (started == null) return;
+    long elapsed = System.nanoTime() - started;
+    transformCompletedCount.incrementAndGet();
+    transformTotalNanos.addAndGet(elapsed);
+    updateTransformMax(typeName, elapsed);
+    if (elapsed >= SLOW_TRANSFORM_NANOS) {
+      System.err.println("[CGTL PERF METHOD TRANSFORM CLASS] " + typeName + "=" + nanosToMillis(elapsed));
+    }
+  }
+
+  private static void discardTransform(String typeName) {
+    transformStartedNanos.remove(typeName);
+  }
+
+  private static void updateTransformMax(String typeName, long elapsed) {
+    long current;
+    do {
+      current = transformMaxNanos.get();
+      if (elapsed <= current) return;
+    } while (!transformMaxNanos.compareAndSet(current, elapsed));
+    transformMaxType = typeName;
+  }
+
+  private static String nanosToMillis(long nanos) {
+    return String.format(java.util.Locale.ROOT, "%.3fms", nanos / 1_000_000.0);
+  }
+
+  private static String millisSince(long started) {
+    return nanosToMillis(System.nanoTime() - started);
   }
 
   static Object buildMatcher(Class<?> matchers) throws Exception {
@@ -163,6 +229,13 @@ public final class FlowAgent {
     private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
     private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
     private static final int snapshotMaxItems = Integer.getInteger("cgtl.flow.lineState.maxCollectionItems", 20);
+    private static final AtomicLong methodEnterCount = new AtomicLong();
+    private static final AtomicLong methodExitCount = new AtomicLong();
+    private static final AtomicLong methodEnterNanos = new AtomicLong();
+    private static final AtomicLong methodExitNanos = new AtomicLong();
+    private static final AtomicLong methodSnapshotNanos = new AtomicLong();
+    private static final AtomicLong methodCallerNanos = new AtomicLong();
+    private static final AtomicLong methodWriteNanos = new AtomicLong();
 
     public static synchronized void initialize() throws Exception {
       String outputPath = System.getProperty("cgtl.flow.output");
@@ -170,44 +243,61 @@ public final class FlowAgent {
       if (outputPath == null) return;
       File file = new File(outputPath); File parent = file.getParentFile(); if (parent != null) parent.mkdirs();
       output = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8));
-      Runtime.getRuntime().addShutdownHook(new Thread(() -> { try { output.close(); } catch (Exception ignored) {} }));
+      Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        try { output.close(); } catch (Exception ignored) {}
+        System.err.println("[CGTL PERF METHOD CAPTURE] enter=" + methodEnterCount.get()
+          + " exit=" + methodExitCount.get()
+          + " enterTotal=" + nanosToMillis(methodEnterNanos.get())
+          + " exitTotal=" + nanosToMillis(methodExitNanos.get())
+          + " snapshot=" + nanosToMillis(methodSnapshotNanos.get())
+          + " caller=" + nanosToMillis(methodCallerNanos.get())
+          + " write=" + nanosToMillis(methodWriteNanos.get()));
+      }));
     }
 
     public static long enter(String className, String methodName, String descriptor, Object receiver, Object[] arguments) {
+      long totalStarted = System.nanoTime();
+      methodEnterCount.incrementAndGet();
       long callId = sequence.incrementAndGet();
       int currentDepth = depth.get();
+      long callerStarted = System.nanoTime();
       StackTraceElement caller = findCaller(className, methodName);
+      methodCallerNanos.addAndGet(System.nanoTime() - callerStarted);
       Deque<Call> stack = calls.get();
       Call parentCall = stack.peek();
-      String callerReceiver = parentCall == null ? "null" : snapshot(parentCall.receiver, 0, new IdentityHashMap<>());
-      String callerArguments = parentCall == null ? "[]" : snapshotArray(parentCall.arguments, new IdentityHashMap<>());
+      String callerReceiver = parentCall == null ? "null" : timedSnapshot(parentCall.receiver, 0, new IdentityHashMap<>());
+      String callerArguments = parentCall == null ? "[]" : timedSnapshotArray(parentCall.arguments, new IdentityHashMap<>());
       stack.push(new Call(callId, className, methodName, descriptor, caller, receiver, arguments));
       depth.set(currentDepth + 1);
       write("{\"sequence\":" + callId + ",\"event\":\"enter\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() +
-        ",\"threadName\":" + quote(Thread.currentThread().getName()) + callerJson(caller) + ",\"callerReceiver\":" + callerReceiver + ",\"callerArguments\":" + callerArguments + ",\"receiver\":" + snapshot(receiver, 0, new IdentityHashMap<>()) +
-        ",\"arguments\":" + snapshotArray(arguments, new IdentityHashMap<>()) + "}");
+        ",\"threadName\":" + quote(Thread.currentThread().getName()) + callerJson(caller) + ",\"callerReceiver\":" + callerReceiver + ",\"callerArguments\":" + callerArguments + ",\"receiver\":" + timedSnapshot(receiver, 0, new IdentityHashMap<>()) +
+        ",\"arguments\":" + timedSnapshotArray(arguments, new IdentityHashMap<>()) + "}");
+      methodEnterNanos.addAndGet(System.nanoTime() - totalStarted);
       return callId;
     }
 
     public static void exit(long callId, Object receiverAfter, Object returnValue, Throwable thrown) {
+      long totalStarted = System.nanoTime();
+      methodExitCount.incrementAndGet();
       int currentDepth = Math.max(0, depth.get() - 1); depth.set(currentDepth);
       Deque<Call> stack = calls.get();
       Call call = stack.poll();
       Call parentCall = stack.peek();
       long eventId = sequence.incrementAndGet();
       String className = call == null ? "" : call.className; String methodName = call == null ? "" : call.methodName; String descriptor = call == null ? "" : call.descriptor;
-      String callerReceiverAfter = parentCall == null ? "null" : snapshot(parentCall.receiver, 0, new IdentityHashMap<>());
-      String callerArgumentsAfter = parentCall == null ? "[]" : snapshotArray(parentCall.arguments, new IdentityHashMap<>());
+      String callerReceiverAfter = parentCall == null ? "null" : timedSnapshot(parentCall.receiver, 0, new IdentityHashMap<>());
+      String callerArgumentsAfter = parentCall == null ? "[]" : timedSnapshotArray(parentCall.arguments, new IdentityHashMap<>());
       IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
       write("{\"sequence\":" + eventId + ",\"event\":\"exit\",\"callId\":" + callId +
         ",\"className\":" + quote(className) + ",\"methodName\":" + quote(methodName) + ",\"descriptor\":" + quote(descriptor) +
         ",\"depth\":" + currentDepth + ",\"threadId\":" + Thread.currentThread().getId() + ",\"threadName\":" + quote(Thread.currentThread().getName()) +
-        ",\"receiverAfter\":" + snapshot(receiverAfter, 0, new IdentityHashMap<>()) +
+        ",\"receiverAfter\":" + timedSnapshot(receiverAfter, 0, new IdentityHashMap<>()) +
         ",\"callerReceiverAfter\":" + callerReceiverAfter +
         ",\"callerArgumentsAfter\":" + callerArgumentsAfter +
-        ",\"returnValue\":" + snapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + callerJson(call == null ? null : call.caller) + "}");
+        ",\"returnValue\":" + timedSnapshot(returnValue, 0, seen) + ",\"thrown\":" + throwableSnapshot(thrown) + callerJson(call == null ? null : call.caller) + "}");
+      methodExitNanos.addAndGet(System.nanoTime() - totalStarted);
     }
 
     private static StackTraceElement findCaller(String className, String methodName) {
@@ -230,7 +320,25 @@ public final class FlowAgent {
     }
 
     private static synchronized void write(String json) {
+      long started = System.nanoTime();
       try { if (output != null && sequence.get() <= maxEvents) { output.write(json); output.write("\n"); } } catch (Exception ignored) {}
+      finally { methodWriteNanos.addAndGet(System.nanoTime() - started); }
+    }
+
+    private static String timedSnapshot(Object value, int level, IdentityHashMap<Object, Boolean> seen) {
+      long started = System.nanoTime();
+      try { return snapshot(value, level, seen); }
+      finally { methodSnapshotNanos.addAndGet(System.nanoTime() - started); }
+    }
+
+    private static String timedSnapshotArray(Object[] values, IdentityHashMap<Object, Boolean> seen) {
+      long started = System.nanoTime();
+      try { return snapshotArray(values, seen); }
+      finally { methodSnapshotNanos.addAndGet(System.nanoTime() - started); }
+    }
+
+    private static String nanosToMillis(long nanos) {
+      return String.format(java.util.Locale.ROOT, "%.3fms", nanos / 1_000_000.0);
     }
 
     public static String snapshotForLine(Object value) {
