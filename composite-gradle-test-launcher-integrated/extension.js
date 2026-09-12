@@ -5,6 +5,8 @@ const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const net = require('net');
+const crypto = require('crypto');
 
 let output;
 let runningProcess;
@@ -33,6 +35,11 @@ let replayCaptureWatchers = [];
 const replayAutoImportTimers = new Map();
 const replayImportedSignatures = new Set();
 const REPLAY_CAPTURE_DIRS_STATE_KEY = 'replayCaptureDirectories';
+let replayRemoteServer;
+let replayRemoteToken;
+let replayRemoteStatusItem;
+const replayRemoteSockets = new Set();
+const REPLAY_REMOTE_PROTOCOL = 'cgtl-replay/1';
 const changedProductionPaths = new Set();
 const changedProductionMethods = new Map();
 let executedLineDecoration;
@@ -71,7 +78,11 @@ async function activate(context) {
   register(context, 'compositeGradleTests.evaluateExpression', () => showDebugEvaluateWindow());
   register(context, 'compositeGradleTests.evaluateCurrentExpression', evaluateCurrentExpression);
   register(context, 'compositeGradleTests.replay.generateJarLauncher', generateJarReplayLauncher);
+  register(context, 'compositeGradleTests.replay.generateContainerCommand', generateContainerReplayCommand);
   register(context, 'compositeGradleTests.replay.importCapture', importReplayCapture);
+  register(context, 'compositeGradleTests.replay.remote.start', startReplayRemoteReceiver);
+  register(context, 'compositeGradleTests.replay.remote.stop', stopReplayRemoteReceiver);
+  register(context, 'compositeGradleTests.replay.remote.copyConnection', copyReplayRemoteConnection);
 
   await refreshReplayCaptureWatchers();
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
@@ -1736,6 +1747,215 @@ allprojects { project ->
 }
 
 
+
+function replayRemoteCaptureDirectory() {
+  const base = extensionContext?.globalStorageUri?.fsPath || path.join(os.tmpdir(), 'cgtl-replay');
+  return path.join(base, 'remote-captures');
+}
+
+function replayRemoteNetworkAddresses() {
+  const addresses = [];
+  for (const entries of Object.values(os.networkInterfaces() || {})) {
+    for (const entry of entries || []) {
+      if (entry && entry.family === 'IPv4' && !entry.internal && entry.address) addresses.push(entry.address);
+    }
+  }
+  return [...new Set(addresses)];
+}
+
+function replayRemoteConnectionInfo() {
+  if (!replayRemoteServer || !replayRemoteToken) return undefined;
+  const address = replayRemoteServer.address();
+  if (!address || typeof address === 'string') return undefined;
+  const bindHost = String(address.address || '127.0.0.1');
+  const advertised = (bindHost === '0.0.0.0' || bindHost === '::')
+    ? (replayRemoteNetworkAddresses()[0] || '127.0.0.1')
+    : bindHost;
+  return { bindHost, host: advertised, port: address.port, token: replayRemoteToken };
+}
+
+function replayRemoteEnvironmentText(info) {
+  if (!info) return '';
+  return [
+    '# PowerShell',
+    `$env:CGTL_REPLAY_HOST=${quotePowerShellLiteral(info.host)}`,
+    `$env:CGTL_REPLAY_PORT=${quotePowerShellLiteral(String(info.port))}`,
+    `$env:CGTL_REPLAY_TOKEN=${quotePowerShellLiteral(info.token)}`,
+    '',
+    '# bash/zsh',
+    `export CGTL_REPLAY_HOST=${quoteShellLiteral(info.host)}`,
+    `export CGTL_REPLAY_PORT=${quoteShellLiteral(String(info.port))}`,
+    `export CGTL_REPLAY_TOKEN=${quoteShellLiteral(info.token)}`
+  ].join('\n');
+}
+
+async function copyReplayRemoteConnection() {
+  const info = replayRemoteConnectionInfo();
+  if (!info) {
+    vscode.window.showWarningMessage('Replay remote receiver is not running.');
+    return;
+  }
+  const text = replayRemoteEnvironmentText(info);
+  await vscode.env.clipboard.writeText(text);
+  vscode.window.showInformationMessage(`Replay receiver connection copied (${info.host}:${info.port}).`);
+}
+
+function secureReplayTokenEquals(actual, expected) {
+  const a = Buffer.from(String(actual || ''), 'utf8');
+  const b = Buffer.from(String(expected || ''), 'utf8');
+  if (a.length !== b.length || !a.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch (_) { return false; }
+}
+
+function sanitizeReplayRemoteName(name) {
+  const base = path.basename(String(name || 'remote-replay.jsonl')).replace(/[^A-Za-z0-9._-]+/g, '_');
+  return base.toLowerCase().endsWith('.jsonl') ? base : `${base}.jsonl`;
+}
+
+function handleReplayRemoteSocket(socket) {
+  replayRemoteSockets.add(socket);
+  socket.setTimeout(30000);
+  let headerBuffer = Buffer.alloc(0);
+  let header;
+  let outputStream;
+  let tempPath;
+  let finalPath;
+  let expectedSize = 0;
+  let received = 0;
+  let failed = false;
+
+  const fail = message => {
+    if (failed) return;
+    failed = true;
+    output?.appendLine(`[CGTL REMOTE] Rejected capture from ${socket.remoteAddress || '<unknown>'}: ${message}`);
+    try { socket.write(`ERR ${message}\n`); } catch (_) {}
+    try { socket.destroy(); } catch (_) {}
+    try { outputStream?.destroy(); } catch (_) {}
+    if (tempPath) { try { fs.unlinkSync(tempPath); } catch (_) {} }
+  };
+
+  const writeBody = chunk => {
+    if (!chunk?.length || failed) return;
+    const remaining = expectedSize - received;
+    if (remaining <= 0) return fail('capture contains more data than declared');
+    const accepted = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+    outputStream.write(accepted);
+    received += accepted.length;
+    if (chunk.length > accepted.length) return fail('capture contains more data than declared');
+  };
+
+  socket.on('data', chunk => {
+    if (failed) return;
+    if (!header) {
+      headerBuffer = Buffer.concat([headerBuffer, chunk]);
+      if (headerBuffer.length > 65536) return fail('header is too large');
+      const newline = headerBuffer.indexOf(0x0a);
+      if (newline < 0) return;
+      const headerText = headerBuffer.subarray(0, newline).toString('utf8').trim();
+      let parsed;
+      try { parsed = JSON.parse(headerText); } catch (_) { return fail('invalid header'); }
+      if (parsed.protocol !== REPLAY_REMOTE_PROTOCOL) return fail('unsupported Replay protocol');
+      if (!secureReplayTokenEquals(parsed.token, replayRemoteToken)) return fail('authentication failed');
+      expectedSize = Number(parsed.size);
+      const maxBytes = Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayRemoteMaxCaptureMB', 256) || 256) * 1024 * 1024;
+      if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0 || expectedSize > maxBytes) return fail('invalid or oversized capture');
+      header = parsed;
+      const directory = replayRemoteCaptureDirectory();
+      fs.mkdirSync(directory, { recursive: true });
+      const safeName = sanitizeReplayRemoteName(parsed.name);
+      const unique = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${safeName}`;
+      finalPath = path.join(directory, unique);
+      tempPath = `${finalPath}.tmp`;
+      outputStream = fs.createWriteStream(tempPath, { flags: 'wx' });
+      outputStream.on('error', error => fail(error.message || String(error)));
+      const body = headerBuffer.subarray(newline + 1);
+      headerBuffer = Buffer.alloc(0);
+      writeBody(body);
+      return;
+    }
+    writeBody(chunk);
+  });
+
+  socket.on('timeout', () => fail('connection timed out'));
+  socket.on('error', error => {
+    if (!failed) fail(error.message || String(error));
+  });
+  socket.on('close', () => replayRemoteSockets.delete(socket));
+  socket.on('end', () => {
+    if (failed || !header || !outputStream) return;
+    if (received !== expectedSize) return fail(`capture ended early (${received}/${expectedSize} bytes)`);
+    outputStream.end(async () => {
+      if (failed) return;
+      try {
+        fs.renameSync(tempPath, finalPath);
+        output?.appendLine(`[CGTL REMOTE] Received Replay capture ${path.basename(finalPath)} (${received} bytes) from ${socket.remoteAddress || '<unknown>'}.`);
+        try { socket.write('OK\n'); } catch (_) {}
+        const config = vscode.workspace.getConfiguration('compositeGradleTests');
+        const result = await importReplayCaptureFile(finalPath, { auto: true, open: config.get('replayAutoOpen', true) });
+        if (result) vscode.window.setStatusBarMessage(`Remote Replay loaded: ${path.basename(finalPath)}`, 5000);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        output?.appendLine(`[CGTL REMOTE] Received capture could not be imported: ${message}`);
+        vscode.window.showWarningMessage(`Remote Replay capture could not be imported: ${message}`);
+      }
+    });
+  });
+}
+
+async function startReplayRemoteReceiver() {
+  if (replayRemoteServer) {
+    const info = replayRemoteConnectionInfo();
+    if (info) {
+      const action = await vscode.window.showInformationMessage(`Replay receiver is already listening on ${info.bindHost}:${info.port}.`, 'Copy Connection');
+      if (action === 'Copy Connection') await copyReplayRemoteConnection();
+    }
+    return;
+  }
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const host = String(config.get('replayRemoteBindHost', '0.0.0.0') || '0.0.0.0').trim();
+  const port = Number(config.get('replayRemotePort', 57321) || 57321);
+  replayRemoteToken = crypto.randomBytes(24).toString('hex');
+  const server = net.createServer(handleReplayRemoteSocket);
+  replayRemoteServer = server;
+  server.on('error', error => {
+    output?.appendLine(`[CGTL REMOTE] Receiver error: ${error?.message || error}`);
+    vscode.window.showErrorMessage(`Replay remote receiver failed: ${error?.message || error}`);
+    stopReplayRemoteReceiver();
+  });
+  await new Promise((resolve, reject) => {
+    const onError = error => { server.off('listening', onListen); reject(error); };
+    const onListen = () => { server.off('error', onError); resolve(); };
+    server.once('error', onError);
+    server.once('listening', onListen);
+    server.listen({ host, port });
+  });
+  replayRemoteStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 39);
+  replayRemoteStatusItem.command = 'compositeGradleTests.replay.remote.copyConnection';
+  replayRemoteStatusItem.text = '$(radio-tower) Replay Receiver';
+  replayRemoteStatusItem.tooltip = 'Remote Replay receiver is running. Click to copy connection settings.';
+  replayRemoteStatusItem.show();
+  const info = replayRemoteConnectionInfo();
+  output?.appendLine(`[CGTL REMOTE] Receiver listening on ${info?.bindHost}:${info?.port}. Remote host suggestion: ${info?.host}.`);
+  output?.appendLine(`[CGTL REMOTE] Captures are stored in ${replayRemoteCaptureDirectory()}.`);
+  const action = await vscode.window.showInformationMessage(`Replay receiver listening on ${info?.host}:${info?.port}. A new authentication token was generated for this receiver session.`, 'Copy Connection');
+  if (action === 'Copy Connection') await copyReplayRemoteConnection();
+}
+
+function stopReplayRemoteReceiver() {
+  for (const socket of replayRemoteSockets) {
+    try { socket.destroy(); } catch (_) {}
+  }
+  replayRemoteSockets.clear();
+  if (replayRemoteServer) {
+    try { replayRemoteServer.close(); } catch (_) {}
+    replayRemoteServer = undefined;
+  }
+  replayRemoteToken = undefined;
+  try { replayRemoteStatusItem?.dispose(); } catch (_) {}
+  replayRemoteStatusItem = undefined;
+  output?.appendLine('[CGTL REMOTE] Receiver stopped.');
+}
+
 function quotePowerShellLiteral(value) {
   return `'${String(value || '').replace(/'/g, "''")}'`;
 }
@@ -1773,6 +1993,153 @@ function defaultReplayPackageText() {
     if (match?.[1]) return match[1];
   }
   return '';
+}
+
+function replayLaunchProperties(packages) {
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  return {
+    packages,
+    excludes: flowEncodedExclusions().join(','),
+    adapters: flowStateAdapterClasses().join(','),
+    capturePoints: replayCapturePoints().join(','),
+    captureDepth: Number(config.get('replayCapturePointMaxDepth', 8) || 8),
+    captureFields: Number(config.get('replayCapturePointMaxFields', 200) || 200),
+    captureItems: Number(config.get('replayCapturePointMaxCollectionItems', 200) || 200),
+    lineState: String(config.get('flowLineState', 'receiver') || 'receiver'),
+    lineDepth: Number(config.get('flowLineStateMaxDepth', 2) || 2),
+    lineFields: Number(config.get('flowLineStateMaxFields', 30) || 30),
+    lineItems: Number(config.get('flowLineStateMaxCollectionItems', 20) || 20)
+  };
+}
+
+async function prepareReplayRuntimeDirectory(baseDirectory) {
+  const settings = dependencyResolutionSettings();
+  let byteBuddyJar = findByteBuddyJar(settings.byteBuddyVersion);
+  if (!byteBuddyJar) {
+    const selected = await vscode.window.showOpenDialog({
+      title: `Select byte-buddy-${settings.byteBuddyVersion}.jar`,
+      canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+      filters: { 'Java archives': ['jar'] }
+    });
+    if (!selected?.length) throw new Error(`Byte Buddy ${settings.byteBuddyVersion} was not found in the Gradle or Maven cache.`);
+    byteBuddyJar = selected[0].fsPath;
+  }
+  fs.mkdirSync(baseDirectory, { recursive: true });
+  const agentSource = path.join(extensionContext.extensionPath, 'resources', 'cgtl-flow-agent.jar');
+  if (!fs.existsSync(agentSource)) throw new Error('The packaged Replay agent could not be found.');
+  const agentTarget = path.join(baseDirectory, 'cgtl-flow-agent.jar');
+  const byteBuddyTarget = path.join(baseDirectory, path.basename(byteBuddyJar));
+  fs.copyFileSync(agentSource, agentTarget);
+  fs.copyFileSync(byteBuddyJar, byteBuddyTarget);
+  return { agentTarget, byteBuddyTarget };
+}
+
+function containerJavaToolOptions(props, byteBuddyName) {
+  return [
+    '-javaagent:/cgtl-replay/cgtl-flow-agent.jar',
+    `-Xbootclasspath/a:/cgtl-replay/${byteBuddyName}`,
+    `-Dcgtl.flow.byteBuddyJar=/cgtl-replay/${byteBuddyName}`,
+    '-Dcgtl.flow.maxEvents=200000',
+    `-Dcgtl.flow.packages=${props.packages}`,
+    `-Dcgtl.flow.excludes=${props.excludes}`,
+    `-Dcgtl.flow.stateAdapters=${props.adapters}`,
+    `-Dcgtl.flow.capturePoints=${props.capturePoints}`,
+    `-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`,
+    `-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`,
+    `-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`,
+    `-Dcgtl.flow.lineState=${props.lineState}`,
+    `-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`,
+    `-Dcgtl.flow.lineState.maxFields=${props.lineFields}`,
+    `-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`
+  ].join(' ');
+}
+
+async function generateContainerReplayCommand() {
+  if (!replayRemoteConnectionInfo()) {
+    const action = await vscode.window.showWarningMessage('Start the Replay remote receiver before generating a container command.', 'Start Receiver');
+    if (action === 'Start Receiver') await startReplayRemoteReceiver();
+  }
+  const connection = replayRemoteConnectionInfo();
+  if (!connection) return;
+  const enginePick = await vscode.window.showQuickPick([
+    { label: 'Docker', value: 'docker', description: 'host.docker.internal + host-gateway' },
+    { label: 'Podman', value: 'podman', description: 'host.containers.internal' }
+  ], { title: 'Container engine', placeHolder: 'Choose the container runtime' });
+  if (!enginePick) return;
+  const image = String(await vscode.window.showInputBox({
+    title: 'Container image',
+    prompt: 'Existing Java image. Replay leaves its ENTRYPOINT/CMD unchanged.',
+    placeHolder: 'my-company/order-service:latest'
+  }) || '').trim();
+  if (!image) return;
+  const packages = String(await vscode.window.showInputBox({
+    title: 'Replay instrumentation',
+    prompt: 'Comma-separated packages/classes to instrument.',
+    value: defaultReplayPackageText(),
+    placeHolder: 'com.mycompany.orders'
+  }) || '').trim();
+  if (!packages) throw new Error('At least one Replay package or class is required.');
+
+  let folder = vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor?.document?.uri)?.uri;
+  if (!folder && vscode.workspace.workspaceFolders?.length === 1) folder = vscode.workspace.workspaceFolders[0].uri;
+  if (!folder && vscode.workspace.workspaceFolders?.length > 1) {
+    const chosen = await vscode.window.showQuickPick(vscode.workspace.workspaceFolders.map(item => ({ label: item.name, description: item.uri.fsPath, uri: item.uri })), {
+      title: 'Replay runtime location', placeHolder: 'Choose a workspace folder'
+    });
+    folder = chosen?.uri;
+  }
+  if (!folder) {
+    const selected = await vscode.window.showOpenDialog({ title: 'Choose a folder for the Replay container runtime', canSelectFiles: false, canSelectFolders: true, canSelectMany: false });
+    folder = selected?.[0];
+  }
+  if (!folder) return;
+
+  const runtimeDir = path.join(folder.fsPath, '.cgtl-replay', 'container-runtime');
+  const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+  const props = replayLaunchProperties(packages);
+  const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+  const locationPick = await vscode.window.showQuickPick([
+    { label: 'Container engine is on this machine', value: 'local', description: 'Use the container runtime host alias' },
+    { label: 'Container engine is on another machine', value: 'remote', description: `Connect directly to ${connection.host}:${connection.port}` }
+  ], { title: 'Where will the container run?', placeHolder: 'This determines how the container reaches the Replay receiver' });
+  if (!locationPick) return;
+
+  const engine = enginePick.value;
+  const localHostAlias = engine === 'podman' ? 'host.containers.internal' : 'host.docker.internal';
+  const remoteHost = locationPick.value === 'remote' ? connection.host : localHostAlias;
+  const addHost = locationPick.value === 'local' && engine === 'docker'
+    ? ' --add-host=host.docker.internal:host-gateway'
+    : '';
+  let mountSource = runtimeDir;
+  let remoteRuntimeNote = '';
+  if (locationPick.value === 'remote') {
+    mountSource = String(await vscode.window.showInputBox({
+      title: 'Replay runtime path on the remote container host',
+      prompt: `Copy the contents of ${runtimeDir} to this path before running the command remotely.`,
+      value: '/opt/cgtl-replay'
+    }) || '').trim();
+    if (!mountSource) return;
+    remoteRuntimeNote = `# Copy ${runtimeDir} to ${mountSource} on the remote container host before running this command.\n`;
+  }
+  const mount = `${mountSource}:/cgtl-replay:ro`;
+  const powerShell = `${engine} run${addHost} -v ${quotePowerShellLiteral(mount)} -e ${quotePowerShellLiteral(`CGTL_REPLAY_HOST=${remoteHost}`)} -e ${quotePowerShellLiteral(`CGTL_REPLAY_PORT=${connection.port}`)} -e ${quotePowerShellLiteral(`CGTL_REPLAY_TOKEN=${connection.token}`)} -e ${quotePowerShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)} ${image}`;
+  const shell = `${engine} run${addHost} \\
+  -v ${quoteShellLiteral(mount)} \\
+  -e ${quoteShellLiteral(`CGTL_REPLAY_HOST=${remoteHost}`)} \\
+  -e ${quoteShellLiteral(`CGTL_REPLAY_PORT=${connection.port}`)} \\
+  -e ${quoteShellLiteral(`CGTL_REPLAY_TOKEN=${connection.token}`)} \\
+  -e ${quoteShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)} \\
+  ${quoteShellLiteral(image)}`;
+  const selectedText = process.platform === 'win32' ? powerShell : shell;
+  await vscode.env.clipboard.writeText(selectedText);
+  output?.appendLine(`[CGTL REMOTE] Container Replay runtime prepared at ${runtimeDir}.`);
+  output?.appendLine(`[CGTL REMOTE] ${engine} will connect from the container to ${remoteHost}:${connection.port}; no container port publish is required.`);
+  const document = await vscode.workspace.openTextDocument({
+    language: process.platform === 'win32' ? 'powershell' : 'shellscript',
+    content: `# Replay container command (copied to clipboard)\n${remoteRuntimeNote}${selectedText}\n\n# Replay is injected through JAVA_TOOL_OPTIONS; the image ENTRYPOINT/CMD is unchanged.\n# The container initiates the TCP connection to VS Code, so -p/--publish is not required.\n`
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  vscode.window.showInformationMessage(`Replay ${enginePick.label} command copied to the clipboard.`);
 }
 
 async function generateJarReplayLauncher() {
@@ -1897,7 +2264,9 @@ async function generateJarReplayLauncher() {
       + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState=${props.lineState}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState.maxFields=${props.lineFields}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`)} -jar \"$TARGET\" \"$@\"\n`
-      + `CODE=$?\nset -e\nif [[ -f \"$CAPTURE_TMP\" ]]; then mv -f \"$CAPTURE_TMP\" \"$CAPTURE\"; fi\necho \"Replay capture written to: $CAPTURE\"\nexit $CODE\n`;
+      + `CODE=$?\nset -e\nif [[ -f \"$CAPTURE_TMP\" ]]; then mv -f \"$CAPTURE_TMP\" \"$CAPTURE\"; fi\necho \"Replay capture written to: $CAPTURE\"\n`
+      + `exit $CODE\n`;
+
   }
 
   fs.writeFileSync(saveUri.fsPath, contents, 'utf8');
@@ -6127,6 +6496,7 @@ function showFlowReplayPanel(result){ return openNativeReplay(result); }
 
 function deactivate() {
   if (runningProcess) terminateProcessTree(runningProcess);
+  stopReplayRemoteReceiver();
   debugEvaluatePanel?.panel?.dispose();
   debugEvaluateResultPanel = undefined;
   vscode.commands.executeCommand('setContext', 'compositeGradleTests.evaluateEditorActive', false);

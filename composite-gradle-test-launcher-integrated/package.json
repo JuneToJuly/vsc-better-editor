@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.55",
+  "version": "0.4.57",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -50,7 +50,10 @@
     "onCommand:compositeGradleTests.replay.stateSearch",
     "onCommand:compositeGradleTests.replay.stateSearchClear",
     "onCommand:compositeGradleTests.replay.generateJarLauncher",
-    "onCommand:compositeGradleTests.replay.importCapture"
+    "onCommand:compositeGradleTests.replay.importCapture",
+    "onCommand:compositeGradleTests.replay.remote.start",
+    "onCommand:compositeGradleTests.replay.remote.stop",
+    "onCommand:compositeGradleTests.replay.remote.copyConnection"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -391,9 +394,29 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "compositeGradleTests.replay.generateContainerCommand",
+        "title": "Replay: Generate Container Run Command",
+        "icon": "$(package)"
+      },
+      {
         "command": "compositeGradleTests.replay.importCapture",
         "title": "Replay: Import Capture",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "compositeGradleTests.replay.remote.start",
+        "title": "Replay: Start Remote Receiver",
+        "icon": "$(radio-tower)"
+      },
+      {
+        "command": "compositeGradleTests.replay.remote.stop",
+        "title": "Replay: Stop Remote Receiver",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "compositeGradleTests.replay.remote.copyConnection",
+        "title": "Replay: Copy Remote Receiver Connection",
+        "icon": "$(copy)"
       }
     ],
     "menus": {
@@ -1018,6 +1041,25 @@
           },
           "default": [],
           "description": "Additional directories to watch for completed external Replay .jsonl captures. Relative paths are resolved from each workspace folder. Directories created by Generate JAR Launcher are registered automatically."
+        },
+        "compositeGradleTests.replayRemoteBindHost": {
+          "type": "string",
+          "default": "0.0.0.0",
+          "description": "Address used by Replay: Start Remote Receiver. Use 127.0.0.1 for local-only access or 0.0.0.0 to accept authenticated captures from the network."
+        },
+        "compositeGradleTests.replayRemotePort": {
+          "type": "number",
+          "default": 57321,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "TCP port used by the Remote Replay receiver."
+        },
+        "compositeGradleTests.replayRemoteMaxCaptureMB": {
+          "type": "number",
+          "default": 256,
+          "minimum": 1,
+          "maximum": 4096,
+          "description": "Maximum accepted Remote Replay capture size in megabytes."
         }
       }
     },

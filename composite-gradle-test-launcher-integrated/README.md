@@ -481,3 +481,27 @@ Settings:
 - `compositeGradleTests.replayAutoImport` — automatically import completed captures (default `true`).
 - `compositeGradleTests.replayAutoOpen` — open Replay immediately after auto-import (default `true`).
 - `compositeGradleTests.replayCaptureDirectories` — additional directories to watch. Relative entries are resolved against workspace folders.
+
+
+## Remote Replay receiver
+
+Phase 2 adds a TCP receiver so a JAR can finish on another machine and push its completed Replay capture back to VS Code.
+
+1. Run **Replay: Start Remote Receiver** in VS Code.
+2. Choose **Copy Connection** (or run **Replay: Copy Remote Receiver Connection**).
+3. On the machine running the generated Replay launcher, set the copied `CGTL_REPLAY_HOST`, `CGTL_REPLAY_PORT`, and `CGTL_REPLAY_TOKEN` environment variables.
+4. Run the launcher normally. After the JAR exits, the completed capture is uploaded to VS Code, stored in the extension global storage, imported, and opened using the existing Replay workbench.
+5. Run **Replay: Stop Remote Receiver** when finished.
+
+The receiver uses the `cgtl-replay/1` TCP framing protocol: a newline-terminated JSON header followed by exactly the declared number of capture bytes. A random token is created each time the receiver starts. The default bind address is `0.0.0.0` and the default port is `57321`; both are configurable. The transport is authenticated but not encrypted, so use it on trusted networks or through an SSH/VPN tunnel.
+
+Generated PowerShell launchers upload directly using .NET sockets. Generated bash launchers use `python3` for the post-run upload. A local capture is retained even if the remote upload fails.
+
+
+## Container Replay with JAVA_TOOL_OPTIONS
+
+Version 0.4.57 can inject Replay into an existing Java container without changing its image entrypoint or application command. Start **Replay: Start Remote Receiver**, then run **Replay: Generate Container Run Command**. The command prepares a small Replay runtime directory containing the agent and matching Byte Buddy JAR and mounts it read-only at `/cgtl-replay`.
+
+The generated container receives `CGTL_REPLAY_HOST`, `CGTL_REPLAY_PORT`, and `CGTL_REPLAY_TOKEN`, plus `JAVA_TOOL_OPTIONS` containing the Replay `-javaagent`, Byte Buddy boot-classpath entry, and instrumentation settings. The Replay agent now owns capture finalization and remote upload during JVM shutdown. A wrapper script or Python uploader is not required.
+
+For Docker on the same machine as VS Code, the command uses `host.docker.internal` and `--add-host=host.docker.internal:host-gateway`. For Podman it uses `host.containers.internal`. When the container engine is on another machine, the generated command connects directly to the receiver's advertised address and tells you which Replay runtime directory must be copied to the remote container host. Because the container initiates the connection to VS Code, no `-p`/`--publish` option is required for the Replay receiver.

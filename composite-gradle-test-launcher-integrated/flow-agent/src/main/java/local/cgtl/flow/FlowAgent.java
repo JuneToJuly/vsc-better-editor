@@ -4,6 +4,9 @@ import java.io.*;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -225,6 +228,7 @@ public final class FlowAgent {
     private static final ThreadLocal<Integer> depth = ThreadLocal.withInitial(() -> 0);
     private static final ThreadLocal<Deque<Call>> calls = ThreadLocal.withInitial(ArrayDeque::new);
     private static Writer output;
+    private static File captureFile;
     private static int maxEvents;
     private static final int snapshotMaxDepth = Integer.getInteger("cgtl.flow.lineState.maxDepth", 2);
     private static final int snapshotMaxFields = Integer.getInteger("cgtl.flow.lineState.maxFields", 30);
@@ -240,11 +244,31 @@ public final class FlowAgent {
     public static synchronized void initialize() throws Exception {
       String outputPath = System.getProperty("cgtl.flow.output");
       maxEvents = Integer.getInteger("cgtl.flow.maxEvents", 20000);
-      if (outputPath == null) return;
-      File file = new File(outputPath); File parent = file.getParentFile(); if (parent != null) parent.mkdirs();
-      output = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8));
+      if ((outputPath == null || outputPath.isBlank()) && RemoteCaptureUploader.isConfigured()) {
+        Path directory = Paths.get(System.getProperty("java.io.tmpdir"), "cgtl-replay");
+        Files.createDirectories(directory);
+        long pid = ProcessHandle.current().pid();
+        outputPath = directory.resolve("replay-" + System.currentTimeMillis() + "-" + pid + ".jsonl.tmp").toString();
+        System.setProperty("cgtl.flow.output", outputPath);
+        System.err.println("[CGTL REMOTE] No cgtl.flow.output supplied; using " + outputPath);
+      }
+      if (outputPath == null || outputPath.isBlank()) return;
+      captureFile = new File(outputPath);
+      File parent = captureFile.getParentFile(); if (parent != null) parent.mkdirs();
+      output = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(captureFile, true), StandardCharsets.UTF_8));
       Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-        try { output.close(); } catch (Exception ignored) {}
+        File completed = captureFile;
+        try {
+          synchronized (Recorder.class) {
+            if (output != null) output.close();
+          }
+          completed = finalizeCaptureFile(captureFile);
+          if (RemoteCaptureUploader.isConfigured() && completed != null && completed.isFile()) {
+            RemoteCaptureUploader.upload(completed);
+          }
+        } catch (Throwable error) {
+          System.err.println("[CGTL REMOTE] Replay capture finalization/upload failed: " + error);
+        }
         System.err.println("[CGTL PERF METHOD CAPTURE] enter=" + methodEnterCount.get()
           + " exit=" + methodExitCount.get()
           + " enterTotal=" + nanosToMillis(methodEnterNanos.get())
@@ -252,7 +276,30 @@ public final class FlowAgent {
           + " snapshot=" + nanosToMillis(methodSnapshotNanos.get())
           + " caller=" + nanosToMillis(methodCallerNanos.get())
           + " write=" + nanosToMillis(methodWriteNanos.get()));
-      }));
+      }, "cgtl-capture-finalize"));
+    }
+
+    private static File finalizeCaptureFile(File file) {
+      if (file == null || !file.getName().endsWith(".tmp")) return file;
+      String name = file.getName().substring(0, file.getName().length() - 4);
+      File target = new File(file.getParentFile(), name);
+      try {
+        Files.move(file.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        System.err.println("[CGTL FLOW] Replay capture finalized: " + target.getAbsolutePath());
+        return target;
+      } catch (AtomicMoveNotSupportedException ignored) {
+        try {
+          Files.move(file.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+          System.err.println("[CGTL FLOW] Replay capture finalized: " + target.getAbsolutePath());
+          return target;
+        } catch (IOException error) {
+          System.err.println("[CGTL FLOW] Replay capture rename failed; keeping temporary path: " + error.getMessage());
+          return file;
+        }
+      } catch (IOException error) {
+        System.err.println("[CGTL FLOW] Replay capture rename failed; keeping temporary path: " + error.getMessage());
+        return file;
+      }
     }
 
     public static long enter(String className, String methodName, String descriptor, Object receiver, Object[] arguments) {
@@ -408,4 +455,85 @@ public final class FlowAgent {
     private static String quote(String value) { if (value == null) return "null"; return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "\\r").replace("\n", "\\n") + "\""; }
     private static final class Call { final long id; final String className, methodName, descriptor; final StackTraceElement caller; final Object receiver; final Object[] arguments; Call(long id,String c,String m,String d,StackTraceElement caller,Object receiver,Object[] arguments){this.id=id;this.className=c;this.methodName=m;this.descriptor=d;this.caller=caller;this.receiver=receiver;this.arguments=arguments == null ? new Object[0] : arguments.clone();} }
   }
+
+  private static final class RemoteCaptureUploader {
+    private static final String PROTOCOL = "cgtl-replay/1";
+
+    static boolean isConfigured() {
+      return present(System.getenv("CGTL_REPLAY_HOST"))
+          && present(System.getenv("CGTL_REPLAY_PORT"))
+          && present(System.getenv("CGTL_REPLAY_TOKEN"));
+    }
+
+    static void upload(File capture) {
+      String host = System.getenv("CGTL_REPLAY_HOST").trim();
+      String token = System.getenv("CGTL_REPLAY_TOKEN").trim();
+      int port;
+      try { port = Integer.parseInt(System.getenv("CGTL_REPLAY_PORT").trim()); }
+      catch (Exception error) {
+        System.err.println("[CGTL REMOTE] Invalid CGTL_REPLAY_PORT: " + System.getenv("CGTL_REPLAY_PORT"));
+        return;
+      }
+      if (port < 1 || port > 65535) {
+        System.err.println("[CGTL REMOTE] Invalid CGTL_REPLAY_PORT: " + port);
+        return;
+      }
+      long started = System.nanoTime();
+      long size = capture.length();
+      String header = "{\"protocol\":" + json(PROTOCOL)
+          + ",\"token\":" + json(token)
+          + ",\"name\":" + json(capture.getName())
+          + ",\"size\":" + size + "}\n";
+      try (Socket socket = new Socket()) {
+        socket.connect(new InetSocketAddress(host, port), 10000);
+        socket.setSoTimeout(30000);
+        OutputStream target = new BufferedOutputStream(socket.getOutputStream());
+        target.write(header.getBytes(StandardCharsets.UTF_8));
+        try (InputStream source = new BufferedInputStream(new FileInputStream(capture))) {
+          byte[] buffer = new byte[1024 * 1024];
+          int read;
+          while ((read = source.read(buffer)) >= 0) {
+            if (read > 0) target.write(buffer, 0, read);
+          }
+        }
+        target.flush();
+        socket.shutdownOutput();
+        BufferedReader responseReader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+        String response = responseReader.readLine();
+        if (response == null || !response.startsWith("OK")) {
+          throw new IOException("Replay receiver response: " + String.valueOf(response));
+        }
+        System.err.println("[CGTL REMOTE] Replay capture uploaded to " + host + ":" + port
+            + " (" + size + " bytes, " + nanosToMillis(System.nanoTime() - started) + ")");
+      } catch (Throwable error) {
+        System.err.println("[CGTL REMOTE] Replay remote upload failed; capture retained at "
+            + capture.getAbsolutePath() + ": " + error.getMessage());
+      }
+    }
+
+    private static boolean present(String value) {
+      return value != null && !value.isBlank();
+    }
+
+    private static String json(String value) {
+      if (value == null) return "null";
+      StringBuilder out = new StringBuilder("\"");
+      for (int i = 0; i < value.length(); i++) {
+        char c = value.charAt(i);
+        switch (c) {
+          case '\\' -> out.append("\\\\");
+          case '\"' -> out.append("\\\"");
+          case '\n' -> out.append("\\n");
+          case '\r' -> out.append("\\r");
+          case '\t' -> out.append("\\t");
+          default -> {
+            if (c < 0x20) out.append(String.format("\\u%04x", (int)c));
+            else out.append(c);
+          }
+        }
+      }
+      return out.append('\"').toString();
+    }
+  }
+
 }
