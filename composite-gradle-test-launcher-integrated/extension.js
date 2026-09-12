@@ -29,6 +29,10 @@ let debugEvaluateCurrentFrame;
 let debugEvaluateHistory = [];
 let debugEvaluateCurrentModel;
 let coverageIndex = {};
+let replayCaptureWatchers = [];
+const replayAutoImportTimers = new Map();
+const replayImportedSignatures = new Set();
+const REPLAY_CAPTURE_DIRS_STATE_KEY = 'replayCaptureDirectories';
 const changedProductionPaths = new Set();
 const changedProductionMethods = new Map();
 let executedLineDecoration;
@@ -68,6 +72,13 @@ async function activate(context) {
   register(context, 'compositeGradleTests.evaluateCurrentExpression', evaluateCurrentExpression);
   register(context, 'compositeGradleTests.replay.generateJarLauncher', generateJarReplayLauncher);
   register(context, 'compositeGradleTests.replay.importCapture', importReplayCapture);
+
+  await refreshReplayCaptureWatchers();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('compositeGradleTests.replayAutoImport') || event.affectsConfiguration('compositeGradleTests.replayCaptureDirectories')) {
+      refreshReplayCaptureWatchers().catch(error => output.appendLine(`[CGTL FLOW] Replay watcher refresh failed: ${error?.message || error}`));
+    }
+  }));
 
   debugEvaluatePanelProvider = new DebugEvaluatePanelProvider();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(
@@ -1843,6 +1854,7 @@ async function generateJarReplayLauncher() {
       + `$Captures = Join-Path $Runtime 'captures'\r\n`
       + `$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'\r\n`
       + `$Capture = Join-Path $Captures (\"replay-$Stamp.jsonl\")\r\n`
+      + `$CaptureTmp = \"$Capture.tmp\"\r\n`
       + `$Agent = Join-Path $Runtime 'cgtl-flow-agent.jar'\r\n`
       + `$ByteBuddy = Join-Path $Runtime ${quotePowerShellLiteral(path.basename(byteBuddyTarget))}\r\n`
       + `$Target = Join-Path $Root ${quotePowerShellLiteral(targetRef)}\r\n`
@@ -1850,7 +1862,7 @@ async function generateJarReplayLauncher() {
       + `$Jvm = @(\r\n`
       + `  \"-javaagent:$Agent\",\r\n`
       + `  \"-Xbootclasspath/a:$ByteBuddy\",\r\n`
-      + `  \"-Dcgtl.flow.output=$Capture\",\r\n`
+      + `  \"-Dcgtl.flow.output=$CaptureTmp\",\r\n`
       + `  \"-Dcgtl.flow.byteBuddyJar=$ByteBuddy\",\r\n`
       + `  ${quotePowerShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)},\r\n`
       + `  ${quotePowerShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)},\r\n`
@@ -1867,32 +1879,34 @@ async function generateJarReplayLauncher() {
       + `Write-Host \"Replay capture: $Capture\"\r\n`
       + `& java @Jvm -jar $Target @ApplicationArgs\r\n`
       + `$Code = $LASTEXITCODE\r\n`
+      + `if (Test-Path $CaptureTmp) { Move-Item -Force $CaptureTmp $Capture }\r\n`
       + `Write-Host \"Replay capture written to: $Capture\"\r\n`
       + `exit $Code\r\n`;
   } else {
     contents = `#!/usr/bin/env bash\nset -euo pipefail\n`
       + `ROOT=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n`
       + `RUNTIME=\"$ROOT/.cgtl-replay\"\nCAPTURES=\"$RUNTIME/captures\"\nmkdir -p \"$CAPTURES\"\n`
-      + `STAMP=\"$(date +%Y%m%d-%H%M%S)-$$\"\nCAPTURE=\"$CAPTURES/replay-$STAMP.jsonl\"\n`
+      + `STAMP=\"$(date +%Y%m%d-%H%M%S)-$$\"\nCAPTURE=\"$CAPTURES/replay-$STAMP.jsonl\"\nCAPTURE_TMP=\"$CAPTURE.tmp\"\n`
       + `AGENT=\"$RUNTIME/cgtl-flow-agent.jar\"\nBYTE_BUDDY=\"$RUNTIME/${path.basename(byteBuddyTarget)}\"\n`
       + `TARGET=${quoteShellLiteral(targetRef)}\nif [[ \"$TARGET\" != /* ]]; then TARGET=\"$ROOT/$TARGET\"; fi\n`
       + `echo \"Replay capture: $CAPTURE\"\n`
-      + `java \"-javaagent:$AGENT\" \"-Xbootclasspath/a:$BYTE_BUDDY\" \"-Dcgtl.flow.output=$CAPTURE\" \"-Dcgtl.flow.byteBuddyJar=$BYTE_BUDDY\" `
+      + `set +e\njava \"-javaagent:$AGENT\" \"-Xbootclasspath/a:$BYTE_BUDDY\" \"-Dcgtl.flow.output=$CAPTURE_TMP\" \"-Dcgtl.flow.byteBuddyJar=$BYTE_BUDDY\" `
       + `${quoteShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)} ${quoteShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.stateAdapters=${props.adapters}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoints=${props.capturePoints}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState=${props.lineState}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState.maxFields=${props.lineFields}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`)} -jar \"$TARGET\" \"$@\"\n`
-      + `CODE=$?\necho \"Replay capture written to: $CAPTURE\"\nexit $CODE\n`;
+      + `CODE=$?\nset -e\nif [[ -f \"$CAPTURE_TMP\" ]]; then mv -f \"$CAPTURE_TMP\" \"$CAPTURE\"; fi\necho \"Replay capture written to: $CAPTURE\"\nexit $CODE\n`;
   }
 
   fs.writeFileSync(saveUri.fsPath, contents, 'utf8');
   if (process.platform !== 'win32') {
     try { fs.chmodSync(saveUri.fsPath, 0o755); } catch (_) {}
   }
+  await registerReplayCaptureDirectory(capturesDir);
   const relativeCaptureDir = path.relative(path.dirname(saveUri.fsPath), capturesDir) || capturesDir;
-  vscode.window.showInformationMessage(`Replay launcher created. Captures will be written to ${relativeCaptureDir}.`);
+  vscode.window.showInformationMessage(`Replay launcher created. Captures will be written to ${relativeCaptureDir} and auto-imported when complete.`);
   await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(saveUri), { preview: false });
 }
 
@@ -1905,8 +1919,17 @@ async function importReplayCapture() {
     filters: { 'Replay capture': ['jsonl'] }
   });
   if (!selected?.length) return;
-  const capturePath = selected[0].fsPath;
-  const rawEvents = collectFlowEvents(capturePath);
+  return importReplayCaptureFile(selected[0].fsPath, { auto: false, open: true });
+}
+
+async function importReplayCaptureFile(capturePath, options = {}) {
+  const absolutePath = path.resolve(capturePath);
+  if (!fs.existsSync(absolutePath)) throw new Error(`Replay capture no longer exists: ${absolutePath}`);
+  const stat = fs.statSync(absolutePath);
+  const signature = `${normalizePath(absolutePath)}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+  if (options.auto && replayImportedSignatures.has(signature)) return undefined;
+
+  const rawEvents = collectFlowEvents(absolutePath);
   if (!rawEvents.length) throw new Error('The selected Replay capture contains no readable events.');
   const lineCount = rawEvents.filter(event => event.event === 'line').length;
   if (!lineCount) throw new Error('The selected capture contains no ordered Replay line events.');
@@ -1917,7 +1940,6 @@ async function importReplayCapture() {
   const profiler = {};
   const flowEvents = await enrichFlowEvents(rawEvents, preferredSourcePath, profiler);
   const executedCode = await executedCodeFromFlow(flowEvents, preferredSourcePath);
-  const stat = fs.statSync(capturePath);
   const counts = rawEvents.reduce((acc, event) => {
     const kind = String(event.event || 'unknown');
     acc[kind] = (acc[kind] || 0) + 1;
@@ -1925,13 +1947,13 @@ async function importReplayCapture() {
   }, {});
   const result = {
     id: `imported-replay-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    displayName: `Imported Replay — ${path.basename(capturePath)}`,
-    filter: `import:${capturePath}`,
+    displayName: `${options.auto ? 'Captured' : 'Imported'} Replay — ${path.basename(absolutePath)}`,
+    filter: `import:${absolutePath}`,
     sourcePath: preferredSourcePath,
     status: 'imported',
     durationMs: 0,
     finishedAt: stat.mtime.toISOString(),
-    summary: `Imported ${rawEvents.length} Replay events (${counts.line || 0} lines, ${counts.enter || 0} enters, ${counts.exit || 0} exits).`,
+    summary: `${options.auto ? 'Captured' : 'Imported'} ${rawEvents.length} Replay events (${counts.line || 0} lines, ${counts.enter || 0} enters, ${counts.exit || 0} exits).`,
     testOutput: '',
     failure: undefined,
     failures: [],
@@ -1942,17 +1964,106 @@ async function importReplayCapture() {
     coverageCaptured: false,
     analysisMode: 'flow',
     importedReplay: true,
-    importedReplayPath: capturePath,
+    importedReplayPath: absolutePath,
     output: '',
     exitCode: 0
   };
+  replayImportedSignatures.add(signature);
   await recordResult(result);
   latestResults.set(result.filter, result);
   showResultsView(result);
-  output.appendLine(`[CGTL FLOW] Imported Replay capture: ${capturePath}`);
+  output.appendLine(`[CGTL FLOW] ${options.auto ? 'Auto-imported' : 'Imported'} Replay capture: ${absolutePath}`);
   output.appendLine(`[CGTL FLOW] Imported events: enter=${counts.enter || 0}, line=${counts.line || 0}, exit=${counts.exit || 0}`);
   output.appendLine(`[CGTL PERF ENRICH] ${Object.entries(profiler).map(([name, value]) => `${name}=${formatPerformanceMilliseconds(value)}`).join(' ') || '<none>'}`);
-  await openNativeReplay(result);
+  if (options.open !== false) {
+    try {
+      await openNativeReplay(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output?.appendLine(`[CGTL FLOW] Replay imported successfully, but the Replay UI could not be opened automatically: ${message}`);
+      if (!options.auto) throw error;
+    }
+  }
+  return result;
+}
+
+function configuredReplayCaptureDirectories() {
+  const directories = new Set();
+  const persisted = extensionContext?.globalState?.get(REPLAY_CAPTURE_DIRS_STATE_KEY, []) || [];
+  for (const directory of persisted) {
+    if (directory) directories.add(path.resolve(String(directory)));
+  }
+  const configured = vscode.workspace.getConfiguration('compositeGradleTests').get('replayCaptureDirectories', []) || [];
+  const workspaceFolders = vscode.workspace.workspaceFolders || [];
+  for (const value of configured) {
+    const raw = String(value || '').trim();
+    if (!raw) continue;
+    if (path.isAbsolute(raw)) directories.add(path.resolve(raw));
+    else if (workspaceFolders.length) {
+      for (const folder of workspaceFolders) directories.add(path.resolve(folder.uri.fsPath, raw));
+    } else directories.add(path.resolve(raw));
+  }
+  return [...directories];
+}
+
+async function registerReplayCaptureDirectory(directory) {
+  const absolute = path.resolve(directory);
+  const persisted = extensionContext.globalState.get(REPLAY_CAPTURE_DIRS_STATE_KEY, []) || [];
+  const normalized = new Set(persisted.map(item => path.resolve(String(item))));
+  if (!normalized.has(absolute)) {
+    normalized.add(absolute);
+    await extensionContext.globalState.update(REPLAY_CAPTURE_DIRS_STATE_KEY, [...normalized]);
+  }
+  await refreshReplayCaptureWatchers();
+}
+
+async function refreshReplayCaptureWatchers() {
+  for (const watcher of replayCaptureWatchers) {
+    try { watcher.dispose(); } catch (_) {}
+  }
+  replayCaptureWatchers = [];
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  if (!config.get('replayAutoImport', true)) return;
+
+  const directories = new Set(configuredReplayCaptureDirectories());
+  try {
+    const existingCaptures = await vscode.workspace.findFiles('**/.cgtl-replay/captures/*.jsonl', '**/{.git,.gradle,node_modules}/**', 200);
+    for (const uri of existingCaptures) directories.add(path.dirname(uri.fsPath));
+  } catch (_) {}
+
+  for (const directory of directories) {
+    try { fs.mkdirSync(directory, { recursive: true }); } catch (_) {}
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(directory, '*.jsonl'), false, false, false);
+    const onCapture = uri => scheduleReplayAutoImport(uri.fsPath);
+    watcher.onDidCreate(onCapture);
+    watcher.onDidChange(onCapture);
+    replayCaptureWatchers.push(watcher);
+    extensionContext.subscriptions.push(watcher);
+    output?.appendLine(`[CGTL FLOW] Watching Replay captures: ${directory}`);
+  }
+}
+
+function scheduleReplayAutoImport(capturePath) {
+  const absolute = path.resolve(capturePath);
+  const existing = replayAutoImportTimers.get(absolute);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(async () => {
+    replayAutoImportTimers.delete(absolute);
+    try {
+      const config = vscode.workspace.getConfiguration('compositeGradleTests');
+      if (!config.get('replayAutoImport', true) || !fs.existsSync(absolute)) return;
+      const result = await importReplayCaptureFile(absolute, {
+        auto: true,
+        open: config.get('replayAutoOpen', true)
+      });
+      if (result) vscode.window.setStatusBarMessage(`Replay loaded: ${path.basename(absolute)}`, 4000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output?.appendLine(`[CGTL FLOW] Auto-import failed for ${absolute}: ${message}`);
+      vscode.window.showWarningMessage(`Replay capture could not be auto-imported: ${message}`);
+    }
+  }, 350);
+  replayAutoImportTimers.set(absolute, timer);
 }
 
 function collectFlowEvents(flowFile) {
@@ -5961,6 +6072,28 @@ async function updateNativeReplayWorkbench() {
   const status=`Replay ${session.position+1}/${session.lineEvents.length}${occ.length>1?` · occurrence ${occIndex+1}/${occ.length}`:''}${replayUpToHereEnabled?(replayUpToHereLocked?` · Up To Here locked #${session.upToHerePosition()+1}`:' · Up To Here'):''}`;
   vscode.window.setStatusBarMessage(status,1800);
 }
+async function revealNativeReplayWorkbench() {
+  // View-specific focus commands are generated by VS Code for contributed views and are
+  // more reliable than relying on a generated workbench.view.extension.<container> command.
+  // Revealing Replay is best-effort: a missing/changed workbench command must never make a
+  // successfully imported capture look like an import failure.
+  const commands = [
+    'compositeGradleTests.replayFiles.focus',
+    'compositeGradleTests.replayTimeline.focus'
+  ];
+  let revealed = false;
+  for (const command of commands) {
+    try {
+      await vscode.commands.executeCommand(command);
+      revealed = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      output?.appendLine(`[CGTL FLOW] Replay view reveal skipped (${command}): ${message}`);
+    }
+  }
+  return revealed;
+}
+
 async function openNativeReplay(result) {
   if(!result?.flowEvents?.some(event=>event.event==='line')){
     vscode.window.showWarningMessage('Composite Gradle Tests: this result has no ordered replay lines. Run the test with Code Flow first.');return;
@@ -5976,11 +6109,8 @@ async function openNativeReplay(result) {
   await vscode.commands.executeCommand('setContext','compositeGradleTests.replayActive',true);
   const first=nativeReplaySession.current;
   if(first) await openReplayEditorLocation(first.sourcePath,first.line,false);
-  // Custom view containers are public workbench surfaces. VS Code exposes the generated
-  // workbench.view.extension.<container id> command for revealing them.
-  await vscode.commands.executeCommand('workbench.view.extension.compositeGradleTests.replay');
-  try{await vscode.commands.executeCommand('workbench.view.extension.compositeGradleTests.replayPanel');}catch(_){}
   await updateNativeReplayWorkbench();
+  await revealNativeReplayWorkbench();
 }
 function closeNativeReplay() {
   nativeReplaySession=undefined;

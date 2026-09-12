@@ -469,3 +469,15 @@ Replay can also capture an application that is launched outside the test runner.
 5. Back in VS Code, run **Replay: Import Capture** and select the generated `.jsonl` file. The capture is resolved against source files in the current workspace, added to Replay history, and opened in the normal Execution Replay workbench.
 
 The generated launcher copies its runtime dependencies when it is created, so the launcher does not depend on the VS Code extension directory afterward. Keep instrumentation package rules narrow to reduce startup/transformation overhead.
+
+## External JAR Replay
+
+Use **Replay: Generate JAR Launcher** to create a PowerShell or shell launcher for an executable JAR. The launcher writes the active capture to a temporary `.jsonl.tmp` file and atomically renames it to `.jsonl` only after the JVM exits.
+
+Completed external captures are automatically detected and imported into the normal Replay workbench by default. Capture directories created by the launcher are registered automatically, and existing `**/.cgtl-replay/captures` locations are discovered when the extension activates. Manual **Replay: Import Capture** remains available.
+
+Settings:
+
+- `compositeGradleTests.replayAutoImport` — automatically import completed captures (default `true`).
+- `compositeGradleTests.replayAutoOpen` — open Replay immediately after auto-import (default `true`).
+- `compositeGradleTests.replayCaptureDirectories` — additional directories to watch. Relative entries are resolved against workspace folders.

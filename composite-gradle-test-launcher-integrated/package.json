@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.53",
+  "version": "0.4.55",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -1000,6 +1000,24 @@
           "minimum": 1,
           "maximum": 2000,
           "description": "Maximum collection/map/array items captured at an explicit Replay Capture Point."
+        },
+        "compositeGradleTests.replayAutoImport": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically import completed external Replay capture files from watched capture directories."
+        },
+        "compositeGradleTests.replayAutoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open the Replay workbench after an external capture is auto-imported."
+        },
+        "compositeGradleTests.replayCaptureDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional directories to watch for completed external Replay .jsonl captures. Relative paths are resolved from each workspace folder. Directories created by Generate JAR Launcher are registered automatically."
         }
       }
     },
