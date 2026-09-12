@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 let output;
 let runningProcess;
@@ -65,6 +66,8 @@ async function activate(context) {
   register(context, 'compositeGradleTests.addTest', addTestCase);
   register(context, 'compositeGradleTests.evaluateExpression', () => showDebugEvaluateWindow());
   register(context, 'compositeGradleTests.evaluateCurrentExpression', evaluateCurrentExpression);
+  register(context, 'compositeGradleTests.replay.generateJarLauncher', generateJarReplayLauncher);
+  register(context, 'compositeGradleTests.replay.importCapture', importReplayCapture);
 
   debugEvaluatePanelProvider = new DebugEvaluatePanelProvider();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(
@@ -1719,6 +1722,237 @@ allprojects { project ->
 `;
   if (!fs.existsSync(scriptPath) || fs.readFileSync(scriptPath, 'utf8') !== contents) fs.writeFileSync(scriptPath, contents, 'utf8');
   return scriptPath;
+}
+
+
+function quotePowerShellLiteral(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+function quoteShellLiteral(value) {
+  return `'${String(value || '').replace(/'/g, `'"'"'`)}'`;
+}
+
+function findByteBuddyJar(version) {
+  const name = `byte-buddy-${version}.jar`;
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.m2', 'repository', 'net', 'bytebuddy', 'byte-buddy', version, name),
+    path.join(home, '.gradle', 'caches', 'modules-2', 'files-2.1', 'net.bytebuddy', 'byte-buddy', version)
+  ];
+  if (fs.existsSync(candidates[0])) return candidates[0];
+  const gradleDir = candidates[1];
+  if (fs.existsSync(gradleDir)) {
+    try {
+      for (const hashDir of fs.readdirSync(gradleDir)) {
+        const candidate = path.join(gradleDir, hashDir, name);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    } catch (_) {}
+  }
+  return undefined;
+}
+
+function defaultReplayPackageText() {
+  const configured = flowConfiguredInstrumentationPrefixes();
+  if (configured.length) return configured.join(',');
+  const editor = vscode.window.activeTextEditor;
+  if (editor?.document?.languageId === 'java') {
+    const match = editor.document.getText().match(/^\s*package\s+([\w.]+)\s*;/m);
+    if (match?.[1]) return match[1];
+  }
+  return '';
+}
+
+async function generateJarReplayLauncher() {
+  const jarPick = await vscode.window.showOpenDialog({
+    title: 'Select the executable JAR to run with Replay',
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    filters: { 'Java archives': ['jar'] }
+  });
+  if (!jarPick?.length) return;
+  const targetJar = jarPick[0].fsPath;
+
+  const packages = String(await vscode.window.showInputBox({
+    title: 'Replay instrumentation',
+    prompt: 'Comma-separated packages/classes to instrument. Keep this as narrow as practical.',
+    value: defaultReplayPackageText(),
+    placeHolder: 'com.mycompany.orders,com.mycompany.shared.OrderLine'
+  }) || '').trim();
+  if (!packages) throw new Error('At least one Replay package or class is required.');
+
+  const saveUri = await vscode.window.showSaveDialog({
+    title: 'Save Replay launcher',
+    defaultUri: vscode.Uri.file(path.join(path.dirname(targetJar), process.platform === 'win32' ? 'run-with-replay.ps1' : 'run-with-replay.sh')),
+    filters: process.platform === 'win32' ? { 'PowerShell script': ['ps1'] } : { 'Shell script': ['sh'] }
+  });
+  if (!saveUri) return;
+
+  const settings = dependencyResolutionSettings();
+  let byteBuddyJar = findByteBuddyJar(settings.byteBuddyVersion);
+  if (!byteBuddyJar) {
+    const selected = await vscode.window.showOpenDialog({
+      title: `Select byte-buddy-${settings.byteBuddyVersion}.jar`,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      filters: { 'Java archives': ['jar'] }
+    });
+    if (!selected?.length) throw new Error(`Byte Buddy ${settings.byteBuddyVersion} was not found in the Gradle or Maven cache.`);
+    byteBuddyJar = selected[0].fsPath;
+  }
+
+  const runtimeDir = path.join(path.dirname(saveUri.fsPath), '.cgtl-replay');
+  const capturesDir = path.join(runtimeDir, 'captures');
+  fs.mkdirSync(capturesDir, { recursive: true });
+  const agentSource = path.join(extensionContext.extensionPath, 'resources', 'cgtl-flow-agent.jar');
+  if (!fs.existsSync(agentSource)) throw new Error('The packaged Replay agent could not be found.');
+  const agentTarget = path.join(runtimeDir, 'cgtl-flow-agent.jar');
+  const byteBuddyTarget = path.join(runtimeDir, path.basename(byteBuddyJar));
+  fs.copyFileSync(agentSource, agentTarget);
+  fs.copyFileSync(byteBuddyJar, byteBuddyTarget);
+
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const excludes = flowEncodedExclusions().join(',');
+  const adapters = flowStateAdapterClasses().join(',');
+  const capturePoints = replayCapturePoints().join(',');
+  const props = {
+    packages,
+    excludes,
+    adapters,
+    capturePoints,
+    captureDepth: Number(config.get('replayCapturePointMaxDepth', 8) || 8),
+    captureFields: Number(config.get('replayCapturePointMaxFields', 200) || 200),
+    captureItems: Number(config.get('replayCapturePointMaxCollectionItems', 200) || 200),
+    lineState: String(config.get('flowLineState', 'receiver') || 'receiver'),
+    lineDepth: Number(config.get('flowLineStateMaxDepth', 2) || 2),
+    lineFields: Number(config.get('flowLineStateMaxFields', 30) || 30),
+    lineItems: Number(config.get('flowLineStateMaxCollectionItems', 20) || 20)
+  };
+
+  const relativeTarget = path.relative(path.dirname(saveUri.fsPath), targetJar) || path.basename(targetJar);
+  const targetRef = relativeTarget.startsWith('..') ? targetJar : relativeTarget;
+  let contents;
+  if (process.platform === 'win32') {
+    contents = `param([Parameter(ValueFromRemainingArguments=$true)][string[]]$ApplicationArgs)\r\n`
+      + `$ErrorActionPreference = 'Stop'\r\n`
+      + `$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\r\n`
+      + `$Runtime = Join-Path $Root '.cgtl-replay'\r\n`
+      + `$Captures = Join-Path $Runtime 'captures'\r\n`
+      + `$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'\r\n`
+      + `$Capture = Join-Path $Captures (\"replay-$Stamp.jsonl\")\r\n`
+      + `$Agent = Join-Path $Runtime 'cgtl-flow-agent.jar'\r\n`
+      + `$ByteBuddy = Join-Path $Runtime ${quotePowerShellLiteral(path.basename(byteBuddyTarget))}\r\n`
+      + `$Target = Join-Path $Root ${quotePowerShellLiteral(targetRef)}\r\n`
+      + `New-Item -ItemType Directory -Force -Path $Captures | Out-Null\r\n`
+      + `$Jvm = @(\r\n`
+      + `  \"-javaagent:$Agent\",\r\n`
+      + `  \"-Xbootclasspath/a:$ByteBuddy\",\r\n`
+      + `  \"-Dcgtl.flow.output=$Capture\",\r\n`
+      + `  \"-Dcgtl.flow.byteBuddyJar=$ByteBuddy\",\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.stateAdapters=${props.adapters}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.capturePoints=${props.capturePoints}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.lineState=${props.lineState}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.lineState.maxFields=${props.lineFields}`)},\r\n`
+      + `  ${quotePowerShellLiteral(`-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`)}\r\n`
+      + `)\r\n`
+      + `Write-Host \"Replay capture: $Capture\"\r\n`
+      + `& java @Jvm -jar $Target @ApplicationArgs\r\n`
+      + `$Code = $LASTEXITCODE\r\n`
+      + `Write-Host \"Replay capture written to: $Capture\"\r\n`
+      + `exit $Code\r\n`;
+  } else {
+    contents = `#!/usr/bin/env bash\nset -euo pipefail\n`
+      + `ROOT=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n`
+      + `RUNTIME=\"$ROOT/.cgtl-replay\"\nCAPTURES=\"$RUNTIME/captures\"\nmkdir -p \"$CAPTURES\"\n`
+      + `STAMP=\"$(date +%Y%m%d-%H%M%S)-$$\"\nCAPTURE=\"$CAPTURES/replay-$STAMP.jsonl\"\n`
+      + `AGENT=\"$RUNTIME/cgtl-flow-agent.jar\"\nBYTE_BUDDY=\"$RUNTIME/${path.basename(byteBuddyTarget)}\"\n`
+      + `TARGET=${quoteShellLiteral(targetRef)}\nif [[ \"$TARGET\" != /* ]]; then TARGET=\"$ROOT/$TARGET\"; fi\n`
+      + `echo \"Replay capture: $CAPTURE\"\n`
+      + `java \"-javaagent:$AGENT\" \"-Xbootclasspath/a:$BYTE_BUDDY\" \"-Dcgtl.flow.output=$CAPTURE\" \"-Dcgtl.flow.byteBuddyJar=$BYTE_BUDDY\" `
+      + `${quoteShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)} ${quoteShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)} `
+      + `${quoteShellLiteral(`-Dcgtl.flow.stateAdapters=${props.adapters}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoints=${props.capturePoints}`)} `
+      + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`)} `
+      + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxCollectionItems=${props.captureItems}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState=${props.lineState}`)} `
+      + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.lineState.maxFields=${props.lineFields}`)} `
+      + `${quoteShellLiteral(`-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`)} -jar \"$TARGET\" \"$@\"\n`
+      + `CODE=$?\necho \"Replay capture written to: $CAPTURE\"\nexit $CODE\n`;
+  }
+
+  fs.writeFileSync(saveUri.fsPath, contents, 'utf8');
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(saveUri.fsPath, 0o755); } catch (_) {}
+  }
+  const relativeCaptureDir = path.relative(path.dirname(saveUri.fsPath), capturesDir) || capturesDir;
+  vscode.window.showInformationMessage(`Replay launcher created. Captures will be written to ${relativeCaptureDir}.`);
+  await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(saveUri), { preview: false });
+}
+
+async function importReplayCapture() {
+  const selected = await vscode.window.showOpenDialog({
+    title: 'Import Replay capture',
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    filters: { 'Replay capture': ['jsonl'] }
+  });
+  if (!selected?.length) return;
+  const capturePath = selected[0].fsPath;
+  const rawEvents = collectFlowEvents(capturePath);
+  if (!rawEvents.length) throw new Error('The selected Replay capture contains no readable events.');
+  const lineCount = rawEvents.filter(event => event.event === 'line').length;
+  if (!lineCount) throw new Error('The selected capture contains no ordered Replay line events.');
+
+  const preferredSourcePath = vscode.window.activeTextEditor?.document?.uri?.scheme === 'file'
+    ? vscode.window.activeTextEditor.document.uri.fsPath
+    : undefined;
+  const profiler = {};
+  const flowEvents = await enrichFlowEvents(rawEvents, preferredSourcePath, profiler);
+  const executedCode = await executedCodeFromFlow(flowEvents, preferredSourcePath);
+  const stat = fs.statSync(capturePath);
+  const counts = rawEvents.reduce((acc, event) => {
+    const kind = String(event.event || 'unknown');
+    acc[kind] = (acc[kind] || 0) + 1;
+    return acc;
+  }, {});
+  const result = {
+    id: `imported-replay-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    displayName: `Imported Replay — ${path.basename(capturePath)}`,
+    filter: `import:${capturePath}`,
+    sourcePath: preferredSourcePath,
+    status: 'imported',
+    durationMs: 0,
+    finishedAt: stat.mtime.toISOString(),
+    summary: `Imported ${rawEvents.length} Replay events (${counts.line || 0} lines, ${counts.enter || 0} enters, ${counts.exit || 0} exits).`,
+    testOutput: '',
+    failure: undefined,
+    failures: [],
+    events: [],
+    executedCode,
+    flowEvents,
+    flowCaptured: true,
+    coverageCaptured: false,
+    analysisMode: 'flow',
+    importedReplay: true,
+    importedReplayPath: capturePath,
+    output: '',
+    exitCode: 0
+  };
+  await recordResult(result);
+  latestResults.set(result.filter, result);
+  showResultsView(result);
+  output.appendLine(`[CGTL FLOW] Imported Replay capture: ${capturePath}`);
+  output.appendLine(`[CGTL FLOW] Imported events: enter=${counts.enter || 0}, line=${counts.line || 0}, exit=${counts.exit || 0}`);
+  output.appendLine(`[CGTL PERF ENRICH] ${Object.entries(profiler).map(([name, value]) => `${name}=${formatPerformanceMilliseconds(value)}`).join(' ') || '<none>'}`);
+  await openNativeReplay(result);
 }
 
 function collectFlowEvents(flowFile) {

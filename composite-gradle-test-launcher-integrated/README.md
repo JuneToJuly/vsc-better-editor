@@ -456,3 +456,16 @@ The Replay **State** view now supports live search across variable names and cap
 - Java debugger project resolution now strongly prefers an exact canonical directory match between the detected Gradle project and JDT, with Gradle/JDT name matching retained as a fallback.
 - Added detailed project/JDT candidate diagnostics to make composite-project resolution failures directly inspectable.
 - Fixed `includeBuild { name = "..." }` alias parsing so renamed included builds participate correctly in automatic task/project detection.
+
+
+## Replay an application JAR
+
+Replay can also capture an application that is launched outside the test runner.
+
+1. Run **Replay: Generate JAR Launcher** from the Command Palette.
+2. Select an executable JAR and enter the packages/classes Replay should instrument.
+3. The extension creates a platform launcher (`run-with-replay.ps1` on Windows or `run-with-replay.sh` on Unix), plus a `.cgtl-replay` runtime directory containing the Replay agent and Byte Buddy dependency.
+4. Run the generated script instead of `java -jar`. Any arguments supplied to the script are passed through to the application. Each execution writes a timestamped `.jsonl` capture under `.cgtl-replay/captures`.
+5. Back in VS Code, run **Replay: Import Capture** and select the generated `.jsonl` file. The capture is resolved against source files in the current workspace, added to Replay history, and opened in the normal Execution Replay workbench.
+
+The generated launcher copies its runtime dependencies when it is created, so the launcher does not depend on the VS Code extension directory afterward. Keep instrumentation package rules narrow to reduce startup/transformation overhead.

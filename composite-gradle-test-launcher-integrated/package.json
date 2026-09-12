@@ -2,7 +2,7 @@
   "name": "composite-gradle-test-launcher",
   "displayName": "Composite Gradle Test Launcher",
   "description": "Run and debug Java tests under the cursor through a root Gradle composite build.",
-  "version": "0.4.52",
+  "version": "0.4.53",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -48,7 +48,9 @@
     "onView:compositeGradleTests.replayInstrumentation",
     "onView:compositeGradleTests.replayState",
     "onCommand:compositeGradleTests.replay.stateSearch",
-    "onCommand:compositeGradleTests.replay.stateSearchClear"
+    "onCommand:compositeGradleTests.replay.stateSearchClear",
+    "onCommand:compositeGradleTests.replay.generateJarLauncher",
+    "onCommand:compositeGradleTests.replay.importCapture"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -382,6 +384,16 @@
         "command": "compositeGradleTests.replay.capturePoint.remove",
         "title": "Replay: Remove Capture Point",
         "icon": "$(trash)"
+      },
+      {
+        "command": "compositeGradleTests.replay.generateJarLauncher",
+        "title": "Replay: Generate JAR Launcher",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "compositeGradleTests.replay.importCapture",
+        "title": "Replay: Import Capture",
+        "icon": "$(cloud-download)"
       }
     ],
     "menus": {
