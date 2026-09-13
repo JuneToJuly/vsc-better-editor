@@ -1,0 +1,115 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.gradle.jvm.JvmLibrary
+import org.gradle.language.base.artifact.SourcesArtifact
+
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.gradleup.shadow' version '9.2.2'
+}
+
+group = 'example'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.apache.commons:commons-lang3:3.18.0'
+
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+application {
+    mainClass = 'example.replayapp.ReplayDemoApplication'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': application.mainClass.get()
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// CGTL Replay sources
+// ---------------------------------------------------------------------
+
+def replayDependencySources = providers.provider {
+
+    // Resolve the actual runtime dependency graph first.
+    def componentIds = configurations.runtimeClasspath
+        .incoming
+        .resolutionResult
+        .allComponents
+        .collect { it.id }
+        .findAll { it instanceof ModuleComponentIdentifier }
+
+    // Then explicitly ask Gradle for the source artifact belonging
+    // to every external runtime component.
+    def result = dependencies
+        .createArtifactResolutionQuery()
+        .forComponents(componentIds)
+        .withArtifacts(JvmLibrary, SourcesArtifact)
+        .execute()
+
+    result.resolvedComponents.collectMany { component ->
+        component
+            .getArtifacts(SourcesArtifact)
+            .findAll { it instanceof ResolvedArtifactResult }
+            .collect { it.file }
+    }
+}
+
+
+tasks.register('replaySourcesJar', Jar) {
+    group = 'build'
+    description = 'Builds a fat sources JAR for CGTL Replay'
+
+    archiveClassifier = 'replay-sources'
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    // Our application source.
+    from(sourceSets.main.allSource) {
+        include '**/*.java'
+        include '**/*.kt'
+    }
+
+    // Source artifacts of everything on runtimeClasspath.
+    from({
+        replayDependencySources.get().collect { sourceJar ->
+            zipTree(sourceJar)
+        }
+    }) {
+        include '**/*.java'
+        include '**/*.kt'
+    }
+
+    // Temporary diagnostics so we can verify exactly what Gradle found.
+    doFirst {
+        println ''
+        println 'CGTL Replay dependency source artifacts:'
+
+        replayDependencySources.get().each { sourceJar ->
+            println "  ${sourceJar}"
+        }
+
+        println ''
+    }
+}
