@@ -537,3 +537,38 @@ For Docker on the same machine as VS Code, the command uses `host.docker.interna
 ### 0.4.60 Remote receiver acknowledgement fix
 
 The Replay TCP receiver now keeps its writable half open after a sender finishes uploading. This allows the receiver to flush and atomically finalize the capture before returning `OK` to the Java agent. This fixes successful uploads being reported by the agent as `Replay receiver response: null`.
+
+## Replay Manager configuration editor (0.4.61)
+
+Replay Manager launch configuration editing now uses a form-style editor instead of a sequence of single-line VS Code prompts.
+
+- **Add Configuration** opens one editor with a Type selector for JAR Launch, Container Launch, or Watched Folder.
+- Existing configurations open the same editor with their type fixed.
+- JAR configurations provide an executable JAR **Browse…** control, multiline instrumentation packages/classes, multiline exclusions, and a larger application-arguments field.
+- Container configurations provide an engine selector, image, multiline packages/classes, exclusions, and container arguments.
+- Watched Folder configurations provide a folder **Browse…** control and enabled/disabled state.
+- The editor validates required values before saving and uses explicit **Save Configuration** and **Cancel** actions.
+
+Receiver bind address/port configuration remains intentionally compact because it contains only two scalar values.
+
+
+## Exact source negotiation for remote Replay (0.4.62)
+
+Remote Replay now treats source as an exact execution artifact rather than assuming that the current workspace matches a snapshot/version label.
+
+For JAR launches, Replay can associate an application `-sources.jar` with the launch. The manager auto-detects a sibling `<application>-sources.jar` when possible (including the sibling artifact layout when the executable itself lives in Gradle's module cache), and the launch editor also allows an explicit Sources JAR.
+
+At JVM shutdown the agent:
+
+1. finalizes and uploads the Replay capture first;
+2. identifies the Java source files for classes that actually executed;
+3. reads only those entries from the configured sources JAR and sends their normalized SHA-256 hashes in the capture metadata;
+4. waits for the receiver to decide whether the full sources JAR is needed.
+
+The receiver compares every executed source hash with the corresponding source file in the current workspace. Line endings are normalized before hashing. If every executed file matches, Replay keeps using the workspace files and the sources JAR is never transferred. This is the fast path for a JAR built from the current checkout.
+
+If any executed file is missing or differs, the receiver first checks its content-addressed source cache. If the exact sources JAR is not cached, it responds `NEED_SOURCES`, after which the agent uploads the sources JAR on a second authenticated connection. The receiver verifies the JAR SHA-256, extracts it into extension global storage, and imports the waiting Replay against those exact sources. Future captures with the same source JAR reuse the cache.
+
+This is intentionally independent of artifact version strings, so republished `SNAPSHOT` builds and same-version fat JARs cannot silently resolve to stale workspace source.
+
+Generated portable JAR launchers copy the detected/configured sources JAR into `replay-runtime/application-sources.jar`. Container launches do the same when a Sources JAR is configured and mount it with the Replay runtime. Source transfer remains demand-driven; merely including the source artifact does not upload it on every run.

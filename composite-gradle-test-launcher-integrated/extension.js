@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const net = require('net');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 let output;
 let runningProcess;
@@ -39,7 +40,8 @@ let replayRemoteServer;
 let replayRemoteToken;
 let replayRemoteStatusItem;
 const replayRemoteSockets = new Set();
-const REPLAY_REMOTE_PROTOCOL = 'cgtl-replay/1';
+const REPLAY_REMOTE_PROTOCOL = 'cgtl-replay/2';
+const replayPendingSourceCaptures = new Map();
 const REPLAY_MANAGER_CONFIGS_KEY = 'replayManager.configurations';
 const REPLAY_MANAGER_RECEIVER_KEY = 'replayManager.receiver';
 const REPLAY_REMOTE_TOKEN_SECRET_KEY = 'compositeGradleTests.replay.remoteToken';
@@ -1168,6 +1170,7 @@ function executeInvocationAndWait(invocation) {
 async function createAnalysisFingerprint(invocation) {
   const files = await vscode.workspace.findFiles('**/src/{main,test}/{java,kotlin}/**/*.{java,kt}', '**/{build,bin,.gradle,node_modules,out}/**', 2000);
   const crypto = require('crypto');
+const zlib = require('zlib');
   const hash = crypto.createHash('sha256');
   hash.update(String(invocation.task || ''));
   hash.update(String(invocation.filter || ''));
@@ -1840,9 +1843,216 @@ function sanitizeReplayRemoteName(name) {
   return base.toLowerCase().endsWith('.jsonl') ? base : `${base}.jsonl`;
 }
 
+
+function replaySourceCacheDirectory() {
+  const base = extensionContext?.globalStorageUri?.fsPath || path.join(os.tmpdir(), 'cgtl-replay');
+  return path.join(base, 'replay-sources');
+}
+
+function replaySourceCachePaths(sourceSha256) {
+  const safe = String(sourceSha256 || '').toLowerCase().replace(/[^a-f0-9]/g, '');
+  const root = path.join(replaySourceCacheDirectory(), safe || 'unknown');
+  return { root, jar: path.join(root, 'sources.jar'), extracted: path.join(root, 'extracted') };
+}
+
+function normalizedReplaySourceHashFromBuffer(buffer) {
+  let text = Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer || '');
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return crypto.createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+}
+
+function normalizedReplaySourceHashFromFile(file) {
+  return normalizedReplaySourceHashFromBuffer(fs.readFileSync(file));
+}
+
+async function findWorkspaceSourceByArchivePath(relativePath) {
+  const normalized = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized || normalized.includes('..')) return undefined;
+  const roots = createFlowEnrichmentContext(undefined).sourceRoots || [];
+  for (const root of roots) {
+    const candidate = path.join(root, ...normalized.split('/'));
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  const matches = await vscode.workspace.findFiles(`**/${normalized}`, '**/{build,bin,.gradle,node_modules,out,target}/**', 20);
+  return matches[0]?.fsPath;
+}
+
+const replayGradleSourceLookupCache = new Map();
+
+async function findReplaySourceJarInGradleCache(sourceName, sourceSha256) {
+  const name = path.basename(String(sourceName || ''));
+  const sha = String(sourceSha256 || '').toLowerCase();
+  if (!name || !sha) return undefined;
+  const cacheKey = `${name}:${sha}`;
+  if (replayGradleSourceLookupCache.has(cacheKey)) return replayGradleSourceLookupCache.get(cacheKey) || undefined;
+  const root = path.join(os.homedir(), '.gradle', 'caches', 'modules-2', 'files-2.1');
+  if (!fs.existsSync(root)) { replayGradleSourceLookupCache.set(cacheKey, null); return undefined; }
+  let inspected = 0;
+  const directories = async directory => {
+    try { return (await fs.promises.readdir(directory, { withFileTypes: true })).filter(entry => entry.isDirectory()); }
+    catch (_) { return []; }
+  };
+  for (const group of await directories(root)) {
+    const groupPath = path.join(root, group.name);
+    for (const module of await directories(groupPath)) {
+      const modulePath = path.join(groupPath, module.name);
+      for (const version of await directories(modulePath)) {
+        const versionPath = path.join(modulePath, version.name);
+        for (const hashDir of await directories(versionPath)) {
+          if (++inspected > 50000) break;
+          const candidate = path.join(versionPath, hashDir.name, name);
+          if (!fs.existsSync(candidate)) continue;
+          try {
+            const actual = crypto.createHash('sha256').update(await fs.promises.readFile(candidate)).digest('hex');
+            if (actual === sha) {
+              replayGradleSourceLookupCache.set(cacheKey, candidate);
+              output?.appendLine(`[CGTL SOURCES] Found exact source JAR in Gradle cache after ${inspected} artifact directories: ${candidate}`);
+              return candidate;
+            }
+          } catch (_) {}
+        }
+        if (inspected > 50000) break;
+      }
+      if (inspected > 50000) break;
+    }
+    if (inspected > 50000) break;
+  }
+  replayGradleSourceLookupCache.set(cacheKey, null);
+  output?.appendLine(`[CGTL SOURCES] Exact source JAR was not found in Gradle cache (${name}, checked ${inspected} artifact directories).`);
+  return undefined;
+}
+
+async function cacheReplaySourceJar(sourceJar, sourceSha256) {
+  const cache = replaySourceCachePaths(sourceSha256);
+  fs.mkdirSync(cache.root, { recursive: true });
+  if (path.resolve(sourceJar) !== path.resolve(cache.jar)) fs.copyFileSync(sourceJar, cache.jar);
+  extractReplaySourceJar(cache.jar, cache.extracted);
+  return cache;
+}
+
+async function evaluateReplaySourceManifest(header) {
+  const sourceSha256 = String(header?.sourceSha256 || '').trim().toLowerCase();
+  const executed = Array.isArray(header?.executedSources) ? header.executedSources.filter(item => item?.path && item?.sha256) : [];
+  if (!sourceSha256 || !executed.length) return { mode: 'workspace-unverified' };
+
+  const cache = replaySourceCachePaths(sourceSha256);
+  if (fs.existsSync(cache.jar) && fs.existsSync(cache.extracted)) {
+    output?.appendLine(`[CGTL SOURCES] Reusing cached sources ${sourceSha256.slice(0, 12)} for ${executed.length} executed source files.`);
+    return { mode: 'cached', sourceRoot: cache.extracted, sourceSha256 };
+  }
+
+  let matched = 0;
+  const mismatches = [];
+  for (const item of executed) {
+    const workspaceFile = await findWorkspaceSourceByArchivePath(item.path);
+    if (!workspaceFile) {
+      mismatches.push({ path: item.path, reason: 'missing' });
+      continue;
+    }
+    let actual;
+    try { actual = normalizedReplaySourceHashFromFile(workspaceFile); }
+    catch (_) { mismatches.push({ path: item.path, reason: 'unreadable' }); continue; }
+    if (actual === String(item.sha256).toLowerCase()) matched++;
+    else mismatches.push({ path: item.path, reason: 'different', workspaceFile });
+  }
+  if (!mismatches.length) {
+    output?.appendLine(`[CGTL SOURCES] Workspace verified against Replay sources: ${matched}/${executed.length} executed files match exactly.`);
+    return { mode: 'workspace-verified', sourceSha256 };
+  }
+  output?.appendLine(`[CGTL SOURCES] Exact source required: ${matched}/${executed.length} executed files match workspace; ${mismatches.length} missing/different.`);
+  const gradleJar = await findReplaySourceJarInGradleCache(header?.sourceName, sourceSha256);
+  if (gradleJar) {
+    const cached = await cacheReplaySourceJar(gradleJar, sourceSha256);
+    return { mode: 'gradle-cache', sourceRoot: cached.extracted, sourceSha256 };
+  }
+  return { mode: 'need-sources', sourceSha256, mismatches };
+}
+
+function extractReplaySourceJar(jarPath, destination) {
+  const data = fs.readFileSync(jarPath);
+  let eocd = -1;
+  const minimum = Math.max(0, data.length - 0x10000 - 22);
+  for (let i = data.length - 22; i >= minimum; i--) {
+    if (data.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Source JAR has no ZIP central directory.');
+  const entries = data.readUInt16LE(eocd + 10);
+  const centralOffset = data.readUInt32LE(eocd + 16);
+  let offset = centralOffset;
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  for (let index = 0; index < entries; index++) {
+    if (data.readUInt32LE(offset) !== 0x02014b50) throw new Error('Invalid source JAR central directory.');
+    const method = data.readUInt16LE(offset + 10);
+    const compressedSize = data.readUInt32LE(offset + 20);
+    const fileNameLength = data.readUInt16LE(offset + 28);
+    const extraLength = data.readUInt16LE(offset + 30);
+    const commentLength = data.readUInt16LE(offset + 32);
+    const localOffset = data.readUInt32LE(offset + 42);
+    const name = data.subarray(offset + 46, offset + 46 + fileNameLength).toString('utf8').replace(/\\/g, '/');
+    offset += 46 + fileNameLength + extraLength + commentLength;
+    if (!name || name.endsWith('/') || name.startsWith('/') || name.includes('../')) continue;
+    if (data.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`Invalid local ZIP entry for ${name}.`);
+    const localNameLength = data.readUInt16LE(localOffset + 26);
+    const localExtraLength = data.readUInt16LE(localOffset + 28);
+    const start = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = data.subarray(start, start + compressedSize);
+    let body;
+    if (method === 0) body = compressed;
+    else if (method === 8) body = zlib.inflateRawSync(compressed);
+    else continue;
+    const target = path.resolve(destination, ...name.split('/'));
+    const root = path.resolve(destination) + path.sep;
+    if (!target.startsWith(root)) continue;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  }
+}
+
+async function importRemoteReplayCapture(capturePath, sourceRoot) {
+  const config = vscode.workspace.getConfiguration('compositeGradleTests');
+  const result = await importReplayCaptureFile(capturePath, { auto: true, open: config.get('replayAutoOpen', true), sourceRoot });
+  if (result) vscode.window.setStatusBarMessage(`Remote Replay loaded: ${path.basename(capturePath)}`, 5000);
+  return result;
+}
+
+async function finalizeReceivedReplayCapture(socket, finalPath, header, received) {
+  const sourceResolution = await evaluateReplaySourceManifest(header);
+  if (sourceResolution.mode === 'need-sources') {
+    const key = sourceResolution.sourceSha256;
+    const pending = replayPendingSourceCaptures.get(key) || [];
+    pending.push({ capturePath: finalPath, receivedAt: Date.now() });
+    replayPendingSourceCaptures.set(key, pending);
+    output?.appendLine(`[CGTL SOURCES] Requesting source JAR ${key.slice(0, 12)} from remote JVM before importing ${path.basename(finalPath)}.`);
+    socket.end(`NEED_SOURCES ${key}\n`);
+    return;
+  }
+  socket.end('OK\n');
+  await importRemoteReplayCapture(finalPath, sourceResolution.sourceRoot);
+}
+
+async function finalizeReceivedReplaySources(socket, finalPath, header) {
+  const declared = String(header?.sourceSha256 || '').trim().toLowerCase();
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(finalPath)).digest('hex');
+  if (!declared || actual !== declared) throw new Error('Uploaded source JAR hash does not match its declared SHA-256.');
+  const cache = replaySourceCachePaths(declared);
+  fs.mkdirSync(cache.root, { recursive: true });
+  if (path.resolve(finalPath) !== path.resolve(cache.jar)) fs.renameSync(finalPath, cache.jar);
+  extractReplaySourceJar(cache.jar, cache.extracted);
+  const pending = replayPendingSourceCaptures.get(declared) || [];
+  replayPendingSourceCaptures.delete(declared);
+  output?.appendLine(`[CGTL SOURCES] Cached source JAR ${declared.slice(0, 12)}; importing ${pending.length} waiting Replay capture(s).`);
+  socket.end('OK\n');
+  for (const item of pending) {
+    try { await importRemoteReplayCapture(item.capturePath, cache.extracted); }
+    catch (error) { output?.appendLine(`[CGTL SOURCES] Waiting Replay import failed: ${error?.message || error}`); }
+  }
+}
+
 function handleReplayRemoteSocket(socket) {
   replayRemoteSockets.add(socket);
-  socket.setTimeout(30000);
+  socket.setTimeout(120000);
   let headerBuffer = Buffer.alloc(0);
   let header;
   let outputStream;
@@ -1876,21 +2086,24 @@ function handleReplayRemoteSocket(socket) {
     if (failed) return;
     if (!header) {
       headerBuffer = Buffer.concat([headerBuffer, chunk]);
-      if (headerBuffer.length > 65536) return fail('header is too large');
+      if (headerBuffer.length > 1024 * 1024) return fail('header is too large');
       const newline = headerBuffer.indexOf(0x0a);
       if (newline < 0) return;
       const headerText = headerBuffer.subarray(0, newline).toString('utf8').trim();
       let parsed;
       try { parsed = JSON.parse(headerText); } catch (_) { return fail('invalid header'); }
-      if (parsed.protocol !== REPLAY_REMOTE_PROTOCOL) return fail('unsupported Replay protocol');
+      if (parsed.protocol !== REPLAY_REMOTE_PROTOCOL && parsed.protocol !== 'cgtl-replay/1') return fail('unsupported Replay protocol');
       if (!secureReplayTokenEquals(parsed.token, replayRemoteToken)) return fail('authentication failed');
       expectedSize = Number(parsed.size);
       const maxBytes = Number(vscode.workspace.getConfiguration('compositeGradleTests').get('replayRemoteMaxCaptureMB', 256) || 256) * 1024 * 1024;
       if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0 || expectedSize > maxBytes) return fail('invalid or oversized capture');
       header = parsed;
-      const directory = replayRemoteCaptureDirectory();
+      const isSources = parsed.kind === 'sources';
+      const directory = isSources ? path.join(replaySourceCacheDirectory(), '.incoming') : replayRemoteCaptureDirectory();
       fs.mkdirSync(directory, { recursive: true });
-      const safeName = sanitizeReplayRemoteName(parsed.name);
+      const safeName = isSources
+        ? (path.basename(String(parsed.name || 'sources.jar')).replace(/[^A-Za-z0-9._-]+/g, '_') || 'sources.jar')
+        : sanitizeReplayRemoteName(parsed.name);
       const unique = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${safeName}`;
       finalPath = path.join(directory, unique);
       tempPath = `${finalPath}.tmp`;
@@ -1910,17 +2123,20 @@ function handleReplayRemoteSocket(socket) {
   });
   socket.on('close', () => replayRemoteSockets.delete(socket));
   socket.on('end', () => {
+    socket.setTimeout(0);
     if (failed || !header || !outputStream) return;
     if (received !== expectedSize) return fail(`capture ended early (${received}/${expectedSize} bytes)`);
     outputStream.end(async () => {
       if (failed) return;
       try {
         fs.renameSync(tempPath, finalPath);
-        output?.appendLine(`[CGTL REMOTE] Received Replay capture ${path.basename(finalPath)} (${received} bytes) from ${socket.remoteAddress || '<unknown>'}.`);
-        try { socket.end('OK\n'); } catch (_) {}
-        const config = vscode.workspace.getConfiguration('compositeGradleTests');
-        const result = await importReplayCaptureFile(finalPath, { auto: true, open: config.get('replayAutoOpen', true) });
-        if (result) vscode.window.setStatusBarMessage(`Remote Replay loaded: ${path.basename(finalPath)}`, 5000);
+        if (header.kind === 'sources') {
+          output?.appendLine(`[CGTL REMOTE] Received Replay source JAR ${path.basename(finalPath)} (${received} bytes) from ${socket.remoteAddress || '<unknown>'}.`);
+          await finalizeReceivedReplaySources(socket, finalPath, header);
+        } else {
+          output?.appendLine(`[CGTL REMOTE] Received Replay capture ${path.basename(finalPath)} (${received} bytes) from ${socket.remoteAddress || '<unknown>'}.`);
+          await finalizeReceivedReplayCapture(socket, finalPath, header, received);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         output?.appendLine(`[CGTL REMOTE] Received capture could not be imported: ${message}`);
@@ -2069,11 +2285,12 @@ async function prepareReplayRuntimeDirectory(baseDirectory) {
   return { agentTarget, byteBuddyTarget };
 }
 
-function containerJavaToolOptions(props, byteBuddyName) {
+function containerJavaToolOptions(props, byteBuddyName, hasSources = false) {
   return [
     '-javaagent:/cgtl-replay/cgtl-flow-agent.jar',
     `-Xbootclasspath/a:/cgtl-replay/${byteBuddyName}`,
     `-Dcgtl.flow.byteBuddyJar=/cgtl-replay/${byteBuddyName}`,
+    hasSources ? '-Dcgtl.flow.sourcesJar=/cgtl-replay/application-sources.jar' : '',
     '-Dcgtl.flow.maxEvents=200000',
     `-Dcgtl.flow.packages=${props.packages}`,
     `-Dcgtl.flow.excludes=${props.excludes}`,
@@ -2086,7 +2303,7 @@ function containerJavaToolOptions(props, byteBuddyName) {
     `-Dcgtl.flow.lineState.maxDepth=${props.lineDepth}`,
     `-Dcgtl.flow.lineState.maxFields=${props.lineFields}`,
     `-Dcgtl.flow.lineState.maxCollectionItems=${props.lineItems}`
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 }
 
 async function generateContainerReplayCommand() {
@@ -2342,7 +2559,7 @@ async function importReplayCaptureFile(capturePath, options = {}) {
     ? vscode.window.activeTextEditor.document.uri.fsPath
     : undefined;
   const profiler = {};
-  const flowEvents = await enrichFlowEvents(rawEvents, preferredSourcePath, profiler);
+  const flowEvents = await enrichFlowEvents(rawEvents, preferredSourcePath, profiler, options.sourceRoot ? [options.sourceRoot] : []);
   const executedCode = await executedCodeFromFlow(flowEvents, preferredSourcePath);
   const counts = rawEvents.reduce((acc, event) => {
     const kind = String(event.event || 'unknown');
@@ -2522,8 +2739,301 @@ function replayManagerSlug(name) {
   return String(name || 'replay').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'replay';
 }
 
-async function replayManagerInputName(value, fallback) {
-  return String(await vscode.window.showInputBox({ title: 'Replay launch name', value: value || fallback || '', prompt: 'Name shown in Replay Manager.' }) || '').trim();
+function replayManagerEditorNonce() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function replayManagerEditorEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function replayManagerEditorHtml(webview, profile, forcedType) {
+  const current = profile || {};
+  const isEdit = !!current.id;
+  const initialType = forcedType || current.type || 'jar';
+  const initial = {
+    id: current.id || '',
+    type: initialType,
+    name: current.name || '',
+    jarPath: current.jarPath || '',
+    sourcesJar: current.sourcesJar || '',
+    engine: current.engine || 'docker',
+    image: current.image || '',
+    packages: current.packages || defaultReplayPackageText(),
+    excludes: current.excludes ?? flowEncodedExclusions().join(','),
+    argumentsText: (current.arguments || []).join(' '),
+    captureDirectory: current.captureDirectory || '',
+    enabled: current.enabled !== false
+  };
+  const nonce = replayManagerEditorNonce();
+  const initialJson = JSON.stringify(initial).replace(/</g, '\\u003c');
+  const typeOptions = [
+    ['jar', 'JAR Launch'],
+    ['container', 'Container Launch'],
+    ['watcher', 'Watched Folder']
+  ].map(([value, label]) => `<option value="${value}"${initialType === value ? ' selected' : ''}>${label}</option>`).join('');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<title>${isEdit ? 'Edit Replay Configuration' : 'Add Replay Configuration'}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { padding: 0; margin: 0; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: 13px; }
+  .page { max-width: 820px; margin: 0 auto; padding: 24px 28px 40px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--vscode-descriptionForeground); margin-bottom: 24px; }
+  .section { border-top: 1px solid var(--vscode-panel-border); padding-top: 18px; margin-top: 20px; }
+  .section h2 { margin: 0 0 14px; font-size: 14px; font-weight: 600; }
+  .field { margin-bottom: 16px; }
+  label { display: block; margin-bottom: 6px; font-weight: 600; }
+  .hint { margin-top: 5px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.4; }
+  input[type=text], select, textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--vscode-input-border, transparent); background: var(--vscode-input-background); color: var(--vscode-input-foreground); padding: 7px 9px; font: inherit; outline: none; }
+  input[type=text]:focus, select:focus, textarea:focus { border-color: var(--vscode-focusBorder); }
+  textarea { min-height: 78px; resize: vertical; font-family: var(--vscode-editor-font-family); }
+  #argumentsText { min-height: 64px; }
+  .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  button { border: 0; padding: 7px 13px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; font: inherit; }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+  button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; position: sticky; bottom: 0; margin: 26px -8px -12px; padding: 14px 8px 12px; background: var(--vscode-editor-background); border-top: 1px solid var(--vscode-panel-border); }
+  .hidden { display: none; }
+  .error { display: none; margin: 14px 0; padding: 8px 10px; color: var(--vscode-errorForeground); border-left: 3px solid var(--vscode-errorForeground); background: var(--vscode-inputValidation-errorBackground); }
+  .check-row { display: flex; align-items: center; gap: 8px; }
+  .check-row label { margin: 0; font-weight: normal; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>${isEdit ? 'Edit Replay Configuration' : 'Add Replay Configuration'}</h1>
+  <div class="subtitle">Configure what Replay runs or imports. Receiver connection details are handled automatically.</div>
+
+  <div class="section">
+    <h2>Configuration</h2>
+    <div class="field">
+      <label for="type">Type</label>
+      <select id="type" ${isEdit ? 'disabled' : ''}>${typeOptions}</select>
+    </div>
+    <div class="field">
+      <label for="name">Name</label>
+      <input id="name" type="text" placeholder="Order Service" value="${replayManagerEditorEscape(initial.name)}">
+      <div class="hint">The name shown in Replay Manager.</div>
+    </div>
+  </div>
+
+  <div id="jarFields" class="section">
+    <h2>JAR</h2>
+    <div class="field">
+      <label for="jarPath">Executable JAR</label>
+      <div class="path-row"><input id="jarPath" type="text" value="${replayManagerEditorEscape(initial.jarPath)}"><button id="browseJar" class="secondary">Browse…</button></div>
+    </div>
+    <div class="field">
+      <label for="jarSources">Sources JAR</label>
+      <div class="path-row"><input id="jarSources" type="text" placeholder="Auto-detect beside executable when blank" value="${replayManagerEditorEscape(initial.sourcesJar)}"><button id="browseJarSources" class="secondary">Browse…</button></div>
+      <div class="hint">Optional. Replay sends only executed-source hashes first and transfers this JAR only when the receiver cannot prove the current workspace matches.</div>
+    </div>
+    <div class="field">
+      <label for="jarPackages">Instrument packages / classes</label>
+      <textarea id="jarPackages" spellcheck="false" placeholder="example.order, example.shared">${replayManagerEditorEscape(initial.packages)}</textarea>
+      <div class="hint">Comma-separated package or class prefixes. These become the Replay instrumentation scope.</div>
+    </div>
+    <div class="field">
+      <label for="jarExcludes">Instrumentation exclusions</label>
+      <textarea id="jarExcludes" spellcheck="false" placeholder="package:example.generated,class:example.Foo">${replayManagerEditorEscape(initial.excludes)}</textarea>
+      <div class="hint">Optional comma-separated package:/class: exclusions.</div>
+    </div>
+    <div class="field">
+      <label for="jarArguments">Application arguments</label>
+      <textarea id="jarArguments" spellcheck="false" placeholder="inventory-failure --spring.profiles.active=test">${replayManagerEditorEscape(initial.argumentsText)}</textarea>
+      <div class="hint">Arguments passed after <code>-jar</code>. Quotes are preserved when the command is generated.</div>
+    </div>
+  </div>
+
+  <div id="containerFields" class="section hidden">
+    <h2>Container</h2>
+    <div class="field">
+      <label for="engine">Container engine</label>
+      <select id="engine"><option value="docker"${initial.engine === 'docker' ? ' selected' : ''}>Docker</option><option value="podman"${initial.engine === 'podman' ? ' selected' : ''}>Podman</option></select>
+    </div>
+    <div class="field">
+      <label for="image">Image</label>
+      <input id="image" type="text" placeholder="my-company/order-service:latest" value="${replayManagerEditorEscape(initial.image)}">
+    </div>
+    <div class="field">
+      <label for="containerSources">Sources JAR</label>
+      <div class="path-row"><input id="containerSources" type="text" placeholder="Optional application sources JAR" value="${replayManagerEditorEscape(initial.sourcesJar)}"><button id="browseContainerSources" class="secondary">Browse…</button></div>
+      <div class="hint">If supplied, it is mounted with the Replay runtime and transferred only when the receiver needs exact sources.</div>
+    </div>
+    <div class="field">
+      <label for="containerPackages">Instrument packages / classes</label>
+      <textarea id="containerPackages" spellcheck="false">${replayManagerEditorEscape(initial.packages)}</textarea>
+    </div>
+    <div class="field">
+      <label for="containerExcludes">Instrumentation exclusions</label>
+      <textarea id="containerExcludes" spellcheck="false">${replayManagerEditorEscape(initial.excludes)}</textarea>
+    </div>
+    <div class="field">
+      <label for="containerArguments">Additional container arguments</label>
+      <textarea id="containerArguments" spellcheck="false" placeholder="-p 8080:8080 -e SPRING_PROFILES_ACTIVE=test">${replayManagerEditorEscape(initial.argumentsText)}</textarea>
+      <div class="hint">Inserted after <code>docker run</code> / <code>podman run</code> and before Replay's generated runtime options.</div>
+    </div>
+  </div>
+
+  <div id="watcherFields" class="section hidden">
+    <h2>Watched Folder</h2>
+    <div class="field">
+      <label for="captureDirectory">Capture directory</label>
+      <div class="path-row"><input id="captureDirectory" type="text" value="${replayManagerEditorEscape(initial.captureDirectory)}"><button id="browseFolder" class="secondary">Browse…</button></div>
+      <div class="hint">Completed <code>.jsonl</code> Replay captures placed here are imported automatically.</div>
+    </div>
+    <div class="field check-row"><input id="enabled" type="checkbox" ${initial.enabled ? 'checked' : ''}><label for="enabled">Watch this folder</label></div>
+  </div>
+
+  <div id="error" class="error"></div>
+  <div class="actions"><button id="cancel" class="secondary">Cancel</button><button id="save">Save Configuration</button></div>
+</div>
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  const initial = ${initialJson};
+  const type = document.getElementById('type');
+  const name = document.getElementById('name');
+  const error = document.getElementById('error');
+  function byId(id) { return document.getElementById(id); }
+  function showType() {
+    const value = type.value;
+    byId('jarFields').classList.toggle('hidden', value !== 'jar');
+    byId('containerFields').classList.toggle('hidden', value !== 'container');
+    byId('watcherFields').classList.toggle('hidden', value !== 'watcher');
+    if (!name.value.trim()) {
+      if (value === 'container') name.placeholder = 'Order Service Container';
+      else if (value === 'watcher') name.placeholder = 'Replay Captures';
+      else name.placeholder = 'Order Service';
+    }
+  }
+  function value(id) { return byId(id).value.trim(); }
+  function fail(message, field) {
+    error.textContent = message; error.style.display = 'block';
+    if (field) byId(field)?.focus();
+  }
+  function clearError() { error.textContent = ''; error.style.display = 'none'; }
+  function buildProfile() {
+    clearError();
+    const selectedType = type.value;
+    let profileName = value('name');
+    if (!profileName) {
+      if (selectedType === 'jar' && value('jarPath')) profileName = value('jarPath').split(/[\\/]/).pop().replace(/\\.jar$/i, '');
+      else if (selectedType === 'container' && value('image')) profileName = value('image');
+      else if (selectedType === 'watcher' && value('captureDirectory')) profileName = value('captureDirectory').split(/[\\/]/).filter(Boolean).pop();
+    }
+    if (!profileName) { fail('Enter a configuration name.', 'name'); return null; }
+    if (selectedType === 'jar') {
+      if (!value('jarPath')) { fail('Select an executable JAR.', 'jarPath'); return null; }
+      if (!value('jarPackages')) { fail('Enter at least one package or class to instrument.', 'jarPackages'); return null; }
+      return { ...initial, type: selectedType, name: profileName, jarPath: value('jarPath'), sourcesJar: value('jarSources'), packages: value('jarPackages'), excludes: value('jarExcludes'), argumentsText: byId('jarArguments').value.trim() };
+    }
+    if (selectedType === 'container') {
+      if (!value('image')) { fail('Enter a container image.', 'image'); return null; }
+      if (!value('containerPackages')) { fail('Enter at least one package or class to instrument.', 'containerPackages'); return null; }
+      return { ...initial, type: selectedType, name: profileName, engine: value('engine'), image: value('image'), sourcesJar: value('containerSources'), packages: value('containerPackages'), excludes: value('containerExcludes'), argumentsText: byId('containerArguments').value.trim() };
+    }
+    if (!value('captureDirectory')) { fail('Select a capture directory.', 'captureDirectory'); return null; }
+    return { ...initial, type: selectedType, name: profileName, captureDirectory: value('captureDirectory'), enabled: byId('enabled').checked };
+  }
+  type.addEventListener('change', showType);
+  byId('browseJar').addEventListener('click', () => vscode.postMessage({ type: 'browseJar' }));
+  byId('browseJarSources').addEventListener('click', () => vscode.postMessage({ type: 'browseJarSources', target: 'jarSources' }));
+  byId('browseContainerSources').addEventListener('click', () => vscode.postMessage({ type: 'browseJarSources', target: 'containerSources' }));
+  byId('browseFolder').addEventListener('click', () => vscode.postMessage({ type: 'browseFolder' }));
+  byId('cancel').addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
+  byId('save').addEventListener('click', () => { const profile = buildProfile(); if (profile) vscode.postMessage({ type: 'save', profile }); });
+  window.addEventListener('message', event => {
+    const message = event.data;
+    if (message.type === 'setField') { const field = byId(message.field); if (field) { field.value = message.value || ''; field.focus(); } }
+    else if (message.type === 'validationError') fail(message.message || 'Unable to save configuration.', message.field);
+  });
+  showType();
+</script>
+</body>
+</html>`;
+}
+
+async function openReplayManagerProfileEditor(profile, forcedType) {
+  const current = profile || {};
+  const panel = vscode.window.createWebviewPanel(
+    'cgtlReplayConfigurationEditor',
+    current.id ? `Replay: ${current.name || 'Configuration'}` : 'Add Replay Configuration',
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  panel.webview.html = replayManagerEditorHtml(panel.webview, current, forcedType);
+
+  return await new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+      try { panel.dispose(); } catch {}
+    };
+    const messageDisposable = panel.webview.onDidReceiveMessage(async message => {
+      if (!message || typeof message !== 'object') return;
+      if (message.type === 'cancel') return finish(undefined);
+      if (message.type === 'browseJar') {
+        const pick = await vscode.window.showOpenDialog({ title: 'Select executable JAR', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'Java archives': ['jar'] } });
+        if (pick?.[0]) {
+          panel.webview.postMessage({ type: 'setField', field: 'jarPath', value: pick[0].fsPath });
+          const detected = findReplaySourcesJarForExecutable(pick[0].fsPath);
+          if (detected) panel.webview.postMessage({ type: 'setField', field: 'jarSources', value: detected });
+        }
+        return;
+      }
+      if (message.type === 'browseJarSources') {
+        const pick = await vscode.window.showOpenDialog({ title: 'Select sources JAR', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'Java source archives': ['jar'] } });
+        if (pick?.[0]) panel.webview.postMessage({ type: 'setField', field: message.target === 'containerSources' ? 'containerSources' : 'jarSources', value: pick[0].fsPath });
+        return;
+      }
+      if (message.type === 'browseFolder') {
+        const pick = await vscode.window.showOpenDialog({ title: 'Select Replay watched folder', canSelectFiles: false, canSelectFolders: true, canSelectMany: false });
+        if (pick?.[0]) panel.webview.postMessage({ type: 'setField', field: 'captureDirectory', value: pick[0].fsPath });
+        return;
+      }
+      if (message.type !== 'save') return;
+      const draft = message.profile || {};
+      const type = forcedType || (current.id ? current.type : draft.type);
+      const name = String(draft.name || '').trim();
+      if (!name) return panel.webview.postMessage({ type: 'validationError', field: 'name', message: 'Enter a configuration name.' });
+      if (type === 'jar') {
+        const jarPath = String(draft.jarPath || '').trim();
+        const packages = String(draft.packages || '').trim();
+        if (!jarPath) return panel.webview.postMessage({ type: 'validationError', field: 'jarPath', message: 'Select an executable JAR.' });
+        if (!packages) return panel.webview.postMessage({ type: 'validationError', field: 'jarPackages', message: 'Enter at least one package or class to instrument.' });
+        return finish({ ...current, id: current.id || replayManagerId(name), type, name, jarPath, sourcesJar: String(draft.sourcesJar || findReplaySourcesJarForExecutable(jarPath) || '').trim(), packages, excludes: String(draft.excludes || '').trim(), arguments: splitReplayArguments(draft.argumentsText) });
+      }
+      if (type === 'container') {
+        const image = String(draft.image || '').trim();
+        const packages = String(draft.packages || '').trim();
+        const engine = draft.engine === 'podman' ? 'podman' : 'docker';
+        if (!image) return panel.webview.postMessage({ type: 'validationError', field: 'image', message: 'Enter a container image.' });
+        if (!packages) return panel.webview.postMessage({ type: 'validationError', field: 'containerPackages', message: 'Enter at least one package or class to instrument.' });
+        return finish({ ...current, id: current.id || replayManagerId(name), type, name, engine, image, sourcesJar: String(draft.sourcesJar || '').trim(), packages, excludes: String(draft.excludes || '').trim(), arguments: splitReplayArguments(draft.argumentsText) });
+      }
+      if (type === 'watcher') {
+        const captureDirectory = String(draft.captureDirectory || '').trim();
+        if (!captureDirectory) return panel.webview.postMessage({ type: 'validationError', field: 'captureDirectory', message: 'Select a capture directory.' });
+        return finish({ ...current, id: current.id || replayManagerId(name), type, name, captureDirectory: path.resolve(captureDirectory), enabled: draft.enabled !== false });
+      }
+      panel.webview.postMessage({ type: 'validationError', message: 'Unsupported Replay configuration type.' });
+    });
+    panel.onDidDispose(() => { messageDisposable.dispose(); if (!settled) { settled = true; resolve(undefined); } });
+  });
 }
 
 async function configureReplayManagerReceiver() {
@@ -2549,73 +3059,7 @@ async function configureReplayManagerReceiver() {
 }
 
 async function editReplayManagerProfile(profile, forcedType) {
-  const current = profile || {};
-  let type = forcedType || current.type;
-  if (!type) {
-    const pick = await vscode.window.showQuickPick([
-      { label: 'JAR Launch', value: 'jar', description: 'Instrument an executable JAR. Run here or generate a script to run elsewhere.' },
-      { label: 'Container Launch', value: 'container', description: 'Instrument an existing Docker/Podman image with JAVA_TOOL_OPTIONS.' },
-      { label: 'Watched Folder', value: 'watcher', description: 'Automatically import completed Replay capture files dropped into a folder.' }
-    ], { title: 'Add to Replay Manager' });
-    type = pick?.value;
-  }
-  if (!type) return undefined;
-
-  if (type === 'jar') {
-    let jarPath = current.jarPath;
-    if (!jarPath) {
-      const pick = await vscode.window.showOpenDialog({ title: 'Select executable JAR', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'Java archives': ['jar'] } });
-      jarPath = pick?.[0]?.fsPath;
-    } else {
-      const editedJar = await vscode.window.showInputBox({ title: 'Executable JAR', value: jarPath, prompt: 'Path to the executable JAR.' });
-      if (editedJar === undefined) return undefined;
-      jarPath = String(editedJar).trim();
-    }
-    if (!jarPath) return undefined;
-    const name = await replayManagerInputName(current.name, path.basename(jarPath, '.jar'));
-    if (!name) return undefined;
-    const packages = String(await vscode.window.showInputBox({ title: 'Instrument packages/classes', value: current.packages || defaultReplayPackageText(), prompt: 'Comma-separated packages/classes.' }) || '').trim();
-    if (!packages) return undefined;
-    const excludes = String(await vscode.window.showInputBox({ title: 'Exclude from instrumentation', value: current.excludes ?? flowEncodedExclusions().join(','), prompt: 'Optional comma-separated package:/class: exclusions.' }) ?? current.excludes ?? '').trim();
-    const argsText = await vscode.window.showInputBox({ title: 'Application arguments', value: (current.arguments || []).join(' '), prompt: 'Arguments passed after -jar.' });
-    if (argsText === undefined) return undefined;
-    return { ...current, id: current.id || replayManagerId(name), type, name, jarPath, packages, excludes, arguments: splitReplayArguments(argsText) };
-  }
-
-  if (type === 'container') {
-    const name = await replayManagerInputName(current.name, 'Container Replay');
-    if (!name) return undefined;
-    const enginePick = await vscode.window.showQuickPick([
-      { label: 'Docker', value: 'docker' }, { label: 'Podman', value: 'podman' }
-    ], { title: 'Container engine', placeHolder: current.engine || 'docker' });
-    const engine = enginePick?.value || current.engine;
-    if (!engine) return undefined;
-    const image = String(await vscode.window.showInputBox({ title: 'Container image', value: current.image || '', placeHolder: 'my-company/order-service:latest' }) || '').trim();
-    if (!image) return undefined;
-    const packages = String(await vscode.window.showInputBox({ title: 'Instrument packages/classes', value: current.packages || defaultReplayPackageText(), prompt: 'Comma-separated packages/classes.' }) || '').trim();
-    if (!packages) return undefined;
-    const excludes = String(await vscode.window.showInputBox({ title: 'Exclude from instrumentation', value: current.excludes ?? flowEncodedExclusions().join(','), prompt: 'Optional comma-separated package:/class: exclusions.' }) ?? current.excludes ?? '').trim();
-    const extraText = await vscode.window.showInputBox({ title: 'Additional container arguments', value: (current.arguments || []).join(' '), prompt: 'Optional arguments inserted after docker/podman run.' });
-    if (extraText === undefined) return undefined;
-    return { ...current, id: current.id || replayManagerId(name), type, name, engine, image, packages, excludes, arguments: splitReplayArguments(extraText) };
-  }
-
-  if (type === 'watcher') {
-    let captureDirectory = current.captureDirectory;
-    if (!captureDirectory) {
-      const pick = await vscode.window.showOpenDialog({ title: 'Select Replay watched folder', canSelectFiles: false, canSelectFolders: true, canSelectMany: false });
-      captureDirectory = pick?.[0]?.fsPath;
-    } else {
-      const editedDirectory = await vscode.window.showInputBox({ title: 'Watched folder', value: captureDirectory, prompt: 'Completed .jsonl Replay files placed here are imported automatically.' });
-      if (editedDirectory === undefined) return undefined;
-      captureDirectory = String(editedDirectory).trim();
-    }
-    if (!captureDirectory) return undefined;
-    const name = await replayManagerInputName(current.name, path.basename(captureDirectory) || 'Replay Captures');
-    if (!name) return undefined;
-    return { ...current, id: current.id || replayManagerId(name), type, name, captureDirectory: path.resolve(captureDirectory), enabled: current.enabled !== false };
-  }
-  return undefined;
+  return openReplayManagerProfileEditor(profile, forcedType);
 }
 
 function splitReplayArguments(text) {
@@ -2654,6 +3098,63 @@ async function deleteReplayManagerConfiguration(arg) {
 
 function replayManagerTerminalName(profile) { return `Replay: ${profile.name}`; }
 
+function findReplaySourcesJarForExecutable(jarPath) {
+  const executable = String(jarPath || '').trim();
+  if (!executable) return undefined;
+  const directory = path.dirname(executable);
+  const base = path.basename(executable, '.jar');
+  const exact = path.join(directory, `${base}-sources.jar`);
+  if (fs.existsSync(exact)) return exact;
+
+  // Gradle's module cache stores binary and sources under sibling content-hash
+  // directories inside the same module/version directory. If the executable
+  // itself came from that cache, resolve the matching sources artifact there.
+  const normalized = normalizePath(executable);
+  const marker = '/.gradle/caches/modules-2/files-2.1/';
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex >= 0) {
+    const versionDir = path.dirname(path.dirname(executable));
+    try {
+      const candidates = [];
+      for (const hashDir of fs.readdirSync(versionDir, { withFileTypes: true })) {
+        if (!hashDir.isDirectory()) continue;
+        const folder = path.join(versionDir, hashDir.name);
+        for (const name of fs.readdirSync(folder)) {
+          if (name.endsWith('-sources.jar')) candidates.push(path.join(folder, name));
+        }
+      }
+      if (candidates.length === 1) return candidates[0];
+      const expected = `${base}-sources.jar`;
+      const same = candidates.find(candidate => path.basename(candidate) === expected);
+      if (same) return same;
+    } catch (_) {}
+  }
+
+  try {
+    const candidates = fs.readdirSync(directory)
+      .filter(name => name.toLowerCase().endsWith('-sources.jar'))
+      .map(name => path.join(directory, name));
+    if (candidates.length === 1) return candidates[0];
+  } catch (_) {}
+  return undefined;
+}
+
+function replayProfileSourcesJar(profile) {
+  const explicit = String(profile?.sourcesJar || '').trim();
+  if (explicit && fs.existsSync(explicit)) return explicit;
+  if (profile?.type === 'jar') return findReplaySourcesJarForExecutable(profile.jarPath);
+  return undefined;
+}
+
+function copyReplaySourcesIntoRuntime(profile, runtimeDir) {
+  const sourceJar = replayProfileSourcesJar(profile);
+  if (!sourceJar || !fs.existsSync(sourceJar)) return undefined;
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  const target = path.join(runtimeDir, 'application-sources.jar');
+  if (path.resolve(sourceJar) !== path.resolve(target)) fs.copyFileSync(sourceJar, target);
+  return target;
+}
+
 function replayLaunchPropertiesForProfile(profile) {
   const props = replayLaunchProperties(profile.packages || defaultReplayPackageText());
   if (profile.excludes !== undefined) props.excludes = String(profile.excludes || '').trim();
@@ -2679,6 +3180,8 @@ function replayJavaOptions(profile, runtime, capturePath) {
     `-Xbootclasspath/a:${runtime.byteBuddyTarget}`,
     capturePath ? `-Dcgtl.flow.output=${capturePath}` : '',
     `-Dcgtl.flow.byteBuddyJar=${runtime.byteBuddyTarget}`,
+    runtime.applicationTarget ? `-Dcgtl.flow.applicationJar=${runtime.applicationTarget}` : '',
+    runtime.sourcesTarget ? `-Dcgtl.flow.sourcesJar=${runtime.sourcesTarget}` : '',
     `-Dcgtl.flow.packages=${props.packages}`,
     `-Dcgtl.flow.excludes=${props.excludes}`,
     `-Dcgtl.flow.stateAdapters=${props.adapters}`,
@@ -2704,7 +3207,8 @@ async function buildReplayManagerCommand(profile, options = {}) {
     const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'runtime');
     const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
     const receiverHost = replayReceiverHostForExecution(connection, 'jar', location);
-    const javaOptions = replayJavaOptions(profile, runtime);
+    const sourcesJar = replayProfileSourcesJar(profile);
+    const javaOptions = replayJavaOptions(profile, { ...runtime, applicationTarget: profile.jarPath, sourcesTarget: sourcesJar });
     const java = `java ${javaOptions.map(quote).join(' ')} -jar ${quote(profile.jarPath)} ${(profile.arguments || []).map(quote).join(' ')}`.trim();
     if (process.platform === 'win32') {
       return { command: `$env:CGTL_REPLAY_HOST=${quote(receiverHost)}; $env:CGTL_REPLAY_PORT=${quote(String(connection.port))}; $env:CGTL_REPLAY_TOKEN=${quote(connection.token)}; ${java}`, receiverHost };
@@ -2716,7 +3220,8 @@ async function buildReplayManagerCommand(profile, options = {}) {
     const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'container-runtime');
     const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
     const props = replayLaunchPropertiesForProfile(profile);
-    const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+    const runtimeSources = copyReplaySourcesIntoRuntime(profile, runtimeDir);
+    const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
     const receiverHost = replayReceiverHostForExecution(connection, profile.engine || 'docker', location);
     const name = `cgtl-replay-${profile.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 40)}`;
     const args = [
@@ -2821,6 +3326,7 @@ async function generateReplayManagerScript(arg) {
   const scriptDir = path.dirname(scriptPath);
   const runtimeDir = path.join(scriptDir, 'replay-runtime');
   const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+  const runtimeSources = copyReplaySourcesIntoRuntime(profile, runtimeDir);
   const props = replayLaunchPropertiesForProfile(profile);
   const receiverHost = replayReceiverHostForExecution(connection, profile.type === 'container' ? (profile.engine || 'docker') : 'jar', where.value);
   let contents;
@@ -2830,16 +3336,17 @@ async function generateReplayManagerScript(arg) {
     if (profile.type === 'jar') {
       const jarName = path.basename(profile.jarPath);
       const jarExpression = where.value === 'remote' ? `Join-Path $Root ${quotePowerShellLiteral(jarName)}` : quotePowerShellLiteral(profile.jarPath);
-      const options = replayJavaOptions(profile, { agentTarget: '$Agent', byteBuddyTarget: '$ByteBuddy' });
+      const options = replayJavaOptions(profile, { agentTarget: '$Agent', byteBuddyTarget: '$ByteBuddy', applicationTarget: '$Jar', sourcesTarget: runtimeSources ? '$Sources' : undefined });
       const optionText = options.map(opt => {
         if (opt.startsWith('-javaagent:$Agent')) return '"-javaagent:$Agent"';
         if (opt.startsWith('-Xbootclasspath/a:$ByteBuddy')) return '"-Xbootclasspath/a:$ByteBuddy"';
         if (opt.startsWith('-Dcgtl.flow.byteBuddyJar=$ByteBuddy')) return '"-Dcgtl.flow.byteBuddyJar=$ByteBuddy"';
+        if (opt.includes('$Jar') || opt.includes('$Sources')) return `"${opt}"`;
         return quotePowerShellLiteral(opt);
       }).join(' ');
-      contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Agent = Join-Path $Root 'replay-runtime/cgtl-flow-agent.jar'\n$ByteBuddy = Join-Path $Root ${quotePowerShellLiteral(`replay-runtime/${path.basename(runtime.byteBuddyTarget)}`)}\n$Jar = ${jarExpression}\nif (-not (Test-Path $Jar)) { throw "Place ${jarName} next to this script or update \`$Jar." }\n${envLines}\njava ${optionText} -jar $Jar ${(profile.arguments || []).map(quotePowerShellLiteral).join(' ')}\nexit $LASTEXITCODE\n`;
+      contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Agent = Join-Path $Root 'replay-runtime/cgtl-flow-agent.jar'\n$ByteBuddy = Join-Path $Root ${quotePowerShellLiteral(`replay-runtime/${path.basename(runtime.byteBuddyTarget)}`)}\n${runtimeSources ? "$Sources = Join-Path $Root 'replay-runtime/application-sources.jar'\n" : ''}$Jar = ${jarExpression}\nif (-not (Test-Path $Jar)) { throw "Place ${jarName} next to this script or update \`$Jar." }\n${envLines}\njava ${optionText} -jar $Jar ${(profile.arguments || []).map(quotePowerShellLiteral).join(' ')}\nexit $LASTEXITCODE\n`;
     } else {
-      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
       const addHost = where.value === 'local' && profile.engine === 'docker' ? "  '--add-host=host.docker.internal:host-gateway'\n" : '';
       const extra = (profile.arguments || []).map(v => `  ${quotePowerShellLiteral(v)}\n`).join('');
       contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Runtime = Join-Path $Root 'replay-runtime'\n${envLines}\n$RunArgs = @(\n  'run'\n  '--rm'\n${addHost}${extra}  '-v'\n  "${'$'}{Runtime}:/cgtl-replay:ro"\n  '-e'\n  "CGTL_REPLAY_HOST=${receiverHost}"\n  '-e'\n  "CGTL_REPLAY_PORT=${connection.port}"\n  '-e'\n  "CGTL_REPLAY_TOKEN=${connection.token}"\n  '-e'\n  ${quotePowerShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)}\n  ${quotePowerShellLiteral(profile.image)}\n)\n& ${profile.engine || 'docker'} @RunArgs\nexit $LASTEXITCODE\n`;
@@ -2849,11 +3356,14 @@ async function generateReplayManagerScript(arg) {
     if (profile.type === 'jar') {
       const jarName = path.basename(profile.jarPath);
       const jarShell = where.value === 'remote' ? `\"$ROOT/${jarName}\"` : quoteShellLiteral(profile.jarPath);
-      const runtimeShell = { agentTarget: '$ROOT/replay-runtime/cgtl-flow-agent.jar', byteBuddyTarget: `$ROOT/replay-runtime/${path.basename(runtime.byteBuddyTarget)}` };
-      const options = replayJavaOptions(profile, runtimeShell).map(opt => opt.replace(/\$ROOT/g, '"$ROOT"'));
+      const runtimeShell = { agentTarget: '$ROOT/replay-runtime/cgtl-flow-agent.jar', byteBuddyTarget: `$ROOT/replay-runtime/${path.basename(runtime.byteBuddyTarget)}`, applicationTarget: '$JAR', sourcesTarget: runtimeSources ? '$ROOT/replay-runtime/application-sources.jar' : undefined };
+      const options = replayJavaOptions(profile, runtimeShell).map(opt => {
+        const expanded = opt.replace(/\$ROOT/g, '"$ROOT"');
+        return expanded.includes('$JAR') ? `"${expanded}"` : expanded;
+      });
       contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nJAR=${jarShell}\nif [[ ! -f "$JAR" ]]; then echo "Place ${jarName} next to this script or update JAR." >&2; exit 2; fi\n${envLines}\njava ${options.join(' ')} -jar "$JAR" ${(profile.arguments || []).map(quoteShellLiteral).join(' ')}\n`;
     } else {
-      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
       const addHost = where.value === 'local' && profile.engine === 'docker' ? ' --add-host=host.docker.internal:host-gateway' : '';
       contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nRUNTIME="$ROOT/replay-runtime"\n${envLines}\n${profile.engine || 'docker'} run --rm${addHost} ${(profile.arguments || []).map(quoteShellLiteral).join(' ')} \\\n  -v "$RUNTIME:/cgtl-replay:ro" \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_HOST=${receiverHost}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_PORT=${connection.port}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_TOKEN=${connection.token}`)} \\\n  -e ${quoteShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)} \\\n  ${quoteShellLiteral(profile.image)}\n`;
     }
@@ -2960,7 +3470,7 @@ function collectFlowEvents(flowFile) {
 }
 
 
-function createFlowEnrichmentContext(preferredSourcePath, profiler = {}) {
+function createFlowEnrichmentContext(preferredSourcePath, profiler = {}, extraSourceRoots = []) {
   const preferredProject = preferredSourcePath ? findProjectDirectoryFromSourcePath(preferredSourcePath) : undefined;
   const preferredWorkspace = preferredSourcePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(preferredSourcePath))?.uri.fsPath : undefined;
   const context = {
@@ -2975,7 +3485,7 @@ function createFlowEnrichmentContext(preferredSourcePath, profiler = {}) {
     sourceRoots: []
   };
   const startedAt = monotonicMilliseconds();
-  context.sourceRoots = discoverFlowSourceRoots(context);
+  context.sourceRoots = [...extraSourceRoots.filter(root => root && fs.existsSync(root)), ...discoverFlowSourceRoots(context)];
   addFlowProfileTime(profiler, 'sourceRootDiscovery', startedAt);
   return context;
 }
@@ -3181,8 +3691,8 @@ async function flowParsedDocument(uri, context) {
   return parsed;
 }
 
-async function enrichFlowEvents(events, preferredSourcePath, profiler = {}) {
-  const context = createFlowEnrichmentContext(preferredSourcePath, profiler);
+async function enrichFlowEvents(events, preferredSourcePath, profiler = {}, extraSourceRoots = []) {
+  const context = createFlowEnrichmentContext(preferredSourcePath, profiler, extraSourceRoots);
   const enriched = [];
   for (const event of events || []) {
     if (!event.className || !event.methodName) { enriched.push(event); continue; }

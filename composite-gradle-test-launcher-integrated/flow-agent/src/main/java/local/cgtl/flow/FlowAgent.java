@@ -7,7 +7,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.security.MessageDigest;
 import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import net.bytebuddy.asm.Advice;
@@ -457,7 +460,7 @@ public final class FlowAgent {
   }
 
   private static final class RemoteCaptureUploader {
-    private static final String PROTOCOL = "cgtl-replay/1";
+    private static final String PROTOCOL = "cgtl-replay/2";
 
     static boolean isConfigured() {
       return present(System.getenv("CGTL_REPLAY_HOST"))
@@ -478,36 +481,176 @@ public final class FlowAgent {
         System.err.println("[CGTL REMOTE] Invalid CGTL_REPLAY_PORT: " + port);
         return;
       }
+      try {
+        SourceManifest sources = SourceManifest.create(capture);
+        String response = uploadCapture(host, port, token, capture, sources);
+        if (response != null && response.startsWith("NEED_SOURCES")) {
+          if (sources == null || sources.sourceJar == null || !sources.sourceJar.isFile()) {
+            throw new IOException("Replay receiver requested sources, but no sources JAR is available");
+          }
+          String sourceResponse = uploadSourceJar(host, port, token, sources);
+          if (sourceResponse == null || !sourceResponse.startsWith("OK")) {
+            throw new IOException("Replay receiver source response: " + String.valueOf(sourceResponse));
+          }
+          System.err.println("[CGTL REMOTE] Replay source JAR uploaded (" + sources.sourceJar.length() + " bytes)");
+        } else if (response == null || !response.startsWith("OK")) {
+          throw new IOException("Replay receiver response: " + String.valueOf(response));
+        }
+      } catch (Throwable error) {
+        System.err.println("[CGTL REMOTE] Replay remote upload failed; capture retained at "
+            + capture.getAbsolutePath() + ": " + error.getMessage());
+      }
+    }
+
+    private static String uploadCapture(String host, int port, String token, File capture, SourceManifest sources) throws IOException {
       long started = System.nanoTime();
       long size = capture.length();
+      StringBuilder header = new StringBuilder("{\"protocol\":").append(json(PROTOCOL))
+          .append(",\"kind\":\"capture\"")
+          .append(",\"token\":").append(json(token))
+          .append(",\"name\":").append(json(capture.getName()))
+          .append(",\"size\":").append(size);
+      String applicationJar = sourcePath("cgtl.flow.applicationJar", "CGTL_REPLAY_APPLICATION_JAR");
+      if (present(applicationJar)) {
+        File binary = new File(applicationJar);
+        if (binary.isFile()) {
+          try { header.append(",\"applicationSha256\":").append(json(sha256(binary))); } catch (Throwable ignored) {}
+        }
+      }
+      if (sources != null) {
+        header.append(",\"sourceSha256\":").append(json(sources.sourceSha256));
+        header.append(",\"sourceName\":").append(json(sources.sourceJar.getName()));
+        header.append(",\"executedSources\":[");
+        int i = 0;
+        for (Map.Entry<String,String> entry : sources.executedSourceHashes.entrySet()) {
+          if (i++ > 0) header.append(',');
+          header.append("{\"path\":").append(json(entry.getKey()))
+              .append(",\"sha256\":").append(json(entry.getValue())).append('}');
+        }
+        header.append(']');
+      }
+      header.append("}\n");
+      String response = uploadFile(host, port, header.toString(), capture);
+      if (response != null && (response.startsWith("OK") || response.startsWith("NEED_SOURCES"))) {
+        System.err.println("[CGTL REMOTE] Replay capture uploaded to " + host + ":" + port
+            + " (" + size + " bytes, " + nanosToMillis(System.nanoTime() - started) + ")");
+      }
+      return response;
+    }
+
+    private static String uploadSourceJar(String host, int port, String token, SourceManifest sources) throws IOException {
+      File jar = sources.sourceJar;
       String header = "{\"protocol\":" + json(PROTOCOL)
+          + ",\"kind\":\"sources\""
           + ",\"token\":" + json(token)
-          + ",\"name\":" + json(capture.getName())
-          + ",\"size\":" + size + "}\n";
+          + ",\"name\":" + json(jar.getName())
+          + ",\"sourceSha256\":" + json(sources.sourceSha256)
+          + ",\"size\":" + jar.length() + "}\n";
+      return uploadFile(host, port, header, jar);
+    }
+
+    private static String uploadFile(String host, int port, String header, File file) throws IOException {
       try (Socket socket = new Socket()) {
         socket.connect(new InetSocketAddress(host, port), 10000);
-        socket.setSoTimeout(30000);
+        socket.setSoTimeout(120000);
         OutputStream target = new BufferedOutputStream(socket.getOutputStream());
         target.write(header.getBytes(StandardCharsets.UTF_8));
-        try (InputStream source = new BufferedInputStream(new FileInputStream(capture))) {
+        try (InputStream source = new BufferedInputStream(new FileInputStream(file))) {
           byte[] buffer = new byte[1024 * 1024];
           int read;
-          while ((read = source.read(buffer)) >= 0) {
-            if (read > 0) target.write(buffer, 0, read);
-          }
+          while ((read = source.read(buffer)) >= 0) if (read > 0) target.write(buffer, 0, read);
         }
         target.flush();
         socket.shutdownOutput();
         BufferedReader responseReader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-        String response = responseReader.readLine();
-        if (response == null || !response.startsWith("OK")) {
-          throw new IOException("Replay receiver response: " + String.valueOf(response));
+        return responseReader.readLine();
+      }
+    }
+
+    private static String sourcePath(String property, String environment) {
+      String value = System.getProperty(property);
+      if (!present(value)) value = System.getenv(environment);
+      return value == null ? null : value.trim();
+    }
+
+    private static String sha256(File file) throws Exception {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      try (InputStream in = new BufferedInputStream(new FileInputStream(file))) {
+        byte[] buffer = new byte[1024 * 1024]; int read;
+        while ((read = in.read(buffer)) >= 0) if (read > 0) digest.update(buffer, 0, read);
+      }
+      return hex(digest.digest());
+    }
+
+    private static String normalizedSourceSha(byte[] bytes) throws Exception {
+      String text = new String(bytes, StandardCharsets.UTF_8);
+      if (!text.isEmpty() && text.charAt(0) == '\ufeff') text = text.substring(1);
+      text = text.replace("\r\n", "\n").replace('\r', '\n');
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      return hex(digest.digest(text.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String hex(byte[] bytes) {
+      StringBuilder out = new StringBuilder(bytes.length * 2);
+      for (byte value : bytes) out.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+      return out.toString();
+    }
+
+    private static final class SourceManifest {
+      final File sourceJar;
+      final String sourceSha256;
+      final LinkedHashMap<String,String> executedSourceHashes;
+      SourceManifest(File sourceJar, String sourceSha256, LinkedHashMap<String,String> executedSourceHashes) {
+        this.sourceJar = sourceJar; this.sourceSha256 = sourceSha256; this.executedSourceHashes = executedSourceHashes;
+      }
+
+      static SourceManifest create(File capture) {
+        String configured = sourcePath("cgtl.flow.sourcesJar", "CGTL_REPLAY_SOURCES_JAR");
+        if (!present(configured)) return null;
+        File jar = new File(configured);
+        if (!jar.isFile()) {
+          System.err.println("[CGTL REMOTE] Sources JAR not found: " + configured);
+          return null;
         }
-        System.err.println("[CGTL REMOTE] Replay capture uploaded to " + host + ":" + port
-            + " (" + size + " bytes, " + nanosToMillis(System.nanoTime() - started) + ")");
-      } catch (Throwable error) {
-        System.err.println("[CGTL REMOTE] Replay remote upload failed; capture retained at "
-            + capture.getAbsolutePath() + ": " + error.getMessage());
+        try {
+          LinkedHashSet<String> sourcePaths = executedSourcePaths(capture);
+          LinkedHashMap<String,String> hashes = new LinkedHashMap<>();
+          try (ZipFile zip = new ZipFile(jar)) {
+            for (String sourcePath : sourcePaths) {
+              ZipEntry entry = zip.getEntry(sourcePath);
+              if (entry == null) continue;
+              try (InputStream in = zip.getInputStream(entry)) {
+                hashes.put(sourcePath, normalizedSourceSha(in.readAllBytes()));
+              }
+            }
+          }
+          String jarSha = sha256(jar);
+          System.err.println("[CGTL REMOTE] Source manifest prepared: executed=" + sourcePaths.size()
+              + " found=" + hashes.size() + " sourceJar=" + jar.getName());
+          return new SourceManifest(jar, jarSha, hashes);
+        } catch (Throwable error) {
+          System.err.println("[CGTL REMOTE] Could not prepare source manifest: " + error.getMessage());
+          return null;
+        }
+      }
+
+      private static LinkedHashSet<String> executedSourcePaths(File capture) throws IOException {
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        try (BufferedReader reader = Files.newBufferedReader(capture.toPath(), StandardCharsets.UTF_8)) {
+          String line;
+          while ((line = reader.readLine()) != null) {
+            int marker = line.indexOf("\"className\":\"");
+            if (marker < 0) continue;
+            int start = marker + 13;
+            int end = line.indexOf('"', start);
+            if (end <= start) continue;
+            String className = line.substring(start, end);
+            int dollar = className.indexOf('$');
+            if (dollar >= 0) className = className.substring(0, dollar);
+            if (!className.isBlank()) result.add(className.replace('.', '/') + ".java");
+          }
+        }
+        return result;
       }
     }
 
