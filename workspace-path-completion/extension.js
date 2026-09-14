@@ -111,14 +111,15 @@ async function rebuildIndex(reason = 'manual') {
       : includePatterns.length > 1
         ? `{${includePatterns.join(',')}}`
         : '**/*';
-    const excludePatterns = currentExcludePatterns();
-    const searchExclude = excludePatterns.length === 1
-      ? excludePatterns[0]
-      : excludePatterns.length > 1
-        ? `{${excludePatterns.join(',')}}`
-        : undefined;
 
-    const uris = await vscode.workspace.findFiles(searchInclude, searchExclude, max);
+    // IMPORTANT: pass null, not undefined and not our combined exclusion glob.
+    // VS Code treats undefined as "use the default search excludes". That can
+    // silently remove files (notably generated/build outputs) before this
+    // extension ever gets a chance to apply useSearchExclude=false.
+    //
+    // We intentionally enumerate the include universe here and apply ALL
+    // extension/files/search exclusion rules below in one deterministic place.
+    const uris = await vscode.workspace.findFiles(searchInclude, null, max);
     if (generation !== indexGeneration) return;
 
     const map = new Map();
@@ -192,77 +193,268 @@ function scheduleRebuild(reason, delay = 250) {
 
 function isBoundary(str, i) {
   if (i === 0) return true;
-  const p = str[i - 1], c = str[i];
-  if ('/\\-_. '.includes(p)) return true;
+  const p = str[i - 1];
+  const c = str[i];
+
+  // Semantic/path boundaries from the shared fuzzy-match contract.
+  if ('/\\-_.'.includes(p) || /\s/.test(p)) return true;
   if (/[a-z]/.test(p) && /[A-Z]/.test(c)) return true;
   if (/[A-Za-z]/.test(p) && /\d/.test(c)) return true;
   if (/\d/.test(p) && /[A-Za-z]/.test(c)) return true;
   return false;
 }
 
-function fuzzyScore(query, candidate) {
-  const q = query.toLowerCase();
-  const c = candidate.toLowerCase();
-  if (!q) return 1;
+// Shared fuzzy-match contract. Keep these deliberately simple and relative:
+// matching is always positive; semantic boundaries and runs are valuable;
+// opening a gap is expensive; extending an existing gap is cheaper.
+const FUZZY = Object.freeze({
+  MATCH: 16,
+  BOUNDARY: 12,
+  FIRST_BOUNDARY_EXTRA: 24,
+  CONSECUTIVE: 18,
+  GAP_START: 14,
+  GAP_EXTEND: 2,
+  SPAN_GAP: 1,
+  PRIMARY_FIELD: 24,
+  CLOSE_MATCH_BUCKET: 6,
+  // Reverse matching is intentionally stricter than forward matching. It exists
+  // to keep a complete filename relevant when the user types extra text around
+  // it (testbuild.gradle / build.gradletest), not to admit tiny fragments such
+  // as the directory 'build/' for a long filename query.
+  MIN_REVERSE_COVERAGE: 0.60
+});
 
-  let qi = 0;
-  const positions = [];
-  for (let i = 0; i < c.length && qi < q.length; i++) {
-    if (c[i] === q[qi]) {
-      positions.push(i);
-      qi++;
-    }
-  }
-  if (qi !== q.length) return Number.NEGATIVE_INFINITY;
-
-  let score = q.length * 10;
-  let gapRuns = 0;
-  let gapChars = 0;
-  let contiguous = 0;
-  let boundary = 0;
-
-  for (let i = 0; i < positions.length; i++) {
-    const pos = positions[i];
-    if (isBoundary(candidate, pos)) {
-      boundary += i === 0 ? 28 : 12;
-    }
-    if (i > 0) {
-      const gap = pos - positions[i - 1] - 1;
-      if (gap === 0) contiguous += 18;
-      else {
-        gapRuns++;
-        gapChars += gap;
-      }
-    }
-  }
-
-  const span = positions[positions.length - 1] - positions[0] + 1;
-  const startPenalty = positions[0] * 0.2;
-  const exactBonus = c === q ? 100 : 0;
-  const basename = candidate.split('/').pop() || candidate;
-  const baseScore = fuzzyScoreSimple(q, basename);
-  const baseBonus = Number.isFinite(baseScore) ? Math.min(40, baseScore * 0.18) : 0;
-
-  score += contiguous + boundary + exactBonus + baseBonus;
-  score -= gapRuns * 12;
-  score -= gapChars * 1.2;
-  score -= Math.max(0, span - q.length) * 0.6;
-  score -= startPenalty;
-  score -= candidate.length * 0.015;
-  return score;
+function charsEqual(a, b) {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
-function fuzzyScoreSimple(query, candidate) {
+/**
+ * Score the best ordered alignment of query inside candidate.
+ *
+ * This is dynamic programming rather than a greedy subsequence walk. That
+ * matters for names such as OrderWorkflow: there can be several legal
+ * alignments and we want the one with the strongest boundaries/consecutive
+ * runs, not simply the first characters encountered.
+ *
+ * Runtime is O(query.length * candidate.length).
+ */
+function fuzzyScore(query, candidate) {
   if (!query) return 1;
-  let qi = 0;
-  let score = 0;
-  for (let i = 0; i < candidate.length && qi < query.length; i++) {
-    if (candidate[i].toLowerCase() === query[qi].toLowerCase()) {
-      score += isBoundary(candidate, i) ? 8 : 2;
-      qi++;
+  if (!candidate || query.length > candidate.length) return Number.NEGATIVE_INFINITY;
+
+  const q = query;
+  const n = candidate.length;
+  const m = q.length;
+  let previous = new Array(n).fill(Number.NEGATIVE_INFINITY);
+
+  // First query character: every match gets the base score, with an amplified
+  // bonus when it lands on a semantic boundary.
+  for (let j = 0; j < n; j++) {
+    if (!charsEqual(q[0], candidate[j])) continue;
+    const boundary = isBoundary(candidate, j);
+    previous[j] = FUZZY.MATCH
+      + (boundary ? FUZZY.BOUNDARY + FUZZY.FIRST_BOUNDARY_EXTRA : 0);
+  }
+
+  for (let qi = 1; qi < m; qi++) {
+    const current = new Array(n).fill(Number.NEGATIVE_INFINITY);
+
+    // For a gapped transition k -> j (k <= j-2):
+    //   prev[k] - GAP_START - GAP_EXTEND*(gap-1) - SPAN_GAP*gap
+    // can be rearranged so the best eligible k is maintained incrementally.
+    // This avoids an O(n^2) scan for each query character.
+    let bestGapBase = Number.NEGATIVE_INFINITY;
+
+    for (let j = 0; j < n; j++) {
+      const newlyEligible = j - 2;
+      if (newlyEligible >= 0 && Number.isFinite(previous[newlyEligible])) {
+        const k = newlyEligible;
+        const base = previous[k] + (FUZZY.GAP_EXTEND + FUZZY.SPAN_GAP) * k;
+        if (base > bestGapBase) bestGapBase = base;
+      }
+
+      if (!charsEqual(q[qi], candidate[j])) continue;
+
+      const matchBonus = FUZZY.MATCH + (isBoundary(candidate, j) ? FUZZY.BOUNDARY : 0);
+      let best = Number.NEGATIVE_INFINITY;
+
+      // Consecutive characters are strongly preferred.
+      if (j > 0 && Number.isFinite(previous[j - 1])) {
+        best = previous[j - 1] + FUZZY.CONSECUTIVE;
+      }
+
+      // A gap pays a large one-time opening cost and a smaller extension cost.
+      if (Number.isFinite(bestGapBase)) {
+        const gapTransition = bestGapBase
+          - FUZZY.GAP_START
+          - (FUZZY.GAP_EXTEND + FUZZY.SPAN_GAP) * (j - 2)
+          - FUZZY.SPAN_GAP;
+        if (gapTransition > best) best = gapTransition;
+      }
+
+      if (Number.isFinite(best)) current[j] = best + matchBonus;
+    }
+
+    previous = current;
+  }
+
+  let best = Number.NEGATIVE_INFINITY;
+  for (const score of previous) if (score > best) best = score;
+  return best;
+}
+
+/**
+ * Match a user query against a file candidate.
+ *
+ * Normal fuzzy matching remains one-way: query -> candidate. Every query
+ * character must be explained by the filename/path in order.
+ *
+ * We support one deliberate "reverse qualifier" form for filenames:
+ *
+ *   testbuild.gradle
+ *   build.gradletest
+ *
+ * when the real filename is build.gradle. The filename itself must occur as a
+ * contiguous substring of what the user typed. Any characters before/after
+ * that filename are NOT discarded; each leftover qualifier must fuzzy-match
+ * the file's directory/workspace context. This prevents every build.gradle in
+ * the workspace from matching build.gradletest just because the filename is a
+ * substring of the query.
+ */
+function qualifiedReversePrimaryScore(query, candidate) {
+  const primary = candidate.entry.basename.replace(/\/$/, '');
+  if (!query || !primary || query.length <= primary.length) {
+    return { score: Number.NEGATIVE_INFINITY, direction: 'none', qualifiers: [] };
+  }
+
+  const qLower = query.toLowerCase();
+  const pLower = primary.toLowerCase();
+  const occurrences = [];
+  let from = 0;
+  while (from <= qLower.length - pLower.length) {
+    const at = qLower.indexOf(pLower, from);
+    if (at < 0) break;
+    occurrences.push(at);
+    from = at + 1;
+  }
+  if (!occurrences.length) {
+    return { score: Number.NEGATIVE_INFINITY, direction: 'none', qualifiers: [] };
+  }
+
+  // Search only directory/workspace context here. Never allow the basename to
+  // satisfy its own leftover qualifier.
+  const dirname = candidate.entry.dirname && candidate.entry.dirname !== '.'
+    ? candidate.entry.dirname
+    : '';
+  const contextParts = [candidate.entry.workspaceFolder.name, dirname].filter(Boolean);
+  const secondaryContext = contextParts.join('/');
+  if (!secondaryContext) {
+    return { score: Number.NEGATIVE_INFINITY, direction: 'none', qualifiers: [] };
+  }
+
+  let best = Number.NEGATIVE_INFINITY;
+  let bestQualifiers = [];
+
+  for (const at of occurrences) {
+    const before = query.slice(0, at);
+    const after = query.slice(at + primary.length);
+    const qualifiers = [before, after]
+      .map(x => x.replace(/^[\s/\\._-]+|[\s/\\._-]+$/g, ''))
+      .filter(Boolean);
+
+    // A longer query with no meaningful leftover text is not a qualified
+    // reverse match.
+    if (!qualifiers.length) continue;
+
+    let qualifierScore = 0;
+    let valid = true;
+    for (const qualifier of qualifiers) {
+      const s = fuzzyScore(qualifier, secondaryContext);
+      if (!Number.isFinite(s)) {
+        valid = false;
+        break;
+      }
+      qualifierScore += s;
+    }
+    if (!valid) continue;
+
+    // Score the filename as the primary field, then add a smaller contribution
+    // from the directory qualifiers. Exact/normal filename matches still win.
+    const primaryScore = fuzzyScore(primary, primary);
+    const score = primaryScore + FUZZY.PRIMARY_FIELD + Math.floor(qualifierScore * 0.35);
+    if (score > best) {
+      best = score;
+      bestQualifiers = qualifiers;
     }
   }
-  return qi === query.length ? score : Number.NEGATIVE_INFINITY;
+
+  return Number.isFinite(best)
+    ? { score: best, direction: 'qualified-reverse', qualifiers: bestQualifiers }
+    : { score: Number.NEGATIVE_INFINITY, direction: 'none', qualifiers: [] };
+}
+
+/**
+ * Filename is the primary field. The runtime path is the secondary field.
+ * Strong filename hits beat weak directory-only hits. Normal fuzzy matching is
+ * strictly query -> candidate; the only reverse behavior is the qualified
+ * filename form above, where every extra typed character must be explained by
+ * directory/workspace context.
+ */
+function textualScore(query, candidate) {
+  if (!query) return { score: 1, field: 'primary', direction: 'forward' };
+
+  const primary = candidate.entry.basename.replace(/\/$/, '');
+  const primaryScore = fuzzyScore(query, primary);
+  const pathScore = fuzzyScore(query, candidate.text);
+  const qualifiedReverse = candidate.entry.kind === 'file'
+    ? qualifiedReversePrimaryScore(query, candidate)
+    : { score: Number.NEGATIVE_INFINITY, direction: 'none' };
+
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let field = 'none';
+  let direction = 'none';
+
+  if (Number.isFinite(primaryScore)) {
+    bestScore = primaryScore + FUZZY.PRIMARY_FIELD;
+    field = 'primary';
+    direction = 'forward';
+  }
+  if (Number.isFinite(pathScore) && pathScore > bestScore) {
+    bestScore = pathScore;
+    field = 'path';
+    direction = 'forward';
+  }
+  if (Number.isFinite(qualifiedReverse.score) && qualifiedReverse.score > bestScore) {
+    bestScore = qualifiedReverse.score;
+    field = 'primary+path-qualifier';
+    direction = qualifiedReverse.direction;
+  }
+
+  return { score: bestScore, field, direction };
+}
+
+function rankCandidates(query, candidates, maxResults) {
+  const scored = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const text = textualScore(query, c);
+    if (!Number.isFinite(text.score)) continue;
+
+    // Domain/API relevance is intentionally NOT part of the textual score.
+    // It can only reorder candidates in the same narrow textual-quality bucket,
+    // so it cannot rescue a poor fuzzy match over a materially better one.
+    const bucket = Math.floor(text.score / FUZZY.CLOSE_MATCH_BUCKET);
+    scored.push({ c, textScore: text.score, bucket, stableIndex: i });
+  }
+
+  scored.sort((a, b) => {
+    if (b.bucket !== a.bucket) return b.bucket - a.bucket;
+    if (b.c.weight !== a.c.weight) return b.c.weight - a.c.weight;
+    if (b.textScore !== a.textScore) return b.textScore - a.textScore;
+    return a.stableIndex - b.stableIndex;
+  });
+
+  return scored.slice(0, maxResults).map(x => x.c);
 }
 
 function normalizeTyped(raw) {
@@ -560,36 +752,12 @@ async function provideCompletionItems(document, position, token) {
     }
   }
 
-  // Strongly prefer candidates that share the typed path prefix. Fuzzy matching remains available.
-  for (const c of candidates) {
-    const lower = c.text.toLowerCase();
-    const q = query.toLowerCase();
-    c.prefixBonus = q && lower.startsWith(q) ? 120 : 0;
-  }
-
-  let ranked;
-  const backend = settings.get('rankingBackend', 'auto');
-  const useFzf = (backend === 'fzf' || (backend === 'auto' && candidates.length >= settings.get('fzfMinCandidates', 100))) && checkFzfAvailable();
-
-  if (useFzf) {
-    const fzfRanked = rankWithFzf(query, candidates, Math.max(maxResults * 4, maxResults));
-    if (fzfRanked) {
-      // Re-score the fzf-filtered set so our path/domain weighting still applies.
-      ranked = fzfRanked.map(c => ({ c, score: fuzzyScore(query, c.text) + c.weight + c.prefixBonus }))
-        .filter(x => Number.isFinite(x.score))
-        .sort((a, b) => b.score - a.score || a.c.text.length - b.c.text.length || a.c.text.localeCompare(b.c.text))
-        .slice(0, maxResults)
-        .map(x => x.c);
-    }
-  }
-
-  if (!ranked) {
-    ranked = candidates.map(c => ({ c, score: fuzzyScore(query, c.text) + c.weight + c.prefixBonus }))
-      .filter(x => Number.isFinite(x.score))
-      .sort((a, b) => b.score - a.score || a.c.text.length - b.c.text.length || a.c.text.localeCompare(b.c.text))
-      .slice(0, maxResults)
-      .map(x => x.c);
-  }
+  // Always apply the shared deterministic fuzzy-match contract. fzf remains
+  // detectable for compatibility/diagnostics, but it no longer controls ranking:
+  // an external fuzzy implementation cannot guarantee this extension's scoring
+  // invariants (especially primary-field priority and domain tie-breaking).
+  const ranked = rankCandidates(query, candidates, maxResults);
+  const useFzf = false;
 
   const seen = new Set();
   const items = [];
@@ -611,7 +779,13 @@ async function provideCompletionItems(document, position, token) {
     // full runtime-meaningful path (absolute filesystem path or resource path).
     item.insertText = c.text;
     item.range = context.range;
-    item.filterText = `${c.text} ${c.entry.basename} ${c.entry.rel}`;
+    // Our matcher is authoritative. This provider returns a query-specific,
+    // already-filtered CompletionList and marks it incomplete so VS Code asks
+    // us again as the user types. Setting filterText to the exact current query
+    // prevents VS Code's separate fuzzy filter from discarding candidates that
+    // our contract intentionally accepts (for example both testbuild.gradle and
+    // build.gradletest for query build.gradle).
+    item.filterText = query || c.entry.basename || c.text;
     item.sortText = String(i).padStart(5, '0');
     item.detail = `${c.semantic} • ${c.entry.kind === 'dir' ? 'Directory' : 'File'} • ${c.entry.workspaceFolder.name}`;
     item.documentation = new vscode.MarkdownString(`**${c.semantic}**\n\nWorkspace file: \`${c.entry.rel}\``);
@@ -622,8 +796,66 @@ async function provideCompletionItems(document, position, token) {
     items.push(item);
   }
 
-  debug(`complete lang=${document.languageId} query=${JSON.stringify(query)} candidates=${candidates.length} returned=${items.length} apiMode=${apiMode} backend=${useFzf ? 'fzf' : 'internal'} time=${(performance.now() - started).toFixed(1)}ms`);
-  return items;
+  debug(`complete lang=${document.languageId} query=${JSON.stringify(query)} candidates=${candidates.length} returned=${items.length} apiMode=${apiMode} backend=contract time=${(performance.now() - started).toFixed(1)}ms`);
+  // Our candidate set is query-dependent and capped by maxResults. Mark the
+  // list incomplete so VS Code invokes the provider again as the user types
+  // instead of only re-filtering a stale earlier result set locally.
+  return new vscode.CompletionList(items, true);
+}
+
+async function diagnoseQuery() {
+  const query = await vscode.window.showInputBox({
+    prompt: 'Filename or fuzzy query to diagnose',
+    placeHolder: 'build.gradletest'
+  });
+  if (query === undefined) return;
+
+  const q = normalizeTyped(query);
+  const matches = [];
+  for (const entry of index) {
+    const basename = entry.basename.replace(/\/$/, '');
+    const basenameScoreRaw = fuzzyScore(q, basename);
+    const relScore = fuzzyScore(q, entry.rel);
+
+    // Diagnose the same qualified-reverse behavior used by completion. Use a
+    // lightweight candidate wrapper because only entry metadata is required.
+    const qualified = entry.kind === 'file'
+      ? qualifiedReversePrimaryScore(q, { entry })
+      : { score: Number.NEGATIVE_INFINITY, direction: 'none', qualifiers: [] };
+
+    const basenameScore = Number.isFinite(basenameScoreRaw)
+      ? basenameScoreRaw
+      : qualified.score;
+    const basenameDirection = Number.isFinite(basenameScoreRaw)
+      ? 'forward'
+      : qualified.direction;
+
+    if (Number.isFinite(basenameScore) || Number.isFinite(relScore)) {
+      matches.push({
+        entry, basenameScore, relScore,
+        basenameDirection,
+        relDirection: Number.isFinite(relScore) ? 'forward' : 'none',
+        qualifiers: qualified.qualifiers || []
+      });
+    }
+  }
+
+  matches.sort((a, b) => {
+    const as = Math.max(Number.isFinite(a.basenameScore) ? a.basenameScore + FUZZY.PRIMARY_FIELD : -Infinity, a.relScore);
+    const bs = Math.max(Number.isFinite(b.basenameScore) ? b.basenameScore + FUZZY.PRIMARY_FIELD : -Infinity, b.relScore);
+    return bs - as;
+  });
+
+  output.show(true);
+  output.appendLine('');
+  output.appendLine(`=== Diagnose query ${JSON.stringify(query)} ===`);
+  output.appendLine(`index entries=${index.length} fuzzy matches=${matches.length}`);
+  for (const m of matches.slice(0, 100)) {
+    output.appendLine(`${m.entry.kind.padEnd(4)} basenameScore=${String(m.basenameScore).padEnd(8)}(${m.basenameDirection}) relScore=${String(m.relScore).padEnd(8)}(${m.relDirection})${m.qualifiers && m.qualifiers.length ? ` qualifiers=${JSON.stringify(m.qualifiers)}` : ''} ${m.entry.rel}`);
+  }
+  if (!matches.length) {
+    output.appendLine('No indexed entry matches this query. Reverse filename qualifiers must also match directory/workspace context.');
+  }
 }
 
 function activate(context) {
@@ -655,6 +887,8 @@ function activate(context) {
     const dirs = index.length - files;
     vscode.window.showInformationMessage(`Workspace Path Completion: ${files} files, ${dirs} directories, fzf=${checkFzfAvailable() ? 'available' : 'not found'}.`);
   }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('workspacePathCompletion.diagnoseQuery', diagnoseQuery));
 
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   watcher.onDidCreate(() => scheduleRebuild('create', 400));

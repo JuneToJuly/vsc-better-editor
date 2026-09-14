@@ -2,7 +2,7 @@
   "name": "workspace-path-completion",
   "displayName": "Workspace Path Completion",
   "description": "Autocomplete workspace files and directories while typing string literals.",
-  "version": "0.2.4",
+  "version": "0.3.6",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -24,6 +24,10 @@
       {
         "command": "workspacePathCompletion.showStats",
         "title": "Workspace Path Completion: Show Index Stats"
+      },
+      {
+        "command": "workspacePathCompletion.diagnoseQuery",
+        "title": "Workspace Path Completion: Diagnose Query"
       }
     ],
     "configuration": {
@@ -119,8 +123,8 @@
             "fzf",
             "auto"
           ],
-          "default": "auto",
-          "description": "Ranking backend. auto uses fzf when available and falls back to the internal matcher."
+          "default": "internal",
+          "description": "Compatibility setting. Completion ranking always uses the extension's deterministic fuzzy-match contract; fzf is no longer used for ranking because it cannot guarantee the same ordering semantics."
         },
         "workspacePathCompletion.fzfPath": {
           "type": "string",
