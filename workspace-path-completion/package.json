@@ -2,7 +2,7 @@
   "name": "workspace-path-completion",
   "displayName": "Workspace Path Completion",
   "description": "Autocomplete workspace files and directories while typing string literals.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

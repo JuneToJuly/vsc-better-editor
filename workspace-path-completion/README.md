@@ -76,7 +76,7 @@ Directories are completion candidates and accepting one retriggers suggestions s
 
 ## Indexing
 
-The extension indexes workspace files once and rebuilds when files are created/deleted/renamed, workspace folders change, or relevant include/exclude settings change. It respects:
+The extension indexes workspace files once and rebuilds when files are created/deleted/renamed, workspace folders change, or relevant include/exclude settings change. Changes to both `files.exclude` and `search.exclude` always trigger a debounced rebuild. Rebuild requests that arrive while an index scan is already running are queued and coalesced instead of being dropped. It respects:
 
 `build/` is intentionally **not** excluded by default because generated runtime artifacts (scripts, jars, configs, etc.) can be valid path-completion targets. If your VS Code `files.exclude` or `search.exclude` explicitly excludes build directories, that explicit setting is still respected.
 
@@ -115,4 +115,4 @@ By default it **does not** apply `search.exclude`, because generated runtime fil
 }
 ```
 
-Changing this setting automatically rebuilds the index.
+Changing this setting automatically rebuilds the index. Changes to `search.exclude` also trigger an index refresh even while this toggle is off; the patterns are simply ignored during filtering until the toggle is enabled.

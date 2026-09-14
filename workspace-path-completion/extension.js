@@ -7,6 +7,7 @@ let index = [];
 let indexGeneration = 0;
 let rebuilding = false;
 let rebuildTimer = undefined;
+let pendingRebuildReason = undefined;
 let output;
 let fzfAvailable = undefined;
 
@@ -88,7 +89,13 @@ function currentExcludePatterns() {
 }
 
 async function rebuildIndex(reason = 'manual') {
-  if (rebuilding) return;
+  if (rebuilding) {
+    pendingRebuildReason = pendingRebuildReason
+      ? `${pendingRebuildReason},${reason}`
+      : reason;
+    debug(`index rebuild queued reason=${reason}`);
+    return;
+  }
   rebuilding = true;
   const generation = ++indexGeneration;
   const started = performance.now();
@@ -163,6 +170,15 @@ async function rebuildIndex(reason = 'manual') {
     output.appendLine(`Index rebuild failed: ${err && err.stack || err}`);
   } finally {
     rebuilding = false;
+
+    // Configuration/file events can arrive while findFiles is still running.
+    // Do not lose those requests; run one coalesced follow-up rebuild using the
+    // latest configuration once the current rebuild finishes.
+    if (pendingRebuildReason) {
+      const queuedReason = pendingRebuildReason;
+      pendingRebuildReason = undefined;
+      scheduleRebuild(`queued:${queuedReason}`, 0);
+    }
   }
 }
 
@@ -648,13 +664,22 @@ function activate(context) {
   context.subscriptions.push(vscode.workspace.onDidRenameFiles(() => scheduleRebuild('rename', 250)));
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => scheduleRebuild('workspace-folders', 100)));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
-    if (
-      e.affectsConfiguration('workspacePathCompletion') ||
-      e.affectsConfiguration('files.exclude') ||
-      (cfg().get('useSearchExclude', false) && e.affectsConfiguration('search.exclude'))
-    ) {
+    const ownChanged = e.affectsConfiguration('workspacePathCompletion');
+    const filesExcludeChanged = e.affectsConfiguration('files.exclude');
+    const searchExcludeChanged = e.affectsConfiguration('search.exclude');
+
+    // Always react to both VS Code exclusion settings. search.exclude only
+    // affects filtering when useSearchExclude=true, but rebuilding here makes
+    // the index lifecycle predictable when users switch project/exclude presets.
+    if (ownChanged || filesExcludeChanged || searchExcludeChanged) {
       fzfAvailable = undefined;
-      scheduleRebuild('configuration', 100);
+      const changed = [
+        ownChanged ? 'workspacePathCompletion' : '',
+        filesExcludeChanged ? 'files.exclude' : '',
+        searchExcludeChanged ? 'search.exclude' : ''
+      ].filter(Boolean).join('+');
+      debug(`configuration changed: ${changed}`);
+      scheduleRebuild(`configuration:${changed}`, 250);
     }
   }));
 
