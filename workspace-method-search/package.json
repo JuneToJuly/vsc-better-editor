@@ -2,7 +2,7 @@
   "name": "workspace-method-search",
   "displayName": "Workspace Method Search",
   "description": "Fast workspace-wide method navigation with a Recent Buffers-style search window.",
-  "version": "0.8.0",
+  "version": "0.10.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {

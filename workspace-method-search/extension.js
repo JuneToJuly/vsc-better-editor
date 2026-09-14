@@ -15,8 +15,16 @@ let fileSignatures = new Map(); // uri string -> size:mtime fingerprint for bran
 let changeTimers = new Map();
 let refreshTokens = new Map(); // uri string -> monotonically increasing refresh id
 let indexStats = { files: 0, indexedFiles: 0, methods: 0, failedFiles: 0, building: false };
+let javaModelRefreshTimer;
+let pendingJavaRefreshAll = false;
+let pendingJavaRefreshRoots = new Map();
+let javaApi;
+let managedJavaSourceRoots = undefined; // undefined = not queried/unavailable, [] = queried and no managed Java sources
+let outputChannel;
 
-function activate(context) {
+async function activate(context) {
+  outputChannel = vscode.window.createOutputChannel('Workspace Method Search');
+  context.subscriptions.push(outputChannel);
   context.subscriptions.push(
     vscode.commands.registerCommand('workspaceMethodSearch.open', () => showMethodSearch()),
     vscode.commands.registerCommand('workspaceMethodSearch.moveDown', () => {
@@ -26,7 +34,9 @@ function activate(context) {
       if (activePanel) activePanel.webview.postMessage({ type: 'moveSelection', delta: -1 });
     }),
     vscode.commands.registerCommand('workspaceMethodSearch.rebuildIndex', async () => {
-      invalidateIndex();
+      logInfo('Manual rebuild requested');
+      managedJavaSourceRoots = undefined;
+      invalidateIndex(true);
       await ensureIndex(true);
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => rebuildIfLoaded()),
@@ -41,6 +51,15 @@ function activate(context) {
         e.affectsConfiguration('workspaceMethodSearch.indexConcurrency')
       ) {
         rebuildIfLoaded();
+        return;
+      }
+
+      // Java project/import/classpath settings can change JDT's view of files
+      // without changing anything on disk. Refresh the Java portion of our
+      // cached symbol index when that model may have changed.
+      if (e.affectsConfiguration('java')) {
+        managedJavaSourceRoots = undefined;
+        scheduleJavaModelRefresh('java configuration changed');
       }
     }),
     vscode.workspace.onDidCreateFiles((e) => { if (indexLoaded) void addFiles(e.files); }),
@@ -50,14 +69,21 @@ function activate(context) {
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (indexLoaded && e.contentChanges.length) scheduleDocumentRefresh(e.document, 350);
     }),
-    { dispose: () => { disposed = true; closePanel(); clearChangeTimers(); } }
+    { dispose: () => { disposed = true; closePanel(); clearChangeTimers(); clearJavaModelRefresh(); } }
   );
+
+  // vscode-java publishes project-model events through its extension API.
+  // Hook them after our own registrations are live; activating redhat.java is
+  // appropriate here because this extension already depends on its document
+  // symbols for Java method discovery.
+  await registerJavaProjectListeners(context);
 }
 
 function deactivate() {
   disposed = true;
   closePanel();
   clearChangeTimers();
+  clearJavaModelRefresh();
 }
 
 function clearChangeTimers() {
@@ -66,9 +92,275 @@ function clearChangeTimers() {
   refreshTokens.clear();
 }
 
-function invalidateIndex() {
+
+
+async function registerJavaProjectListeners(context) {
+  const javaExtension = vscode.extensions.getExtension('redhat.java');
+  if (!javaExtension) return;
+
+  let api;
+  try {
+    api = javaExtension.isActive ? javaExtension.exports : await javaExtension.activate();
+  } catch (error) {
+    console.warn('[workspace-method-search] unable to activate redhat.java API', error);
+    return;
+  }
+  if (!api) return;
+  javaApi = api;
+
+  const addEvent = (event, handler) => {
+    if (typeof event !== 'function') return;
+    try {
+      const disposable = event(handler);
+      if (disposable) context.subscriptions.push(disposable);
+    } catch (error) {
+      console.warn('[workspace-method-search] unable to register Java project listener', error);
+    }
+  };
+
+  addEvent(api.onDidClasspathUpdate, (uri) => {
+    managedJavaSourceRoots = undefined;
+    scheduleJavaModelRefresh('JDT classpath updated', uri ? [uri] : undefined);
+  });
+  addEvent(api.onDidProjectsImport, (uris) => {
+    managedJavaSourceRoots = undefined;
+    scheduleJavaModelRefresh('JDT projects imported', Array.isArray(uris) ? uris : undefined);
+  });
+  addEvent(api.onDidProjectsDelete, (uris) => {
+    managedJavaSourceRoots = undefined;
+    scheduleJavaModelRefresh('JDT projects deleted', Array.isArray(uris) ? uris : undefined);
+  });
+  addEvent(api.onDidServerModeChange, () => {
+    managedJavaSourceRoots = undefined;
+    // Switching between lightweight/standard servers can completely change
+    // which Java files have semantic document symbols available.
+    scheduleJavaModelRefresh('JDT server mode changed');
+  });
+}
+
+function scheduleJavaModelRefresh(reason, roots) {
+  if (!indexLoaded && !indexBuildPromise) return;
+
+  if (Array.isArray(roots) && roots.length) {
+    for (const value of roots) {
+      const uri = asUri(value);
+      if (uri) pendingJavaRefreshRoots.set(uri.toString(), uri);
+    }
+  } else {
+    pendingJavaRefreshAll = true;
+    pendingJavaRefreshRoots.clear();
+  }
+
+  clearTimeout(javaModelRefreshTimer);
+  javaModelRefreshTimer = setTimeout(() => {
+    javaModelRefreshTimer = undefined;
+    const refreshAll = pendingJavaRefreshAll;
+    const refreshRoots = [...pendingJavaRefreshRoots.values()];
+    pendingJavaRefreshAll = false;
+    pendingJavaRefreshRoots.clear();
+    void refreshJavaModelIndex(refreshAll ? undefined : refreshRoots, reason).catch(logError);
+  }, 300);
+}
+
+function clearJavaModelRefresh() {
+  clearTimeout(javaModelRefreshTimer);
+  javaModelRefreshTimer = undefined;
+  pendingJavaRefreshAll = false;
+  pendingJavaRefreshRoots.clear();
+}
+
+function asUri(value) {
+  if (!value) return undefined;
+  if (value instanceof vscode.Uri) return value;
+  if (typeof value === 'string') {
+    try { return vscode.Uri.parse(value); } catch (_) { return undefined; }
+  }
+  if (typeof value === 'object' && typeof value.toString === 'function') {
+    try { return vscode.Uri.parse(value.toString()); } catch (_) { return undefined; }
+  }
+  return undefined;
+}
+
+function isJavaUri(uri) {
+  return !!uri && uri.scheme === 'file' && uri.fsPath.toLowerCase().endsWith('.java');
+}
+
+function uriIsWithinRoots(uri, roots) {
+  if (!Array.isArray(roots) || !roots.length) return true;
+  const file = normalizeFsPath(uri.fsPath);
+  return roots.some(root => {
+    if (!root || root.scheme !== 'file') return false;
+    const base = normalizeFsPath(root.fsPath).replace(/\/$/, '');
+    return file === base || file.startsWith(base + '/');
+  });
+}
+
+function normalizeFsPath(value) {
+  let result = String(value || '').replace(/\\/g, '/');
+  if (process.platform === 'win32') result = result.toLowerCase();
+  return result;
+}
+
+function logInfo(message) {
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.log(`[workspace-method-search] ${message}`);
+  outputChannel?.appendLine(line);
+}
+
+function pathIsWithin(filePath, rootPath) {
+  const file = normalizeFsPath(filePath);
+  const root = normalizeFsPath(rootPath).replace(/\/$/, '');
+  return file === root || file.startsWith(root + '/');
+}
+
+async function getManagedJavaSourceRoots(force = false) {
+  if (!force && managedJavaSourceRoots !== undefined) return managedJavaSourceRoots;
+  if (!javaApi) return undefined;
+
+  try {
+    if (typeof javaApi.serverReady === 'function') await javaApi.serverReady();
+    const projects = await vscode.commands.executeCommand(
+      'java.execute.workspaceCommand',
+      'java.project.getAll'
+    );
+    if (!Array.isArray(projects)) {
+      logInfo('JDT managed-project query returned no project list; Java filtering disabled for this pass');
+      managedJavaSourceRoots = undefined;
+      return undefined;
+    }
+
+    const roots = [];
+    const seen = new Set();
+    for (const value of projects) {
+      const projectUri = asUri(value);
+      if (!projectUri || projectUri.scheme !== 'file') continue;
+      try {
+        const settings = await javaApi.getProjectSettings(projectUri.toString(), [
+          'org.eclipse.jdt.ls.core.sourcePaths'
+        ]);
+        const sourcePaths = settings?.['org.eclipse.jdt.ls.core.sourcePaths'];
+        if (!Array.isArray(sourcePaths)) continue;
+        for (const sourcePath of sourcePaths) {
+          if (!sourcePath) continue;
+          const normalized = normalizeFsPath(sourcePath).replace(/\/$/, '');
+          if (!normalized || seen.has(normalized)) continue;
+          seen.add(normalized);
+          roots.push(normalized);
+        }
+      } catch (error) {
+        // A project can disappear while JDT is updating. Ignore that one and
+        // let the next project-model event refresh the snapshot again.
+        logInfo(`Unable to read JDT source paths for ${projectUri.fsPath}: ${error?.message || error}`);
+      }
+    }
+
+    managedJavaSourceRoots = roots;
+    logInfo(`JDT managed Java source roots: ${roots.length}`);
+    for (const root of roots) outputChannel?.appendLine(`  ${root}`);
+    return roots;
+  } catch (error) {
+    logInfo(`Unable to query JDT managed Java projects: ${error?.message || error}`);
+    managedJavaSourceRoots = undefined;
+    return undefined;
+  }
+}
+
+async function filterToManagedJavaSources(uris, force = false) {
+  const roots = await getManagedJavaSourceRoots(force);
+  if (roots === undefined) return uris;
+  return uris.filter(uri => !isJavaUri(uri) || roots.some(root => pathIsWithin(uri.fsPath, root)));
+}
+
+async function refreshJavaModelIndex(roots, reason = 'JDT project model changed') {
+  if (disposed) return;
+
+  // If JDT changes while a full index build is in flight, restart that build.
+  // Otherwise the completed cache could contain a mixture of pre/post-update
+  // JDT symbol responses.
+  if (indexStats.building || indexBuildPromise) {
+    invalidateIndex();
+    const inFlight = indexBuildPromise;
+    if (inFlight) {
+      try { await inFlight; } catch (_) { /* replacement build below */ }
+    }
+    await ensureIndex(false);
+    return;
+  }
+  if (!indexLoaded) return;
+
+  const allIncluded = await enumerateIncludedSourceUris(true);
+  let javaUris = allIncluded.filter(isJavaUri);
+  if (Array.isArray(roots) && roots.length) {
+    const scoped = javaUris.filter(uri => uriIsWithinRoots(uri, roots));
+    // Some vscode-java events use project identifiers/URIs that don't map
+    // cleanly to the visible workspace path. Fall back to all Java files so a
+    // project-model update can never leave the method cache stale.
+    if (scoped.length) javaUris = scoped;
+  }
+
+  const allManagedJavaKeys = new Set(allIncluded.filter(isJavaUri).map(uri => uri.toString()));
+  let changed = false;
+
+  // Project removal is a subtraction operation, not just a refresh. Always
+  // purge Java files that JDT no longer reports under a managed source root.
+  // This is intentionally independent of event scoping: onDidProjectsDelete
+  // may only tell us the deleted project URI, while that project is already
+  // absent from JDT's current project model.
+  for (const key of [...indexedFileUris]) {
+    const uri = asUri(key);
+    if (!isJavaUri(uri) || allManagedJavaKeys.has(key)) continue;
+    symbolIndex.delete(key);
+    indexedFileUris.delete(key);
+    fileSignatures.delete(key);
+    changed = true;
+  }
+
+  const concurrency = Math.max(1, Math.min(32,
+    vscode.workspace.getConfiguration('workspaceMethodSearch').get('indexConcurrency', 8)));
+  let next = 0;
+
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= javaUris.length || disposed) return;
+      const uri = javaUris[i];
+      const key = uri.toString();
+      try {
+        const open = findOpenDocument(uri);
+        if (open) {
+          await refreshDocument(open, { retries: 2, notify: false });
+        } else {
+          const rows = await indexUri(uri);
+          symbolIndex.set(key, rows);
+          indexedFileUris.add(key);
+          const signature = await getFileSignature(uri);
+          if (signature) fileSignatures.set(key, signature);
+        }
+        changed = true;
+      } catch (error) {
+        console.warn('[workspace-method-search] unable to refresh after Java model change', uri.fsPath, error);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, javaUris.length)) }, worker));
+  if (!changed) return;
+
+  updateMethodCount();
+  if (activePanel) await sendState(activePanel, flattenIndex(), undefined, { preserveSelection: true });
+  logInfo(`Refreshed ${javaUris.length} managed Java files after ${reason}`);
+}
+
+function invalidateIndex(clear = false) {
   indexGeneration++;
   indexLoaded = false;
+  if (clear) {
+    symbolIndex = new Map();
+    indexedFileUris = new Set();
+    fileSignatures = new Map();
+    updateMethodCount();
+    if (activePanel) void sendState(activePanel, [], undefined, { preserveSelection: true });
+  }
 }
 
 function rebuildIfLoaded() {
@@ -111,7 +403,10 @@ async function buildIndex(generation, showStatus) {
 
   if (generation !== indexGeneration) return flattenIndex();
   uris = uris.filter(isSourceUri);
+  uris = await filterToManagedJavaSources(uris, true);
+  if (generation !== indexGeneration) return flattenIndex();
   indexStats.files = uris.length;
+  logInfo(`Building index from ${uris.length} included source files`);
   postIndexStatus();
 
   let next = 0;
@@ -159,6 +454,7 @@ async function buildIndex(generation, showStatus) {
   postIndexStatus();
   if (activePanel) await sendState(activePanel, flattenIndex(), undefined, { preserveSelection: true });
 
+  logInfo(`Index complete: ${indexStats.methods} methods from ${indexStats.indexedFiles} files`);
   if (showStatus) {
     vscode.window.setStatusBarMessage(
       `Workspace Method Search: indexed ${indexStats.methods} methods from ${indexStats.indexedFiles} files`,
@@ -187,6 +483,24 @@ function scheduleDocumentRefresh(document, delay) {
 async function refreshDocument(document, options = {}) {
   if (!indexLoaded || !document || !isSourceUri(document.uri)) return false;
   const key = document.uri.toString();
+
+  // Opening/editing a Java file outside the currently managed JDT source
+  // roots must not silently add it back after a rebuild removed it.
+  if (isJavaUri(document.uri)) {
+    const eligible = await filterToManagedJavaSources([document.uri], false);
+    if (!eligible.length) {
+      const removed = symbolIndex.delete(key);
+      indexedFileUris.delete(key);
+      fileSignatures.delete(key);
+      if (removed) {
+        updateMethodCount();
+        if (activePanel && options.notify !== false) {
+          await sendState(activePanel, flattenIndex(), undefined, { preserveSelection: true });
+        }
+      }
+      return false;
+    }
+  }
   const token = (refreshTokens.get(key) || 0) + 1;
   refreshTokens.set(key, token);
   const version = document.version;
@@ -244,8 +558,11 @@ async function refreshOpenDocuments(preferredDocument) {
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function addFiles(files) {
+  const eligible = await filterToManagedJavaSources(files.filter(isSourceUri), false);
+  const eligibleKeys = new Set(eligible.map(uri => uri.toString()));
   for (const uri of files) {
     if (!isSourceUri(uri)) continue;
+    if (isJavaUri(uri) && !eligibleKeys.has(uri.toString())) continue;
     try {
       const key = uri.toString();
       symbolIndex.set(key, await indexUri(uri));
@@ -279,13 +596,13 @@ async function renameFiles(entries) {
   await addFiles(entries.map(e => e.newUri));
 }
 
-async function enumerateIncludedSourceUris() {
+async function enumerateIncludedSourceUris(forceJavaProjectRefresh = false) {
   const config = vscode.workspace.getConfiguration('workspaceMethodSearch');
   const include = config.get('include', '**/*.{java,kt,kts,js,jsx,mjs,cjs,ts,tsx,py,cs,cpp,cc,cxx,c,h,hpp,hh,hxx,go,rs,rb,php,swift}');
   const exclude = buildExcludeGlob(config.get('exclude', []));
   const maxFiles = config.get('maxFiles', 20000);
   const uris = await vscode.workspace.findFiles(include, exclude || undefined, maxFiles);
-  return uris.filter(isSourceUri);
+  return filterToManagedJavaSources(uris.filter(isSourceUri), forceJavaProjectRefresh);
 }
 
 async function getFileSignature(uri) {
@@ -305,7 +622,7 @@ function findOpenDocument(uri) {
 async function reconcileWorkspaceIndex() {
   if (!indexLoaded || indexStats.building) return;
 
-  const uris = await enumerateIncludedSourceUris();
+  const uris = await enumerateIncludedSourceUris(true);
   const current = new Map(uris.map(uri => [uri.toString(), uri]));
   let changed = false;
 

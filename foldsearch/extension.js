@@ -180,24 +180,42 @@ async function foldNonMatching(editor, searchTerm, mode = 'any') {
 
   if (blockStart !== null) blocks.push([blockStart, lines.length - 1]);
 
-  // This is intentionally the original Fold Search folding algorithm.
-  // Every contiguous non-matching block uses the previous line as its fold
-  // anchor, regardless of whether the non-match is inside or outside a method.
+  // Build every manual folding range first, then hand them to VS Code in one
+  // batch. The old implementation created + folded each range sequentially,
+  // which made the editor visibly collapse from top to bottom.
+  const foldSelections = [];
+  const foldAnchorLines = [];
+
   for (const [startLine, endLine] of blocks) {
     const foldStartLine = Math.max(0, startLine - 1);
+    if (foldStartLine === endLine) continue;
+
     const prevLine = lines[foldStartLine];
     const foldStartCol = prevLine ? prevLine.length : 0;
     const startPos = new vscode.Position(foldStartLine, foldStartCol);
     const endPos = new vscode.Position(endLine, lines[endLine].length);
 
-    if (startPos.line === endPos.line) continue;
-
-    editor.selection = new vscode.Selection(startPos, endPos);
-    await vscode.commands.executeCommand('editor.createFoldingRangeFromSelection');
-    await vscode.commands.executeCommand('editor.fold');
+    foldSelections.push(new vscode.Selection(startPos, endPos));
+    foldAnchorLines.push(foldStartLine);
   }
 
-  await waitForFoldsToFinish(editor);
+  if (foldSelections.length > 0) {
+    // createFoldingRangeFromSelection operates on all editor selections, so
+    // publish every requested FoldSearch range in a single editor mutation.
+    editor.selections = foldSelections;
+    await vscode.commands.executeCommand('editor.createFoldingRangeFromSelection');
+
+    // Fold every newly-created range in one command as well. VS Code accepts
+    // the target line numbers through selectionLines, avoiding one command per
+    // block and the resulting folding animation/sweep.
+    await vscode.commands.executeCommand('editor.fold', {
+      selectionLines: foldAnchorLines
+    });
+
+    // Give the editor one event-loop turn to apply the batch before restoring
+    // the caret/reveal position. No polling loop is needed for sequential folds.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
 
   const visible = [...visibleLines].sort((a, b) => a - b);
   if (visible.length > 0) {

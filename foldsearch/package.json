@@ -1,7 +1,7 @@
 {
   "name": "foldsearch",
   "displayName": "FoldSearch",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "ian.thomas",
   "engines": {
     "vscode": "^1.90.0"

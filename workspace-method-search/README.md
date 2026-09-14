@@ -1,5 +1,14 @@
 # Workspace Method Search
 
+## 0.9.0 JDT project-model synchronization
+
+- Integrates with the Red Hat Java extension API instead of relying only on filesystem changes.
+- Listens for JDT classpath updates, Java project imports/deletions, and Java language-server mode changes.
+- JDT project-model changes refresh the Java portion of the method index even when the source files themselves did not change on disk.
+- Project-scoped JDT events refresh matching Java roots when possible; ambiguous events safely fall back to refreshing all included Java files.
+- Java configuration changes also invalidate/refresh Java symbol data.
+- If JDT changes while a full method-index build is running, that build is invalidated and restarted so pre/post-project-model symbol results are not mixed.
+
 ## 0.8.0 reliability / branch reconciliation
 
 - Fixed a `Cannot read properties of undefined (reading 'trim')` crash in UI refreshes by normalizing missing queries and replacing ambiguous positional `sendState` arguments with an options object.
@@ -62,3 +71,19 @@ The full index is built lazily on first use during an extension-host session. Af
 - `files.exclude`, `search.exclude`, include/exclude/kind/index configuration changes: full rebuild
 
 `Workspace Method Search: Rebuild Index` remains available as a recovery command, but normal use should not require it.
+
+## 0.10.0 — JDT-managed Java project filtering
+
+Java indexing now follows JDT's actual managed project/source model instead of treating every `.java` file visible in the VS Code workspace as indexable.
+
+- Queries JDT for the currently imported Java projects (`java.project.getAll`).
+- Queries each project for its JDT source roots (`org.eclipse.jdt.ls.core.sourcePaths`).
+- Only Java files below those managed source roots are included in Method Search.
+- Removing a project from JDT now removes its methods from the Method Search cache, even though the files remain visible in the VS Code workspace.
+- Opening/editing an unmanaged Java file no longer adds it back into the index.
+- A manual `Workspace Method Search: Rebuild Index` clears the old cache immediately before rebuilding, so stale results do not remain visible during the rebuild.
+- JDT classpath/import/delete/server-mode events invalidate the managed-source-root snapshot and refresh the Java index.
+- Every Method Search invocation reconciles against the current JDT source-root model as a fallback in case an event was missed.
+- Diagnostic progress is written to the `Workspace Method Search` Output channel, including the managed JDT source roots and final file/method counts.
+
+If the JDT managed-project query is unavailable, the extension falls back to the previous workspace-file behavior for that pass rather than dropping all Java results.
