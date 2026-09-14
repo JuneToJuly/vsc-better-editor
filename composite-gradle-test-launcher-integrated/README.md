@@ -573,3 +573,27 @@ This is intentionally independent of artifact version strings, so republished `S
 
 Generated portable JAR launchers copy the detected/configured sources JAR into `replay-runtime/application-sources.jar`. Container launches do the same when a Sources JAR is configured and mount it with the Replay runtime. Source transfer remains demand-driven; merely including the source artifact does not upload it on every run.
 \n\n## Strict source requirement (0.4.64)\n\nReplay no longer falls back to decompiled bytecode when source is unavailable. Source-level Replay is opened only when every executed line event can be resolved to source from the exact Replay source cache/source JAR or the current workspace. This keeps the viewer from presenting reconstructed decompiled code as though it were the code associated with the recorded source lines.\n\nIf required source cannot be resolved, the capture is preserved but the Replay viewer is not opened. VS Code shows an explicit error identifying that required source data is missing, and the Replay output lists each unresolved executed class and its affected line-event count. After providing the matching Replay/source JAR or opening the matching source workspace, import the preserved capture again.\n\nThe remote source negotiation remains source-first: exact cached source, verified workspace source, exact Gradle-cache source JAR, then `NEED_SOURCES` transfer. There is intentionally no executable-JAR/decompiler fallback.\n
+
+## Replay Manager: workspace state adapters
+
+Replay Manager launch configurations inherit the custom Replay state adapters already configured in the workspace through `compositeGradleTests.flowStateAdapterClasses`. JAR and container launch profiles do not maintain a second adapter list.
+
+When CGTL prepares a standalone Replay runtime it locates the compiled class for every configured adapter and copies the adapter plus its nested/anonymous class files into:
+
+```text
+replay-runtime/
+  adapters/
+    classes/
+      cgtl/replay/adapters/MyTypeReplayAdapter.class
+```
+
+The generated Java launch receives that directory through `cgtl.flow.adapterClasspath`. The Replay agent loads the packaged adapter with the running application's class loader as its parent, allowing the adapter to reference types contained by the application/fat JAR. Container launches mount the same Replay runtime at `/cgtl-replay` and automatically use `/cgtl-replay/adapters/classes`.
+
+This applies to direct local runs, copied launch commands, generated Windows/Linux JAR scripts, and generated Docker/Podman launches. Portable launch folders therefore carry the adapters with the Replay runtime rather than depending on the original workspace existing on the target machine.
+
+Adapters must be compiled before the launch/runtime is generated. CGTL looks in normal Gradle/Maven/IDE class-output locations, including `build/classes/java/test`, `build/classes/java/main`, Kotlin equivalents, Maven `target/*-classes`, and common `out` directories. If an adapter is missing or its Java source is newer than its compiled class, Replay generation is stopped with a clear instruction to rebuild the project/test classes (for example `gradle testClasses`). This prevents a launch from silently running without the configured state adapter.
+
+
+## Replay Manager workspace adapters (0.4.66)
+
+Replay Manager snapshots the configured `compositeGradleTests.flowStateAdapterClasses` once per launch generation and uses that exact list for both `-Dcgtl.flow.stateAdapters` and runtime packaging. If adapters are configured, generated launchers include `replay-runtime/adapters/classes` and pass it through `-Dcgtl.flow.adapterClasspath`. Script headers also list the inherited adapter classes to make configuration visible. Generation fails if a configured adapter cannot be packaged or its source is newer than its compiled class.

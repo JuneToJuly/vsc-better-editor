@@ -2,7 +2,7 @@
   "name": "workspace-path-completion",
   "displayName": "Workspace Path Completion",
   "description": "Autocomplete workspace files and directories while typing string literals.",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -63,7 +63,6 @@
           "default": [
             "**/.git/**",
             "**/.gradle/**",
-            "**/build/**",
             "**/out/**",
             "**/target/**",
             "**/node_modules/**",
@@ -78,6 +77,11 @@
           },
           "default": [],
           "description": "Optional include-only glob patterns. Empty means include all non-excluded files."
+        },
+        "workspacePathCompletion.useSearchExclude": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, also apply VS Code search.exclude patterns to the completion index. Disabled by default so generated runtime files such as build outputs remain completable even when text search hides them."
         },
         "workspacePathCompletion.maxResults": {
           "type": "integer",

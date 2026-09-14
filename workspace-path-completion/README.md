@@ -52,7 +52,7 @@ For non-Java languages the extension retains workspace-relative/current-file-rel
 
 ## Completion display
 
-Absolute filesystem candidates intentionally separate **display text** from **inserted text**. The suggestion list shows the filename first with a shortened parent-directory hint, while accepting it inserts the complete absolute path.
+Absolute filesystem candidates intentionally separate **display text** from **inserted text**. The suggestion list shows the a shortened tail path with the filename at the end, while accepting it inserts the complete absolute path.
 
 For example, a file at:
 
@@ -63,7 +63,7 @@ C:/Users/me/work/orders/src/main/resources/config/fraud-rules.json
 appears roughly as:
 
 ```text
-fraud-rules.json    …/src/main/resources/config/    Absolute
+…/src/main/resources/config/fraud-rules.json    Absolute
 ```
 
 but inserts the full absolute path. Resource candidates continue to show their concise classpath-relative resource path directly.
@@ -77,6 +77,8 @@ Directories are completion candidates and accepting one retriggers suggestions s
 ## Indexing
 
 The extension indexes workspace files once and rebuilds when files are created/deleted/renamed, workspace folders change, or relevant include/exclude settings change. It respects:
+
+`build/` is intentionally **not** excluded by default because generated runtime artifacts (scripts, jars, configs, etc.) can be valid path-completion targets. If your VS Code `files.exclude` or `search.exclude` explicitly excludes build directories, that explicit setting is still respected.
 
 - `files.exclude`
 - `search.exclude`
@@ -99,3 +101,18 @@ Use `"internal"` to never invoke `fzf`.
 
 - **Workspace Path Completion: Rebuild Index**
 - **Workspace Path Completion: Show Index Stats**
+
+
+## Exclusion behavior
+
+The index always respects `workspacePathCompletion.exclude` and VS Code `files.exclude`.
+
+By default it **does not** apply `search.exclude`, because generated runtime files (for example files under Gradle `build/`) are often hidden from text search but still useful as path completions. To opt back into search exclusions:
+
+```json
+{
+  "workspacePathCompletion.useSearchExclude": true
+}
+```
+
+Changing this setting automatically rebuilds the index.

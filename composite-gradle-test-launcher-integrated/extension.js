@@ -2263,7 +2263,109 @@ function replayLaunchProperties(packages) {
   };
 }
 
-async function prepareReplayRuntimeDirectory(baseDirectory) {
+async function findWorkspaceReplayAdapterClass(className) {
+  const relativeClass = `${String(className || '').trim().replace(/\./g, '/')}.class`;
+  if (!relativeClass || relativeClass === '.class') return undefined;
+  const patterns = [
+    `**/build/classes/java/test/${relativeClass}`,
+    `**/build/classes/java/main/${relativeClass}`,
+    `**/build/classes/kotlin/test/${relativeClass}`,
+    `**/build/classes/kotlin/main/${relativeClass}`,
+    `**/target/test-classes/${relativeClass}`,
+    `**/target/classes/${relativeClass}`,
+    `**/out/test/classes/${relativeClass}`,
+    `**/out/production/classes/${relativeClass}`
+  ];
+  const matches = [];
+  for (const pattern of patterns) {
+    try {
+      for (const uri of await vscode.workspace.findFiles(pattern, null, 20)) {
+        if (!matches.some(existing => existing.fsPath === uri.fsPath)) matches.push(uri);
+      }
+    } catch (_) {}
+  }
+  if (!matches.length) return undefined;
+  if (matches.length > 1) {
+    const newest = matches
+      .map(uri => ({ uri, mtime: (() => { try { return fs.statSync(uri.fsPath).mtimeMs; } catch (_) { return 0; } })() }))
+      .sort((a, b) => b.mtime - a.mtime);
+    output?.appendLine(`[CGTL REPLAY] Adapter ${className} has ${matches.length} compiled candidates; using newest: ${newest[0].uri.fsPath}`);
+    return newest[0].uri.fsPath;
+  }
+  return matches[0].fsPath;
+}
+
+async function findWorkspaceReplayAdapterSource(className) {
+  const relativeSource = `${String(className || '').trim().replace(/\./g, '/')}.java`;
+  const patterns = [
+    `**/src/test/java/${relativeSource}`,
+    `**/src/main/java/${relativeSource}`
+  ];
+  for (const pattern of patterns) {
+    try {
+      const matches = await vscode.workspace.findFiles(pattern, null, 2);
+      if (matches.length) return matches[0].fsPath;
+    } catch (_) {}
+  }
+  return undefined;
+}
+
+async function packageWorkspaceReplayAdapters(baseDirectory, adapterClasses = flowStateAdapterClasses()) {
+  adapterClasses = [...new Set((adapterClasses || []).map(value => String(value || '').trim()).filter(Boolean))];
+  if (!adapterClasses.length) return { adapterClasspathTarget: undefined, adapterClasses: [] };
+
+  const classesRoot = path.join(baseDirectory, 'adapters', 'classes');
+  fs.rmSync(path.join(baseDirectory, 'adapters'), { recursive: true, force: true });
+  fs.mkdirSync(classesRoot, { recursive: true });
+
+  const missing = [];
+  const stale = [];
+  let copiedFiles = 0;
+
+  for (const className of adapterClasses) {
+    const compiled = await findWorkspaceReplayAdapterClass(className);
+    if (!compiled) {
+      missing.push(className);
+      continue;
+    }
+
+    const source = await findWorkspaceReplayAdapterSource(className);
+    if (source) {
+      try {
+        if (fs.statSync(source).mtimeMs > fs.statSync(compiled).mtimeMs + 1000) stale.push(className);
+      } catch (_) {}
+    }
+
+    const relativeClass = `${className.replace(/\./g, '/')}.class`;
+    const packageRelative = path.dirname(relativeClass);
+    const simpleName = path.basename(relativeClass, '.class');
+    const compiledDir = path.dirname(compiled);
+    const destinationDir = path.join(classesRoot, packageRelative);
+    fs.mkdirSync(destinationDir, { recursive: true });
+
+    let siblings = [];
+    try { siblings = fs.readdirSync(compiledDir); } catch (_) {}
+    const classFiles = siblings.filter(name => name === `${simpleName}.class` || (name.startsWith(`${simpleName}$`) && name.endsWith('.class')));
+    if (!classFiles.length) classFiles.push(path.basename(compiled));
+    for (const fileName of classFiles) {
+      fs.copyFileSync(path.join(compiledDir, fileName), path.join(destinationDir, fileName));
+      copiedFiles++;
+    }
+  }
+
+  if (missing.length || stale.length) {
+    fs.rmSync(path.join(baseDirectory, 'adapters'), { recursive: true, force: true });
+    const details = [];
+    if (missing.length) details.push(`not compiled: ${missing.join(', ')}`);
+    if (stale.length) details.push(`source is newer than compiled class: ${stale.join(', ')}`);
+    throw new Error(`Replay launch cannot package the configured workspace state adapters (${details.join('; ')}). Build the project/test classes (for example, gradle testClasses) and try again.`);
+  }
+
+  output?.appendLine(`[CGTL REPLAY] Packaged ${adapterClasses.length} workspace state adapter(s), ${copiedFiles} class file(s), into ${classesRoot}`);
+  return { adapterClasspathTarget: classesRoot, adapterClasses };
+}
+
+async function prepareReplayRuntimeDirectory(baseDirectory, adapterClasses = flowStateAdapterClasses()) {
   const settings = dependencyResolutionSettings();
   let byteBuddyJar = findByteBuddyJar(settings.byteBuddyVersion);
   if (!byteBuddyJar) {
@@ -2282,15 +2384,17 @@ async function prepareReplayRuntimeDirectory(baseDirectory) {
   const byteBuddyTarget = path.join(baseDirectory, path.basename(byteBuddyJar));
   fs.copyFileSync(agentSource, agentTarget);
   fs.copyFileSync(byteBuddyJar, byteBuddyTarget);
-  return { agentTarget, byteBuddyTarget };
+  const adapters = await packageWorkspaceReplayAdapters(baseDirectory, adapterClasses);
+  return { agentTarget, byteBuddyTarget, adapterClasspathTarget: adapters.adapterClasspathTarget, adapterClasses: adapters.adapterClasses };
 }
 
-function containerJavaToolOptions(props, byteBuddyName, hasSources = false) {
+function containerJavaToolOptions(props, byteBuddyName, hasSources = false, hasAdapters = false) {
   return [
     '-javaagent:/cgtl-replay/cgtl-flow-agent.jar',
     `-Xbootclasspath/a:/cgtl-replay/${byteBuddyName}`,
     `-Dcgtl.flow.byteBuddyJar=/cgtl-replay/${byteBuddyName}`,
     hasSources ? '-Dcgtl.flow.sourcesJar=/cgtl-replay/application-sources.jar' : '',
+    hasAdapters ? '-Dcgtl.flow.adapterClasspath=/cgtl-replay/adapters/classes' : '',
     '-Dcgtl.flow.maxEvents=200000',
     `-Dcgtl.flow.packages=${props.packages}`,
     `-Dcgtl.flow.excludes=${props.excludes}`,
@@ -2347,9 +2451,10 @@ async function generateContainerReplayCommand() {
   if (!folder) return;
 
   const runtimeDir = path.join(folder.fsPath, '.cgtl-replay', 'container-runtime');
-  const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
   const props = replayLaunchProperties(packages);
-  const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget));
+  const inheritedAdapters = props.adapters.split(',').map(v => v.trim()).filter(Boolean);
+  const runtime = await prepareReplayRuntimeDirectory(runtimeDir, inheritedAdapters);
+  const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), false, !!runtime.adapterClasspathTarget);
   const locationPick = await vscode.window.showQuickPick([
     { label: 'Container engine is on this machine', value: 'local', description: 'Use the container runtime host alias' },
     { label: 'Container engine is on another machine', value: 'remote', description: `Connect directly to ${connection.host}:${connection.port}` }
@@ -2420,33 +2525,17 @@ async function generateJarReplayLauncher() {
   });
   if (!saveUri) return;
 
-  const settings = dependencyResolutionSettings();
-  let byteBuddyJar = findByteBuddyJar(settings.byteBuddyVersion);
-  if (!byteBuddyJar) {
-    const selected = await vscode.window.showOpenDialog({
-      title: `Select byte-buddy-${settings.byteBuddyVersion}.jar`,
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      filters: { 'Java archives': ['jar'] }
-    });
-    if (!selected?.length) throw new Error(`Byte Buddy ${settings.byteBuddyVersion} was not found in the Gradle or Maven cache.`);
-    byteBuddyJar = selected[0].fsPath;
-  }
-
   const runtimeDir = path.join(path.dirname(saveUri.fsPath), '.cgtl-replay');
   const capturesDir = path.join(runtimeDir, 'captures');
   fs.mkdirSync(capturesDir, { recursive: true });
-  const agentSource = path.join(extensionContext.extensionPath, 'resources', 'cgtl-flow-agent.jar');
-  if (!fs.existsSync(agentSource)) throw new Error('The packaged Replay agent could not be found.');
-  const agentTarget = path.join(runtimeDir, 'cgtl-flow-agent.jar');
-  const byteBuddyTarget = path.join(runtimeDir, path.basename(byteBuddyJar));
-  fs.copyFileSync(agentSource, agentTarget);
-  fs.copyFileSync(byteBuddyJar, byteBuddyTarget);
 
   const config = vscode.workspace.getConfiguration('compositeGradleTests');
   const excludes = flowEncodedExclusions().join(',');
-  const adapters = flowStateAdapterClasses().join(',');
+  const adapterClasses = flowStateAdapterClasses();
+  const adapters = adapterClasses.join(',');
+  const runtime = await prepareReplayRuntimeDirectory(runtimeDir, adapterClasses);
+  const agentTarget = runtime.agentTarget;
+  const byteBuddyTarget = runtime.byteBuddyTarget;
   const capturePoints = replayCapturePoints().join(',');
   const props = {
     packages,
@@ -2476,6 +2565,7 @@ async function generateJarReplayLauncher() {
       + `$CaptureTmp = \"$Capture.tmp\"\r\n`
       + `$Agent = Join-Path $Runtime 'cgtl-flow-agent.jar'\r\n`
       + `$ByteBuddy = Join-Path $Runtime ${quotePowerShellLiteral(path.basename(byteBuddyTarget))}\r\n`
+      + (runtime.adapterClasspathTarget ? `$Adapters = Join-Path $Runtime 'adapters/classes'\r\n` : '')
       + `$Target = Join-Path $Root ${quotePowerShellLiteral(targetRef)}\r\n`
       + `New-Item -ItemType Directory -Force -Path $Captures | Out-Null\r\n`
       + `$Jvm = @(\r\n`
@@ -2483,6 +2573,7 @@ async function generateJarReplayLauncher() {
       + `  \"-Xbootclasspath/a:$ByteBuddy\",\r\n`
       + `  \"-Dcgtl.flow.output=$CaptureTmp\",\r\n`
       + `  \"-Dcgtl.flow.byteBuddyJar=$ByteBuddy\",\r\n`
+      + (runtime.adapterClasspathTarget ? `  \"-Dcgtl.flow.adapterClasspath=$Adapters\",\r\n` : '')
       + `  ${quotePowerShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)},\r\n`
       + `  ${quotePowerShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)},\r\n`
       + `  ${quotePowerShellLiteral(`-Dcgtl.flow.stateAdapters=${props.adapters}`)},\r\n`
@@ -2507,9 +2598,11 @@ async function generateJarReplayLauncher() {
       + `RUNTIME=\"$ROOT/.cgtl-replay\"\nCAPTURES=\"$RUNTIME/captures\"\nmkdir -p \"$CAPTURES\"\n`
       + `STAMP=\"$(date +%Y%m%d-%H%M%S)-$$\"\nCAPTURE=\"$CAPTURES/replay-$STAMP.jsonl\"\nCAPTURE_TMP=\"$CAPTURE.tmp\"\n`
       + `AGENT=\"$RUNTIME/cgtl-flow-agent.jar\"\nBYTE_BUDDY=\"$RUNTIME/${path.basename(byteBuddyTarget)}\"\n`
+      + (runtime.adapterClasspathTarget ? `ADAPTERS=\"$RUNTIME/adapters/classes\"\n` : '')
       + `TARGET=${quoteShellLiteral(targetRef)}\nif [[ \"$TARGET\" != /* ]]; then TARGET=\"$ROOT/$TARGET\"; fi\n`
       + `echo \"Replay capture: $CAPTURE\"\n`
       + `set +e\njava \"-javaagent:$AGENT\" \"-Xbootclasspath/a:$BYTE_BUDDY\" \"-Dcgtl.flow.output=$CAPTURE_TMP\" \"-Dcgtl.flow.byteBuddyJar=$BYTE_BUDDY\" `
+      + (runtime.adapterClasspathTarget ? `\"-Dcgtl.flow.adapterClasspath=$ADAPTERS\" ` : '')
       + `${quoteShellLiteral(`-Dcgtl.flow.packages=${props.packages}`)} ${quoteShellLiteral(`-Dcgtl.flow.excludes=${props.excludes}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.stateAdapters=${props.adapters}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoints=${props.capturePoints}`)} `
       + `${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxDepth=${props.captureDepth}`)} ${quoteShellLiteral(`-Dcgtl.flow.capturePoint.maxFields=${props.captureFields}`)} `
@@ -3220,6 +3313,7 @@ function replayJavaOptions(profile, runtime, capturePath) {
     `-Dcgtl.flow.byteBuddyJar=${runtime.byteBuddyTarget}`,
     runtime.applicationTarget ? `-Dcgtl.flow.applicationJar=${runtime.applicationTarget}` : '',
     runtime.sourcesTarget ? `-Dcgtl.flow.sourcesJar=${runtime.sourcesTarget}` : '',
+    runtime.adapterClasspathTarget ? `-Dcgtl.flow.adapterClasspath=${runtime.adapterClasspathTarget}` : '',
     `-Dcgtl.flow.packages=${props.packages}`,
     `-Dcgtl.flow.excludes=${props.excludes}`,
     `-Dcgtl.flow.stateAdapters=${props.adapters}`,
@@ -3243,7 +3337,9 @@ async function buildReplayManagerCommand(profile, options = {}) {
 
   if (profile.type === 'jar') {
     const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'runtime');
-    const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
+    const props = replayLaunchPropertiesForProfile(profile);
+    const inheritedAdapters = props.adapters.split(',').map(v => v.trim()).filter(Boolean);
+    const runtime = await prepareReplayRuntimeDirectory(runtimeDir, inheritedAdapters);
     const receiverHost = replayReceiverHostForExecution(connection, 'jar', location);
     const sourcesJar = replayProfileSourcesJar(profile);
     const javaOptions = replayJavaOptions(profile, { ...runtime, applicationTarget: profile.jarPath, sourcesTarget: sourcesJar });
@@ -3256,10 +3352,11 @@ async function buildReplayManagerCommand(profile, options = {}) {
 
   if (profile.type === 'container') {
     const runtimeDir = options.runtimeDirectory || path.join(replayManagerWorkspaceRoot(), '.cgtl-replay', 'container-runtime');
-    const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
     const props = replayLaunchPropertiesForProfile(profile);
+    const inheritedAdapters = props.adapters.split(',').map(v => v.trim()).filter(Boolean);
+    const runtime = await prepareReplayRuntimeDirectory(runtimeDir, inheritedAdapters);
     const runtimeSources = copyReplaySourcesIntoRuntime(profile, runtimeDir);
-    const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
+    const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources, !!runtime.adapterClasspathTarget);
     const receiverHost = replayReceiverHostForExecution(connection, profile.engine || 'docker', location);
     const name = `cgtl-replay-${profile.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 40)}`;
     const args = [
@@ -3363,9 +3460,10 @@ async function generateReplayManagerScript(arg) {
   const scriptPath = picked.fsPath;
   const scriptDir = path.dirname(scriptPath);
   const runtimeDir = path.join(scriptDir, 'replay-runtime');
-  const runtime = await prepareReplayRuntimeDirectory(runtimeDir);
-  const runtimeSources = copyReplaySourcesIntoRuntime(profile, runtimeDir);
   const props = replayLaunchPropertiesForProfile(profile);
+  const inheritedAdapters = props.adapters.split(',').map(v => v.trim()).filter(Boolean);
+  const runtime = await prepareReplayRuntimeDirectory(runtimeDir, inheritedAdapters);
+  const runtimeSources = copyReplaySourcesIntoRuntime(profile, runtimeDir);
   const receiverHost = replayReceiverHostForExecution(connection, profile.type === 'container' ? (profile.engine || 'docker') : 'jar', where.value);
   let contents;
 
@@ -3374,17 +3472,18 @@ async function generateReplayManagerScript(arg) {
     if (profile.type === 'jar') {
       const jarName = path.basename(profile.jarPath);
       const jarExpression = where.value === 'remote' ? `Join-Path $Root ${quotePowerShellLiteral(jarName)}` : quotePowerShellLiteral(profile.jarPath);
-      const options = replayJavaOptions(profile, { agentTarget: '$Agent', byteBuddyTarget: '$ByteBuddy', applicationTarget: '$Jar', sourcesTarget: runtimeSources ? '$Sources' : undefined });
+      const options = replayJavaOptions(profile, { agentTarget: '$Agent', byteBuddyTarget: '$ByteBuddy', applicationTarget: '$Jar', sourcesTarget: runtimeSources ? '$Sources' : undefined, adapterClasspathTarget: runtime.adapterClasspathTarget ? '$Adapters' : undefined });
       const optionText = options.map(opt => {
         if (opt.startsWith('-javaagent:$Agent')) return '"-javaagent:$Agent"';
         if (opt.startsWith('-Xbootclasspath/a:$ByteBuddy')) return '"-Xbootclasspath/a:$ByteBuddy"';
         if (opt.startsWith('-Dcgtl.flow.byteBuddyJar=$ByteBuddy')) return '"-Dcgtl.flow.byteBuddyJar=$ByteBuddy"';
-        if (opt.includes('$Jar') || opt.includes('$Sources')) return `"${opt}"`;
+        if (opt.includes('$Jar') || opt.includes('$Sources') || opt.includes('$Adapters')) return `"${opt}"`;
         return quotePowerShellLiteral(opt);
       }).join(' ');
-      contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Agent = Join-Path $Root 'replay-runtime/cgtl-flow-agent.jar'\n$ByteBuddy = Join-Path $Root ${quotePowerShellLiteral(`replay-runtime/${path.basename(runtime.byteBuddyTarget)}`)}\n${runtimeSources ? "$Sources = Join-Path $Root 'replay-runtime/application-sources.jar'\n" : ''}$Jar = ${jarExpression}\nif (-not (Test-Path $Jar)) { throw "Place ${jarName} next to this script or update \`$Jar." }\n${envLines}\njava ${optionText} -jar $Jar ${(profile.arguments || []).map(quotePowerShellLiteral).join(' ')}\nexit $LASTEXITCODE\n`;
+      const adapterComment = inheritedAdapters.length ? `# Inherited workspace Replay adapters: ${inheritedAdapters.join(', ')}\n` : '# Inherited workspace Replay adapters: none\n';
+      contents = `# Generated by CGTL Replay Manager\n${adapterComment}$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Agent = Join-Path $Root 'replay-runtime/cgtl-flow-agent.jar'\n$ByteBuddy = Join-Path $Root ${quotePowerShellLiteral(`replay-runtime/${path.basename(runtime.byteBuddyTarget)}`)}\n${runtimeSources ? "$Sources = Join-Path $Root 'replay-runtime/application-sources.jar'\n" : ''}${runtime.adapterClasspathTarget ? "$Adapters = Join-Path $Root 'replay-runtime/adapters/classes'\n" : ''}$Jar = ${jarExpression}\nif (-not (Test-Path $Jar)) { throw "Place ${jarName} next to this script or update \`$Jar." }\n${runtime.adapterClasspathTarget ? 'if (-not (Test-Path $Adapters)) { throw \"Replay adapter classpath was not packaged: $Adapters\" }\n' : ''}${envLines}\njava ${optionText} -jar $Jar ${(profile.arguments || []).map(quotePowerShellLiteral).join(' ')}\nexit $LASTEXITCODE\n`;
     } else {
-      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources, !!runtime.adapterClasspathTarget);
       const addHost = where.value === 'local' && profile.engine === 'docker' ? "  '--add-host=host.docker.internal:host-gateway'\n" : '';
       const extra = (profile.arguments || []).map(v => `  ${quotePowerShellLiteral(v)}\n`).join('');
       contents = `# Generated by CGTL Replay Manager\n$ErrorActionPreference = 'Stop'\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n$Runtime = Join-Path $Root 'replay-runtime'\n${envLines}\n$RunArgs = @(\n  'run'\n  '--rm'\n${addHost}${extra}  '-v'\n  "${'$'}{Runtime}:/cgtl-replay:ro"\n  '-e'\n  "CGTL_REPLAY_HOST=${receiverHost}"\n  '-e'\n  "CGTL_REPLAY_PORT=${connection.port}"\n  '-e'\n  "CGTL_REPLAY_TOKEN=${connection.token}"\n  '-e'\n  ${quotePowerShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)}\n  ${quotePowerShellLiteral(profile.image)}\n)\n& ${profile.engine || 'docker'} @RunArgs\nexit $LASTEXITCODE\n`;
@@ -3394,14 +3493,14 @@ async function generateReplayManagerScript(arg) {
     if (profile.type === 'jar') {
       const jarName = path.basename(profile.jarPath);
       const jarShell = where.value === 'remote' ? `\"$ROOT/${jarName}\"` : quoteShellLiteral(profile.jarPath);
-      const runtimeShell = { agentTarget: '$ROOT/replay-runtime/cgtl-flow-agent.jar', byteBuddyTarget: `$ROOT/replay-runtime/${path.basename(runtime.byteBuddyTarget)}`, applicationTarget: '$JAR', sourcesTarget: runtimeSources ? '$ROOT/replay-runtime/application-sources.jar' : undefined };
+      const runtimeShell = { agentTarget: '$ROOT/replay-runtime/cgtl-flow-agent.jar', byteBuddyTarget: `$ROOT/replay-runtime/${path.basename(runtime.byteBuddyTarget)}`, applicationTarget: '$JAR', sourcesTarget: runtimeSources ? '$ROOT/replay-runtime/application-sources.jar' : undefined, adapterClasspathTarget: runtime.adapterClasspathTarget ? '$ROOT/replay-runtime/adapters/classes' : undefined };
       const options = replayJavaOptions(profile, runtimeShell).map(opt => {
         const expanded = opt.replace(/\$ROOT/g, '"$ROOT"');
         return expanded.includes('$JAR') ? `"${expanded}"` : expanded;
       });
       contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nJAR=${jarShell}\nif [[ ! -f "$JAR" ]]; then echo "Place ${jarName} next to this script or update JAR." >&2; exit 2; fi\n${envLines}\njava ${options.join(' ')} -jar "$JAR" ${(profile.arguments || []).map(quoteShellLiteral).join(' ')}\n`;
     } else {
-      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources);
+      const javaOptions = containerJavaToolOptions(props, path.basename(runtime.byteBuddyTarget), !!runtimeSources, !!runtime.adapterClasspathTarget);
       const addHost = where.value === 'local' && profile.engine === 'docker' ? ' --add-host=host.docker.internal:host-gateway' : '';
       contents = `#!/usr/bin/env bash\nset -euo pipefail\nROOT="$(cd "$(dirname "$0")" && pwd)"\nRUNTIME="$ROOT/replay-runtime"\n${envLines}\n${profile.engine || 'docker'} run --rm${addHost} ${(profile.arguments || []).map(quoteShellLiteral).join(' ')} \\\n  -v "$RUNTIME:/cgtl-replay:ro" \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_HOST=${receiverHost}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_PORT=${connection.port}`)} \\\n  -e ${quoteShellLiteral(`CGTL_REPLAY_TOKEN=${connection.token}`)} \\\n  -e ${quoteShellLiteral(`JAVA_TOOL_OPTIONS=${javaOptions}`)} \\\n  ${quoteShellLiteral(profile.image)}\n`;
     }

@@ -5,6 +5,7 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.time.ZoneId;
@@ -166,6 +167,8 @@ final class SnapshotAdapters {
     return null;
   }
 
+  private static final ConcurrentHashMap<String, ClassLoader> ADAPTER_CLASSPATH_LOADERS = new ConcurrentHashMap<>();
+
   private static Object customAdapter(String className, Class<?> valueType) {
     String loaderKey = className + "@" + System.identityHashCode(Thread.currentThread().getContextClassLoader()) + ":" + System.identityHashCode(valueType.getClassLoader());
     return CUSTOM.computeIfAbsent(loaderKey, key -> {
@@ -176,8 +179,33 @@ final class SnapshotAdapters {
       for (ClassLoader loader : loaders) {
         if (loader == null) continue;
         try { return Class.forName(className, true, loader); } catch (Throwable ignored) {}
+        ClassLoader packaged = packagedAdapterClassLoader(loader);
+        if (packaged != null) {
+          try { return Class.forName(className, true, packaged); } catch (Throwable ignored) {}
+        }
       }
       return NONE;
+    });
+  }
+
+  private static ClassLoader packagedAdapterClassLoader(ClassLoader parent) {
+    String raw = System.getProperty("cgtl.flow.adapterClasspath", "").trim();
+    if (raw.isEmpty()) return null;
+    String key = raw + "@" + System.identityHashCode(parent);
+    return ADAPTER_CLASSPATH_LOADERS.computeIfAbsent(key, ignored -> {
+      try {
+        List<URL> urls = new ArrayList<>();
+        for (String token : raw.split(Pattern.quote(File.pathSeparator))) {
+          String entry = token.trim();
+          if (entry.isEmpty()) continue;
+          urls.add(Path.of(entry).toAbsolutePath().normalize().toUri().toURL());
+        }
+        if (urls.isEmpty()) return parent;
+        return new URLClassLoader(urls.toArray(URL[]::new), parent);
+      } catch (Throwable error) {
+        report("adapter-classpath:" + raw, error);
+        return parent;
+      }
     });
   }
 

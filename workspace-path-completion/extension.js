@@ -80,7 +80,10 @@ function flattenExcludeObject(value, prefix = '') {
 function currentExcludePatterns() {
   const own = cfg().get('exclude', []);
   const filesExclude = flattenExcludeObject(vscode.workspace.getConfiguration('files').get('exclude', {}));
-  const searchExclude = flattenExcludeObject(vscode.workspace.getConfiguration('search').get('exclude', {}));
+  const useSearchExclude = cfg().get('useSearchExclude', false);
+  const searchExclude = useSearchExclude
+    ? flattenExcludeObject(vscode.workspace.getConfiguration('search').get('exclude', {}))
+    : [];
   return [...own, ...filesExclude, ...searchExclude];
 }
 
@@ -447,9 +450,13 @@ function compactParentPath(entry, maxChars = 44) {
 
 function completionPresentation(candidate) {
   if (candidate.semantic === 'Absolute') {
+    // Keep the natural path reading order while avoiding the useless long prefix:
+    //   …/nearest/parent/file.ext
+    // The full absolute path remains candidate.text and is what gets inserted.
+    const parent = compactParentPath(candidate.entry);
     return {
-      label: candidate.entry.basename,
-      labelDetail: compactParentPath(candidate.entry),
+      label: `${parent}${candidate.entry.basename}`,
+      labelDetail: '',
       description: 'Absolute'
     };
   }
@@ -644,7 +651,7 @@ function activate(context) {
     if (
       e.affectsConfiguration('workspacePathCompletion') ||
       e.affectsConfiguration('files.exclude') ||
-      e.affectsConfiguration('search.exclude')
+      (cfg().get('useSearchExclude', false) && e.affectsConfiguration('search.exclude'))
     ) {
       fzfAvailable = undefined;
       scheduleRebuild('configuration', 100);
