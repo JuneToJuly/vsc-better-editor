@@ -2543,6 +2543,39 @@ async function importReplayCapture() {
   return importReplayCaptureFile(selected[0].fsPath, { auto: false, open: true });
 }
 
+const replayMissingSourceNotifications = new Set();
+
+function replayMissingExecutedSources(flowEvents) {
+  const missing = new Map();
+  for (const event of flowEvents || []) {
+    if (event?.event !== 'line' || event?.sourcePath) continue;
+    const className = normalizeFlowClassName(event?.className) || String(event?.className || '<unknown class>');
+    const sourceFile = String(event?.sourceFile || `${className.split('.').pop()}.java`);
+    const entry = missing.get(className) || { className, sourceFile, eventCount: 0 };
+    entry.eventCount++;
+    missing.set(className, entry);
+  }
+  return [...missing.values()].sort((a, b) => a.className.localeCompare(b.className));
+}
+
+async function reportReplayMissingSources(capturePath, missing, options = {}) {
+  const count = missing.length;
+  const sample = missing.slice(0, 5).map(item => item.className).join(', ');
+  output?.appendLine(`[CGTL SOURCES] REPLAY BLOCKED: ${count} executed class(es) have no resolvable source. Capture preserved at ${capturePath}`);
+  for (const item of missing) output?.appendLine(`[CGTL SOURCES]   missing ${item.className} (${item.sourceFile}, ${item.eventCount} line event(s))`);
+  output?.appendLine('[CGTL SOURCES] Replay was not opened because source is required for trustworthy source-level Replay. Provide the matching Replay/source JAR or open the matching source workspace, then import the capture again.');
+
+  const key = `${normalizePath(capturePath)}:${missing.map(item => item.className).join('|')}`;
+  if (options.auto && replayMissingSourceNotifications.has(key)) return;
+  replayMissingSourceNotifications.add(key);
+  const detail = sample ? ` Missing: ${sample}${count > 5 ? ` and ${count - 5} more` : ''}.` : '';
+  const action = await vscode.window.showErrorMessage(
+    `Replay not opened: required source code is unavailable for ${count} executed class${count === 1 ? '' : 'es'}.${detail} The capture was preserved. Provide the matching source JAR or matching workspace source, then import it again.`,
+    'Show Replay Output'
+  );
+  if (action === 'Show Replay Output') output?.show(true);
+}
+
 async function importReplayCaptureFile(capturePath, options = {}) {
   const absolutePath = path.resolve(capturePath);
   if (!fs.existsSync(absolutePath)) throw new Error(`Replay capture no longer exists: ${absolutePath}`);
@@ -2560,6 +2593,11 @@ async function importReplayCaptureFile(capturePath, options = {}) {
     : undefined;
   const profiler = {};
   const flowEvents = await enrichFlowEvents(rawEvents, preferredSourcePath, profiler, options.sourceRoot ? [options.sourceRoot] : []);
+  const missingSources = replayMissingExecutedSources(flowEvents);
+  if (missingSources.length) {
+    await reportReplayMissingSources(absolutePath, missingSources, options);
+    return undefined;
+  }
   const executedCode = await executedCodeFromFlow(flowEvents, preferredSourcePath);
   const counts = rawEvents.reduce((acc, event) => {
     const kind = String(event.event || 'unknown');
